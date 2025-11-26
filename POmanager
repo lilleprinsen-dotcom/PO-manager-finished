@@ -7592,6 +7592,8 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Integrity_Checker' ) ) {
                                         lpr_allocator_remove_po_allocations_from_orders( (int) $po_id );
                                 }
                         }
+
+                        self::reconcile_orders();
                 }
 
                 /**
@@ -7649,6 +7651,202 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Integrity_Checker' ) ) {
                         }
 
                         return in_array( $po->post_status, $live_statuses, true );
+                }
+
+                /**
+                 * Build the list of allowed order statuses for allocation (without wc- prefix).
+                 */
+                protected static function allowed_order_statuses(): array {
+                        $settings = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array( 'order_statuses' => array( 'processing', 'on-hold' ) );
+                        $allowed  = array();
+
+                        foreach ( (array) ( $settings['order_statuses'] ?? array() ) as $status ) {
+                                $normalized   = sanitize_key( (string) $status );
+                                $allowed[]    = preg_replace( '/^wc-/', '', $normalized );
+                        }
+
+                        return array_values( array_unique( array_filter( $allowed ) ) );
+                }
+
+                /**
+                 * Release allocations attached to cancelled/invalid orders and trim quantities after edits.
+                 */
+                protected static function reconcile_orders(): void {
+                        if ( ! function_exists( 'wc_get_order' ) ) {
+                                return;
+                        }
+
+                        $rows = self::get_order_item_allocations();
+                        if ( empty( $rows ) ) {
+                                return;
+                        }
+
+                        $allowed_statuses = self::allowed_order_statuses();
+                        $meta_key         = ORDER_ITEM_META_ALLOCATIONS;
+
+                        $orders_to_refresh = array();
+
+                        foreach ( $rows as $row ) {
+                                $order_id = isset( $row['order_id'] ) ? absint( $row['order_id'] ) : 0;
+                                $item_id  = isset( $row['order_item_id'] ) ? absint( $row['order_item_id'] ) : 0;
+                                if ( $order_id <= 0 || $item_id <= 0 ) {
+                                        continue;
+                                }
+
+                                $order = wc_get_order( $order_id );
+                                if ( ! ( $order instanceof \WC_Order ) ) {
+                                        continue;
+                                }
+
+                                $item = $order->get_item( $item_id );
+                                if ( ! ( $item instanceof \WC_Order_Item_Product ) ) {
+                                        continue;
+                                }
+
+                                if ( method_exists( $item, 'read_meta_data' ) ) {
+                                        $item->read_meta_data( true );
+                                }
+
+                                $allocs = $item->get_meta( $meta_key, true );
+                                if ( ! is_array( $allocs ) || empty( $allocs ) ) {
+                                        continue;
+                                }
+
+                                $order_status = $order->get_status();
+                                $order_status = is_string( $order_status ) ? $order_status : '';
+                                $is_live      = in_array( $order_status, $allowed_statuses, true );
+
+                                $changed = false;
+
+                                if ( ! $is_live ) {
+                                        foreach ( $allocs as &$alloc_row ) {
+                                                $status = isset( $alloc_row['status'] ) ? sanitize_key( (string) $alloc_row['status'] ) : 'reserved';
+                                                $qty    = isset( $alloc_row['qty_allocated'] ) ? max( 0, (int) $alloc_row['qty_allocated'] ) : 0;
+                                                if ( 'released' === $status || $qty <= 0 ) {
+                                                        continue;
+                                                }
+                                                lpr_allocator_touch_allocation_status( $alloc_row, 'released' );
+                                                $changed = true;
+                                        }
+                                        unset( $alloc_row );
+                                } else {
+                                        $desired = function_exists( __NAMESPACE__ . '\\lpr_allocator_calc_backorder_desired' ) ? lpr_allocator_calc_backorder_desired( $item ) : max( 0, (int) $item->get_quantity() );
+                                        $cap     = min( max( 0, (int) $item->get_quantity() ), max( 0, (int) $desired ) );
+
+                                        $active_total = 0;
+                                        foreach ( $allocs as $alloc_row ) {
+                                                $status = isset( $alloc_row['status'] ) ? sanitize_key( (string) $alloc_row['status'] ) : 'reserved';
+                                                if ( 'released' === $status ) {
+                                                        continue;
+                                                }
+                                                $active_total += isset( $alloc_row['qty_allocated'] ) ? max( 0, (int) $alloc_row['qty_allocated'] ) : 0;
+                                        }
+
+                                        $over = max( 0, $active_total - $cap );
+                                        if ( $over > 0 ) {
+                                                $rows_to_release = array();
+                                                foreach ( $allocs as $idx => $alloc_row ) {
+                                                        $status = isset( $alloc_row['status'] ) ? sanitize_key( (string) $alloc_row['status'] ) : 'reserved';
+                                                        $qty    = isset( $alloc_row['qty_allocated'] ) ? max( 0, (int) $alloc_row['qty_allocated'] ) : 0;
+                                                        if ( 'released' === $status || $qty <= 0 ) {
+                                                                continue;
+                                                        }
+                                                        $rows_to_release[] = array(
+                                                                'idx'          => (int) $idx,
+                                                                'qty'          => $qty,
+                                                                'allocated_at' => isset( $alloc_row['allocated_at'] ) ? (string) $alloc_row['allocated_at'] : '',
+                                                                'eta'          => isset( $alloc_row['eta'] ) ? (string) $alloc_row['eta'] : '',
+                                                        );
+                                                }
+
+                                                usort(
+                                                        $rows_to_release,
+                                                        static function ( $a, $b ) {
+                                                                $a_time = isset( $a['allocated_at'] ) ? (string) $a['allocated_at'] : '';
+                                                                $b_time = isset( $b['allocated_at'] ) ? (string) $b['allocated_at'] : '';
+                                                                if ( $a_time !== $b_time ) {
+                                                                        return lpr_allocator_compare_dates( $b_time, $a_time );
+                                                                }
+                                                                $a_eta = isset( $a['eta'] ) ? (string) $a['eta'] : '';
+                                                                $b_eta = isset( $b['eta'] ) ? (string) $b['eta'] : '';
+                                                                return lpr_allocator_compare_dates( $b_eta, $a_eta );
+                                                        }
+                                                );
+
+                                                foreach ( $rows_to_release as $release_row ) {
+                                                        if ( $over <= 0 ) {
+                                                                break;
+                                                        }
+                                                        $idx = (int) $release_row['idx'];
+                                                        if ( ! isset( $allocs[ $idx ] ) ) {
+                                                                continue;
+                                                        }
+
+                                                        $current_qty = isset( $allocs[ $idx ]['qty_allocated'] ) ? max( 0, (int) $allocs[ $idx ]['qty_allocated'] ) : 0;
+                                                        if ( $current_qty <= 0 ) {
+                                                                continue;
+                                                        }
+
+                                                        $release_qty = min( $current_qty, $over );
+                                                        if ( $release_qty >= $current_qty ) {
+                                                                lpr_allocator_touch_allocation_status( $allocs[ $idx ], 'released' );
+                                                        } else {
+                                                                $allocs[ $idx ]['qty_allocated'] = $current_qty - $release_qty;
+                                                        }
+
+                                                        $over    -= $release_qty;
+                                                        $changed = true;
+                                                }
+                                        }
+                                }
+
+                                if ( ! $changed ) {
+                                        continue;
+                                }
+
+                                $item->update_meta_data( $meta_key, array_values( $allocs ) );
+                                $item->save();
+                                $orders_to_refresh[ $order_id ] = true;
+                        }
+
+                        if ( empty( $orders_to_refresh ) ) {
+                                return;
+                        }
+
+                        foreach ( array_keys( $orders_to_refresh ) as $oid ) {
+                                if ( function_exists( __NAMESPACE__ . '\\lpr_allocator_reapply_po_allocations_for_order' ) ) {
+                                        lpr_allocator_reapply_po_allocations_for_order( (int) $oid );
+                                }
+                                if ( class_exists( __NAMESPACE__ . '\ETA' ) ) {
+                                        ETA::update_line_eta( (int) $oid );
+                                }
+                        }
+                }
+
+                /**
+                 * Get order item rows containing allocations via direct SQL for performance.
+                 */
+                protected static function get_order_item_allocations(): array {
+                        global $wpdb;
+
+                        if ( ! ( $wpdb instanceof \wpdb ) ) {
+                                return array();
+                        }
+
+                        $meta_table  = $wpdb->prefix . 'woocommerce_order_itemmeta';
+                        $items_table = $wpdb->prefix . 'woocommerce_order_items';
+
+                        $sql = $wpdb->prepare(
+                                "SELECT im.order_item_id, oi.order_id, im.meta_value\n"
+                                . "FROM {$items_table} oi\n"
+                                . "INNER JOIN {$meta_table} im ON oi.order_item_id = im.order_item_id\n"
+                                . "WHERE im.meta_key = %s",
+                                ORDER_ITEM_META_ALLOCATIONS
+                        );
+
+                        $results = $wpdb->get_results( $sql, ARRAY_A );
+
+                        return is_array( $results ) ? $results : array();
                 }
         }
 }
