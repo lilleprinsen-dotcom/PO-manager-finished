@@ -70,68 +70,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
 	/**
 	 * Settings storage & helpers.
 	 */
-	class Settings {
-
-                /**
-                 * Supported customer-facing languages.
-                 */
-                protected static function sanitize_language( $language ): string {
-                        $language = is_string( $language ) ? strtolower( trim( $language ) ) : '';
-
-                        return in_array( $language, array( 'en', 'no' ), true ) ? $language : 'en';
-                }
-
-                /**
-                 * Customer-facing default strings for a given language.
-                 */
-                protected static function localized_customer_defaults( string $language ): array {
-                        $language = self::sanitize_language( $language );
-
-                        $map = array(
-                                'en' => array(
-                                        'frontend_notice_template'      => __( '%qty% units expected (ETA %eta%)', 'lpr-backorder-allocator' ),
-                                        'frontend_cart_notice_template' => __( 'Next free stock: %qty% units expected (ETA %eta%)', 'lpr-backorder-allocator' ),
-                                        'eta_email_subject'             => __( 'Your order ETA has been updated', 'lpr-backorder-allocator' ),
-                                        'eta_email_intro'               => __( 'We’ve updated the expected arrival for the items below:', 'lpr-backorder-allocator' ),
-                                ),
-                                'no' => array(
-                                        'frontend_notice_template'      => __( '%qty% enheter forventes (ETA %eta%)', 'lpr-backorder-allocator' ),
-                                        'frontend_cart_notice_template' => __( 'Neste ledige lager: %qty% enheter forventes (ETA %eta%)', 'lpr-backorder-allocator' ),
-                                        'eta_email_subject'             => __( 'Leveringstid for bestillingen din er oppdatert', 'lpr-backorder-allocator' ),
-                                        'eta_email_intro'               => __( 'Vi har oppdatert forventet levering for varene nedenfor:', 'lpr-backorder-allocator' ),
-                                ),
-                        );
-
-                        return $map[ $language ];
-                }
-
-                /**
-                 * Default settings for a specific language.
-                 */
-                public static function defaults_for_language( string $language ): array {
-                        $language   = self::sanitize_language( $language );
-                        $localized  = self::localized_customer_defaults( $language );
-
-                        return array(
-                                'language'              => $language,
-                                'order_statuses'        => array( 'processing', 'on-hold' ),
-                                'inform_customer_eta'   => false,
-                                'frontend_extra_pool'   => false,
-                                'frontend_notice_emoji' => true,
-                                'frontend_notice_template'      => $localized['frontend_notice_template'],
-                                'frontend_notice_color'         => '#2f855a',
-                                'frontend_cart_notice_template' => $localized['frontend_cart_notice_template'],
-                                'frontend_refresh_interval'     => 900,
-                                'auto_allocation_interval'      => 0,
-                                'brand_logo_url'        => '',
-                                'brand_primary_color'   => '#1a1a1a',
-                                'brand_support_email'   => '',
-                                'brand_support_phone'   => '',
-                                'email_footer_text_no'  => '',
-                                'eta_email_subject'     => $localized['eta_email_subject'],
-                                'eta_email_intro'       => $localized['eta_email_intro'],
-                        );
-                }
+        class Settings {
 
                 /**
                  * Default settings.
@@ -139,7 +78,39 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                  * @return array
                  */
                 public static function defaults(): array {
-                        return self::defaults_for_language( 'en' );
+                        return array(
+                                'order_statuses'        => array( 'processing', 'on-hold' ),
+                                'inform_customer_eta'   => false,
+                                'frontend_extra_pool'   => false,
+                                'frontend_notice_emoji' => true,
+                                'frontend_notice_template'      => __( '%qty% units expected (ETA %eta%)', 'lpr-backorder-allocator' ),
+                                'frontend_notice_color'         => '#2f855a',
+                                'frontend_cart_notice_template' => __( 'Next free stock: %qty% units expected (ETA %eta%)', 'lpr-backorder-allocator' ),
+                                'frontend_refresh_interval'     => 900,
+                                'auto_allocation_interval'      => 0,
+                                'brand_logo_url'        => '',
+                                'brand_primary_color'   => '#1a1a1a',
+                                'brand_support_email'   => '',
+                                'brand_support_phone'   => '',
+                                'email_footer_text_no'  => '',
+                                'eta_email_subject'     => __( 'Your order ETA has been updated', 'lpr-backorder-allocator' ),
+                                'eta_email_intro'       => __( 'We’ve updated the expected arrival for the items below:', 'lpr-backorder-allocator' ),
+                                'email_progress_heading'           => __( 'Order progress', 'lpr-backorder-allocator' ),
+                                'email_progress_subheading'        => __( 'A quick view of where your order stands.', 'lpr-backorder-allocator' ),
+                                'email_progress_complete_label'    => __( '%complete%% complete', 'lpr-backorder-allocator' ),
+                                'email_status_label_order_placed'  => __( 'Order placed', 'lpr-backorder-allocator' ),
+                                'email_status_label_po_allocated'  => __( 'PO allocated', 'lpr-backorder-allocator' ),
+                                'email_status_label_eta_received'  => __( 'ETA received', 'lpr-backorder-allocator' ),
+                                'email_status_label_delivery'      => __( 'Estimated delivery', 'lpr-backorder-allocator' ),
+                                'email_status_done_label'          => __( 'Completed', 'lpr-backorder-allocator' ),
+                                'email_status_pending_label'       => __( 'Pending', 'lpr-backorder-allocator' ),
+                                'email_updated_heading'            => __( 'Updated items', 'lpr-backorder-allocator' ),
+                                'email_overview_heading'           => __( 'Backordered items', 'lpr-backorder-allocator' ),
+                                'email_table_heading_item'         => __( 'Item', 'lpr-backorder-allocator' ),
+                                'email_table_heading_previous'     => __( 'Previous', 'lpr-backorder-allocator' ),
+                                'email_table_heading_new_eta'      => __( 'New ETA', 'lpr-backorder-allocator' ),
+                                'email_unallocated_label'          => __( 'Unallocated', 'lpr-backorder-allocator' ),
+                        );
                 }
 
 		/**
@@ -157,10 +128,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                         if ( ! is_array( $stored ) ) {
                                 $stored = array();
                         }
-                        $language = isset( $stored['language'] ) ? self::sanitize_language( $stored['language'] ) : self::defaults()['language'];
-
-                        $settings = array_replace( self::defaults_for_language( $language ), $stored );
-                        $settings['language'] = $language;
+                        $settings = array_replace( self::defaults(), $stored );
 
                         return $settings;
                 }
@@ -188,8 +156,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
 		 * @return array
 		 */
                 public static function sanitize( array $raw ): array {
-                        $language = isset( $raw['language'] ) ? self::sanitize_language( $raw['language'] ) : self::defaults()['language'];
-                        $defaults = self::defaults_for_language( $language );
+                        $defaults = self::defaults();
 
 			// Order statuses: store as bare slugs (e.g., 'processing').
 			$statuses = array();
@@ -255,8 +222,23 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                                 $eta_intro = $defaults['eta_email_intro'];
                         }
 
+                        $progress_heading        = isset( $raw['email_progress_heading'] ) ? sanitize_text_field( $raw['email_progress_heading'] ) : '';
+                        $progress_subheading     = isset( $raw['email_progress_subheading'] ) ? sanitize_text_field( $raw['email_progress_subheading'] ) : '';
+                        $progress_complete_label = isset( $raw['email_progress_complete_label'] ) ? sanitize_text_field( $raw['email_progress_complete_label'] ) : '';
+                        $status_order_placed     = isset( $raw['email_status_label_order_placed'] ) ? sanitize_text_field( $raw['email_status_label_order_placed'] ) : '';
+                        $status_po_allocated     = isset( $raw['email_status_label_po_allocated'] ) ? sanitize_text_field( $raw['email_status_label_po_allocated'] ) : '';
+                        $status_eta_received     = isset( $raw['email_status_label_eta_received'] ) ? sanitize_text_field( $raw['email_status_label_eta_received'] ) : '';
+                        $status_delivery         = isset( $raw['email_status_label_delivery'] ) ? sanitize_text_field( $raw['email_status_label_delivery'] ) : '';
+                        $status_done_label       = isset( $raw['email_status_done_label'] ) ? sanitize_text_field( $raw['email_status_done_label'] ) : '';
+                        $status_pending_label    = isset( $raw['email_status_pending_label'] ) ? sanitize_text_field( $raw['email_status_pending_label'] ) : '';
+                        $updated_heading         = isset( $raw['email_updated_heading'] ) ? sanitize_text_field( $raw['email_updated_heading'] ) : '';
+                        $overview_heading        = isset( $raw['email_overview_heading'] ) ? sanitize_text_field( $raw['email_overview_heading'] ) : '';
+                        $th_item                 = isset( $raw['email_table_heading_item'] ) ? sanitize_text_field( $raw['email_table_heading_item'] ) : '';
+                        $th_prev                 = isset( $raw['email_table_heading_previous'] ) ? sanitize_text_field( $raw['email_table_heading_previous'] ) : '';
+                        $th_new                  = isset( $raw['email_table_heading_new_eta'] ) ? sanitize_text_field( $raw['email_table_heading_new_eta'] ) : '';
+                        $unallocated_label       = isset( $raw['email_unallocated_label'] ) ? sanitize_text_field( $raw['email_unallocated_label'] ) : '';
+
                         return array(
-                                'language'              => $language,
                                 'order_statuses'        => $statuses,
                                 'inform_customer_eta'   => (bool) $inform,
                                 'frontend_extra_pool'   => (bool) $front,
@@ -273,9 +255,24 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                                 'email_footer_text_no'  => $footer,
                                 'eta_email_subject'     => $eta_subject,
                                 'eta_email_intro'       => $eta_intro,
+                                'email_progress_heading'        => '' === trim( $progress_heading ) ? $defaults['email_progress_heading'] : $progress_heading,
+                                'email_progress_subheading'     => '' === trim( $progress_subheading ) ? $defaults['email_progress_subheading'] : $progress_subheading,
+                                'email_progress_complete_label' => '' === trim( $progress_complete_label ) ? $defaults['email_progress_complete_label'] : $progress_complete_label,
+                                'email_status_label_order_placed' => '' === trim( $status_order_placed ) ? $defaults['email_status_label_order_placed'] : $status_order_placed,
+                                'email_status_label_po_allocated' => '' === trim( $status_po_allocated ) ? $defaults['email_status_label_po_allocated'] : $status_po_allocated,
+                                'email_status_label_eta_received' => '' === trim( $status_eta_received ) ? $defaults['email_status_label_eta_received'] : $status_eta_received,
+                                'email_status_label_delivery'     => '' === trim( $status_delivery ) ? $defaults['email_status_label_delivery'] : $status_delivery,
+                                'email_status_done_label'         => '' === trim( $status_done_label ) ? $defaults['email_status_done_label'] : $status_done_label,
+                                'email_status_pending_label'      => '' === trim( $status_pending_label ) ? $defaults['email_status_pending_label'] : $status_pending_label,
+                                'email_updated_heading'           => '' === trim( $updated_heading ) ? $defaults['email_updated_heading'] : $updated_heading,
+                                'email_overview_heading'          => '' === trim( $overview_heading ) ? $defaults['email_overview_heading'] : $overview_heading,
+                                'email_table_heading_item'        => '' === trim( $th_item ) ? $defaults['email_table_heading_item'] : $th_item,
+                                'email_table_heading_previous'    => '' === trim( $th_prev ) ? $defaults['email_table_heading_previous'] : $th_prev,
+                                'email_table_heading_new_eta'     => '' === trim( $th_new ) ? $defaults['email_table_heading_new_eta'] : $th_new,
+                                'email_unallocated_label'         => '' === trim( $unallocated_label ) ? $defaults['email_unallocated_label'] : $unallocated_label,
                         );
                 }
-	}
+        }
 }
 
 if ( ! class_exists( __NAMESPACE__ . '\Installer' ) ) {
@@ -340,7 +337,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                 $status_opts[ $bare ] = $label;
                         }
 
-                        $language_defaults = Settings::defaults_for_language( $settings['language'] ?? Settings::defaults()['language'] );
+                        $defaults = Settings::defaults();
 
                         return array(
                                 array(
@@ -351,22 +348,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                 ),
 
                                 array(
-                                        'title'   => __( 'Language', 'lpr-backorder-allocator' ),
-                                        'desc'    => __( 'Sets the default language for customer-facing notices and emails.', 'lpr-backorder-allocator' ),
-                                        'id'      => 'lpr_allocator_language',
-                                        'type'    => 'select',
-                                        'options' => array(
-                                                'en' => __( 'English', 'lpr-backorder-allocator' ),
-                                                'no' => __( 'Norwegian', 'lpr-backorder-allocator' ),
-                                        ),
-                                        'default' => Settings::defaults()['language'],
-                                ),
-
-                                array(
                                         'title'    => __( 'Order statuses to include', 'lpr-backorder-allocator' ),
                                         'desc'     => __( 'Orders in these statuses are considered for allocation and reports.', 'lpr-backorder-allocator' ),
                                         'id'       => 'lpr_allocator_order_statuses',
-					'type'     => 'multiselect',
+                                        'type'     => 'multiselect',
 					'class'    => 'wc-enhanced-select',
 					'options'  => $status_opts,
 					'default'  => Settings::defaults()['order_statuses'],
@@ -386,8 +371,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                         'id'          => 'lpr_allocator_eta_email_subject',
                                         'type'        => 'text',
                                         'css'         => 'min-width: 400px;',
-                                        'placeholder' => $language_defaults['eta_email_subject'],
-                                        'default'     => $language_defaults['eta_email_subject'],
+                                        'placeholder' => $defaults['eta_email_subject'],
+                                        'default'     => $defaults['eta_email_subject'],
                                 ),
 
                                 array(
@@ -396,8 +381,163 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                         'id'          => 'lpr_allocator_eta_email_intro',
                                         'type'        => 'textarea',
                                         'css'         => 'min-width: 400px; height: 80px;',
-                                        'placeholder' => $language_defaults['eta_email_intro'],
-                                        'default'     => $language_defaults['eta_email_intro'],
+                                        'placeholder' => $defaults['eta_email_intro'],
+                                        'default'     => $defaults['eta_email_intro'],
+                                ),
+
+                                array(
+                                        'title' => __( 'Email copy', 'lpr-backorder-allocator' ),
+                                        'type'  => 'title',
+                                        'desc'  => __( 'Control the customer-facing text used in ETA updates.', 'lpr-backorder-allocator' ),
+                                        'id'    => 'lpr_allocator_section_email_copy',
+                                ),
+
+                                array(
+                                        'title'       => __( 'Progress heading', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_email_progress_heading',
+                                        'type'        => 'text',
+                                        'css'         => 'min-width: 360px;',
+                                        'placeholder' => $defaults['email_progress_heading'],
+                                        'default'     => $defaults['email_progress_heading'],
+                                ),
+
+                                array(
+                                        'title'       => __( 'Progress subheading', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_email_progress_subheading',
+                                        'type'        => 'text',
+                                        'css'         => 'min-width: 360px;',
+                                        'placeholder' => $defaults['email_progress_subheading'],
+                                        'default'     => $defaults['email_progress_subheading'],
+                                ),
+
+                                array(
+                                        'title'       => __( 'Progress ring label', 'lpr-backorder-allocator' ),
+                                        'desc'        => __( 'Use %complete% to inject the completion percentage.', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_email_progress_complete_label',
+                                        'type'        => 'text',
+                                        'css'         => 'min-width: 360px;',
+                                        'placeholder' => $defaults['email_progress_complete_label'],
+                                        'default'     => $defaults['email_progress_complete_label'],
+                                ),
+
+                                array(
+                                        'title'       => __( 'Status labels', 'lpr-backorder-allocator' ),
+                                        'type'        => 'title',
+                                        'desc'        => __( 'Editable text for each step shown in the progress wheel.', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_section_email_status_labels',
+                                ),
+
+                                array(
+                                        'title'       => __( 'Order placed', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_email_status_label_order_placed',
+                                        'type'        => 'text',
+                                        'placeholder' => $defaults['email_status_label_order_placed'],
+                                        'default'     => $defaults['email_status_label_order_placed'],
+                                ),
+
+                                array(
+                                        'title'       => __( 'PO allocated', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_email_status_label_po_allocated',
+                                        'type'        => 'text',
+                                        'placeholder' => $defaults['email_status_label_po_allocated'],
+                                        'default'     => $defaults['email_status_label_po_allocated'],
+                                ),
+
+                                array(
+                                        'title'       => __( 'ETA received', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_email_status_label_eta_received',
+                                        'type'        => 'text',
+                                        'placeholder' => $defaults['email_status_label_eta_received'],
+                                        'default'     => $defaults['email_status_label_eta_received'],
+                                ),
+
+                                array(
+                                        'title'       => __( 'Estimated delivery', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_email_status_label_delivery',
+                                        'type'        => 'text',
+                                        'placeholder' => $defaults['email_status_label_delivery'],
+                                        'default'     => $defaults['email_status_label_delivery'],
+                                ),
+
+                                array(
+                                        'title'       => __( 'Completed label', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_email_status_done_label',
+                                        'type'        => 'text',
+                                        'placeholder' => $defaults['email_status_done_label'],
+                                        'default'     => $defaults['email_status_done_label'],
+                                ),
+
+                                array(
+                                        'title'       => __( 'Pending label', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_email_status_pending_label',
+                                        'type'        => 'text',
+                                        'placeholder' => $defaults['email_status_pending_label'],
+                                        'default'     => $defaults['email_status_pending_label'],
+                                ),
+
+                                array(
+                                        'type' => 'sectionend',
+                                        'id'   => 'lpr_allocator_section_email_status_labels',
+                                ),
+
+                                array(
+                                        'title' => __( 'Email tables', 'lpr-backorder-allocator' ),
+                                        'type'  => 'title',
+                                        'desc'  => __( 'Adjust the headings shown above ETA updates.', 'lpr-backorder-allocator' ),
+                                        'id'    => 'lpr_allocator_section_email_tables',
+                                ),
+
+                                array(
+                                        'title'       => __( 'Updated items heading', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_email_updated_heading',
+                                        'type'        => 'text',
+                                        'placeholder' => $defaults['email_updated_heading'],
+                                        'default'     => $defaults['email_updated_heading'],
+                                ),
+
+                                array(
+                                        'title'       => __( 'Backordered items heading', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_email_overview_heading',
+                                        'type'        => 'text',
+                                        'placeholder' => $defaults['email_overview_heading'],
+                                        'default'     => $defaults['email_overview_heading'],
+                                ),
+
+                                array(
+                                        'title'       => __( 'Item column label', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_email_table_heading_item',
+                                        'type'        => 'text',
+                                        'placeholder' => $defaults['email_table_heading_item'],
+                                        'default'     => $defaults['email_table_heading_item'],
+                                ),
+
+                                array(
+                                        'title'       => __( 'Previous ETA label', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_email_table_heading_previous',
+                                        'type'        => 'text',
+                                        'placeholder' => $defaults['email_table_heading_previous'],
+                                        'default'     => $defaults['email_table_heading_previous'],
+                                ),
+
+                                array(
+                                        'title'       => __( 'New ETA label', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_email_table_heading_new_eta',
+                                        'type'        => 'text',
+                                        'placeholder' => $defaults['email_table_heading_new_eta'],
+                                        'default'     => $defaults['email_table_heading_new_eta'],
+                                ),
+
+                                array(
+                                        'title'       => __( 'Unallocated label', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_email_unallocated_label',
+                                        'type'        => 'text',
+                                        'placeholder' => $defaults['email_unallocated_label'],
+                                        'default'     => $defaults['email_unallocated_label'],
+                                ),
+
+                                array(
+                                        'type' => 'sectionend',
+                                        'id'   => 'lpr_allocator_section_email_tables',
                                 ),
 
                                 array(
@@ -459,8 +599,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                         'id'          => 'lpr_allocator_frontend_notice_template',
                                         'type'        => 'text',
                                         'css'         => 'min-width: 400px;',
-                                        'placeholder' => $language_defaults['frontend_notice_template'],
-                                        'default'     => $language_defaults['frontend_notice_template'],
+                                        'placeholder' => $defaults['frontend_notice_template'],
+                                        'default'     => $defaults['frontend_notice_template'],
                                 ),
 
                                 array(
@@ -469,8 +609,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                         'id'          => 'lpr_allocator_frontend_notice_color',
                                         'type'        => 'text',
                                         'css'         => 'width: 140px;',
-                                        'placeholder' => $language_defaults['frontend_notice_color'],
-                                        'default'     => $language_defaults['frontend_notice_color'],
+                                        'placeholder' => $defaults['frontend_notice_color'],
+                                        'default'     => $defaults['frontend_notice_color'],
                                 ),
 
                                 array(
@@ -479,8 +619,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                         'id'          => 'lpr_allocator_frontend_cart_notice_template',
                                         'type'        => 'text',
                                         'css'         => 'min-width: 400px;',
-                                        'placeholder' => $language_defaults['frontend_cart_notice_template'],
-                                        'default'     => $language_defaults['frontend_cart_notice_template'],
+                                        'placeholder' => $defaults['frontend_cart_notice_template'],
+                                        'default'     => $defaults['frontend_cart_notice_template'],
                                 ),
 
                                 array(
@@ -567,7 +707,6 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
 		 */
 		protected static function prime_field_values( array $settings ): void {
                                 $map = array(
-                                        'lpr_allocator_language'                => (string) $settings['language'],
                                         'lpr_allocator_order_statuses'             => (array) $settings['order_statuses'],
                                         'lpr_allocator_inform_customer_eta'        => $settings['inform_customer_eta'] ? 'yes' : 'no',
                                         'lpr_allocator_frontend_extra_pool'        => $settings['frontend_extra_pool'] ? 'yes' : 'no',
@@ -584,6 +723,21 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                   'lpr_allocator_email_footer_text_no'       => (string) $settings['email_footer_text_no'],
                                   'lpr_allocator_eta_email_subject'          => (string) $settings['eta_email_subject'],
                                   'lpr_allocator_eta_email_intro'            => (string) $settings['eta_email_intro'],
+                                  'lpr_allocator_email_progress_heading'     => (string) $settings['email_progress_heading'],
+                                  'lpr_allocator_email_progress_subheading'  => (string) $settings['email_progress_subheading'],
+                                  'lpr_allocator_email_progress_complete_label' => (string) $settings['email_progress_complete_label'],
+                                  'lpr_allocator_email_status_label_order_placed' => (string) $settings['email_status_label_order_placed'],
+                                  'lpr_allocator_email_status_label_po_allocated' => (string) $settings['email_status_label_po_allocated'],
+                                  'lpr_allocator_email_status_label_eta_received' => (string) $settings['email_status_label_eta_received'],
+                                  'lpr_allocator_email_status_label_delivery' => (string) $settings['email_status_label_delivery'],
+                                  'lpr_allocator_email_status_done_label'    => (string) $settings['email_status_done_label'],
+                                  'lpr_allocator_email_status_pending_label' => (string) $settings['email_status_pending_label'],
+                                  'lpr_allocator_email_updated_heading'      => (string) $settings['email_updated_heading'],
+                                  'lpr_allocator_email_overview_heading'     => (string) $settings['email_overview_heading'],
+                                  'lpr_allocator_email_table_heading_item'   => (string) $settings['email_table_heading_item'],
+                                  'lpr_allocator_email_table_heading_previous' => (string) $settings['email_table_heading_previous'],
+                                  'lpr_allocator_email_table_heading_new_eta' => (string) $settings['email_table_heading_new_eta'],
+                                  'lpr_allocator_email_unallocated_label'    => (string) $settings['email_unallocated_label'],
                           );
 
 			foreach ( $map as $opt => $val ) {
@@ -666,7 +820,6 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
 
                         $posted_statuses = isset( $_POST['lpr_allocator_order_statuses'] ) ? (array) wp_unslash( $_POST['lpr_allocator_order_statuses'] ) : array();
                                 $raw = array(
-                                        'language'                   => isset( $_POST['lpr_allocator_language'] ) ? (string) wp_unslash( $_POST['lpr_allocator_language'] ) : Settings::defaults()['language'],
                                         'order_statuses'             => $posted_statuses,
                                         'inform_customer_eta'        => ! empty( $_POST['lpr_allocator_inform_customer_eta'] ),
                                         'frontend_extra_pool'        => ! empty( $_POST['lpr_allocator_frontend_extra_pool'] ),
@@ -683,6 +836,21 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                 'email_footer_text_no'       => isset( $_POST['lpr_allocator_email_footer_text_no'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_footer_text_no'] ) : '',
                                 'eta_email_subject'          => isset( $_POST['lpr_allocator_eta_email_subject'] ) ? (string) wp_unslash( $_POST['lpr_allocator_eta_email_subject'] ) : '',
                                 'eta_email_intro'            => isset( $_POST['lpr_allocator_eta_email_intro'] ) ? (string) wp_unslash( $_POST['lpr_allocator_eta_email_intro'] ) : '',
+                                'email_progress_heading'     => isset( $_POST['lpr_allocator_email_progress_heading'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_progress_heading'] ) : '',
+                                'email_progress_subheading'  => isset( $_POST['lpr_allocator_email_progress_subheading'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_progress_subheading'] ) : '',
+                                'email_progress_complete_label' => isset( $_POST['lpr_allocator_email_progress_complete_label'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_progress_complete_label'] ) : '',
+                                'email_status_label_order_placed' => isset( $_POST['lpr_allocator_email_status_label_order_placed'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_status_label_order_placed'] ) : '',
+                                'email_status_label_po_allocated' => isset( $_POST['lpr_allocator_email_status_label_po_allocated'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_status_label_po_allocated'] ) : '',
+                                'email_status_label_eta_received' => isset( $_POST['lpr_allocator_email_status_label_eta_received'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_status_label_eta_received'] ) : '',
+                                'email_status_label_delivery'     => isset( $_POST['lpr_allocator_email_status_label_delivery'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_status_label_delivery'] ) : '',
+                                'email_status_done_label'         => isset( $_POST['lpr_allocator_email_status_done_label'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_status_done_label'] ) : '',
+                                'email_status_pending_label'      => isset( $_POST['lpr_allocator_email_status_pending_label'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_status_pending_label'] ) : '',
+                                'email_updated_heading'           => isset( $_POST['lpr_allocator_email_updated_heading'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_updated_heading'] ) : '',
+                                'email_overview_heading'          => isset( $_POST['lpr_allocator_email_overview_heading'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_overview_heading'] ) : '',
+                                'email_table_heading_item'        => isset( $_POST['lpr_allocator_email_table_heading_item'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_table_heading_item'] ) : '',
+                                'email_table_heading_previous'    => isset( $_POST['lpr_allocator_email_table_heading_previous'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_table_heading_previous'] ) : '',
+                                'email_table_heading_new_eta'     => isset( $_POST['lpr_allocator_email_table_heading_new_eta'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_table_heading_new_eta'] ) : '',
+                                'email_unallocated_label'         => isset( $_POST['lpr_allocator_email_unallocated_label'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_unallocated_label'] ) : '',
                         );
 
                         Settings::update( $raw );
@@ -758,8 +926,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Email_Notification_Preview' ) ) {
                         }
 
                         if ( '' === $body ) {
-                                $language = $settings['language'] ?? Settings::defaults()['language'];
-                                $fallback = ETA::build_eta_email_content( $sample_rows, Settings::defaults_for_language( $language ), $tokens, $sample_overview );
+                                $fallback = ETA::build_eta_email_content( $sample_rows, Settings::defaults(), $tokens, $sample_overview );
                                 $subject  = $fallback['subject'];
                                 $body     = $fallback['body'];
                         }
@@ -965,18 +1132,18 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                                 return '';
                         }
 
-                        $settings          = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : Settings::defaults();
-                        $language_defaults = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::defaults_for_language( $settings['language'] ?? Settings::defaults()['language'] ) : Settings::defaults();
-                        $use_emoji         = isset( $settings[ $emoji_flag_key ] ) ? (bool) $settings[ $emoji_flag_key ] : $language_defaults[ $emoji_flag_key ];
+                        $settings  = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : Settings::defaults();
+                        $defaults  = Settings::defaults();
+                        $use_emoji = isset( $settings[ $emoji_flag_key ] ) ? (bool) $settings[ $emoji_flag_key ] : $defaults[ $emoji_flag_key ];
                         $notice    = self::build_notice_text(
                                 $qty,
                                 $eta,
                                 $settings[ $template_key ] ?? '',
-                                $language_defaults[ $fallback_tpl_key ]
+                                $defaults[ $fallback_tpl_key ]
                         );
-                        $color     = isset( $settings['frontend_notice_color'] ) ? sanitize_hex_color( $settings['frontend_notice_color'] ) : $language_defaults['frontend_notice_color'];
+                        $color     = isset( $settings['frontend_notice_color'] ) ? sanitize_hex_color( $settings['frontend_notice_color'] ) : $defaults['frontend_notice_color'];
                         if ( empty( $color ) ) {
-                                $color = $language_defaults['frontend_notice_color'];
+                                $color = $defaults['frontend_notice_color'];
                         }
 
                         if ( '' === $notice ) {
@@ -1068,13 +1235,13 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Cart' ) ) {
                                 return;
                         }
 
-                        $settings          = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array();
-                        $language_defaults = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::defaults_for_language( $settings['language'] ?? Settings::defaults()['language'] ) : Settings::defaults();
+                        $settings = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array();
+                        $defaults = Settings::defaults();
                         $notice   = Incoming_Stock_Storefront::build_notice_text(
                                 $qty,
                                 $eta,
                                 $settings['frontend_cart_notice_template'] ?? '',
-                                $language_defaults['frontend_cart_notice_template']
+                                $defaults['frontend_cart_notice_template']
                         );
 
                         if ( '' === $notice ) {
@@ -2515,7 +2682,7 @@ public static function update_line_eta( int $order_id ): void {
                         }
 
                         $tokens   = self::email_tokens_for_order( $order );
-                        $compiled = self::build_eta_email_content( $rows, $settings, $tokens, $overview_rows );
+                        $compiled = self::build_eta_email_content( $rows, $settings, $tokens, $overview_rows, $order );
                         $subject  = $compiled['subject'] ?? '';
                         $body     = $compiled['body'] ?? '';
 
@@ -2540,16 +2707,32 @@ public static function update_line_eta( int $order_id ): void {
                  * @param array $tokens
                  * @return array{subject:string,body:string}
                  */
-                public static function build_eta_email_content( array $rows, array $settings, array $tokens, array $overview_rows = array() ): array {
-                        $language  = class_exists( __NAMESPACE__ . '\Settings' ) ? ( $settings['language'] ?? Settings::defaults()['language'] ) : 'en';
-                        $defaults  = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::defaults_for_language( $language ) : array();
+                public static function build_eta_email_content( array $rows, array $settings, array $tokens, array $overview_rows = array(), ?\WC_Order $order = null ): array {
+                        $defaults = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::defaults() : array();
+                        $settings = array_replace( $defaults, $settings );
 
-                        $subject_tpl = (string) ( $settings['eta_email_subject'] ?? ( $defaults['eta_email_subject'] ?? __( 'Your order ETA has been updated', 'lpr-backorder-allocator' ) ) );
-                        $intro_tpl   = (string) ( $settings['eta_email_intro'] ?? ( $defaults['eta_email_intro'] ?? __( 'We’ve updated the expected arrival for the items below:', 'lpr-backorder-allocator' ) ) );
-
-                        $logo  = (string) ( $settings['brand_logo_url']       ?? '' );
-                        $color = (string) ( $settings['brand_primary_color']  ?? '#1a1a1a' );
-                        $foot  = (string) ( $settings['email_footer_text_no'] ?? '' );
+                        $subject_tpl   = (string) ( $settings['eta_email_subject'] ?? ( $defaults['eta_email_subject'] ?? __( 'Your order ETA has been updated', 'lpr-backorder-allocator' ) ) );
+                        $intro_tpl     = (string) ( $settings['eta_email_intro'] ?? ( $defaults['eta_email_intro'] ?? __( 'We’ve updated the expected arrival for the items below:', 'lpr-backorder-allocator' ) ) );
+                        $logo          = (string) ( $settings['brand_logo_url']       ?? '' );
+                        $color         = (string) ( $settings['brand_primary_color']  ?? '#1a1a1a' );
+                        $foot          = (string) ( $settings['email_footer_text_no'] ?? '' );
+                        $progress_head = (string) ( $settings['email_progress_heading'] ?? ( $defaults['email_progress_heading'] ?? '' ) );
+                        $progress_sub  = (string) ( $settings['email_progress_subheading'] ?? ( $defaults['email_progress_subheading'] ?? '' ) );
+                        $progress_ring = (string) ( $settings['email_progress_complete_label'] ?? ( $defaults['email_progress_complete_label'] ?? '%complete%%' ) );
+                        $status_done   = (string) ( $settings['email_status_done_label'] ?? ( $defaults['email_status_done_label'] ?? __( 'Completed', 'lpr-backorder-allocator' ) ) );
+                        $status_pending = (string) ( $settings['email_status_pending_label'] ?? ( $defaults['email_status_pending_label'] ?? __( 'Pending', 'lpr-backorder-allocator' ) ) );
+                        $updated_heading   = (string) ( $settings['email_updated_heading'] ?? ( $defaults['email_updated_heading'] ?? __( 'Updated items', 'lpr-backorder-allocator' ) ) );
+                        $overview_heading  = (string) ( $settings['email_overview_heading'] ?? ( $defaults['email_overview_heading'] ?? __( 'Backordered items', 'lpr-backorder-allocator' ) ) );
+                        $th_item           = (string) ( $settings['email_table_heading_item'] ?? ( $defaults['email_table_heading_item'] ?? __( 'Item', 'lpr-backorder-allocator' ) ) );
+                        $th_prev           = (string) ( $settings['email_table_heading_previous'] ?? ( $defaults['email_table_heading_previous'] ?? __( 'Previous', 'lpr-backorder-allocator' ) ) );
+                        $th_new            = (string) ( $settings['email_table_heading_new_eta'] ?? ( $defaults['email_table_heading_new_eta'] ?? __( 'New ETA', 'lpr-backorder-allocator' ) ) );
+                        $status_labels     = array(
+                                'order' => (string) ( $settings['email_status_label_order_placed'] ?? ( $defaults['email_status_label_order_placed'] ?? __( 'Order placed', 'lpr-backorder-allocator' ) ) ),
+                                'po'    => (string) ( $settings['email_status_label_po_allocated'] ?? ( $defaults['email_status_label_po_allocated'] ?? __( 'PO allocated', 'lpr-backorder-allocator' ) ) ),
+                                'eta'   => (string) ( $settings['email_status_label_eta_received'] ?? ( $defaults['email_status_label_eta_received'] ?? __( 'ETA received', 'lpr-backorder-allocator' ) ) ),
+                                'delivery' => (string) ( $settings['email_status_label_delivery'] ?? ( $defaults['email_status_label_delivery'] ?? __( 'Estimated delivery', 'lpr-backorder-allocator' ) ) ),
+                        );
+                        $unallocated_label = (string) ( $settings['email_unallocated_label'] ?? ( $defaults['email_unallocated_label'] ?? __( 'Unallocated', 'lpr-backorder-allocator' ) ) );
 
                         $subject = self::apply_email_tokens( $subject_tpl, $tokens );
                         $intro   = self::apply_email_tokens( $intro_tpl, $tokens );
@@ -2562,14 +2745,19 @@ public static function update_line_eta( int $order_id ): void {
                                 $body .= '<p>' . wp_kses_post( $intro ) . '</p>';
                         }
 
+                        $progress = self::build_progress_steps( $order, $overview_rows, $status_labels, $unallocated_label, $status_done, $status_pending );
+                        if ( ! empty( $progress['steps'] ) ) {
+                                $body .= self::render_progress_block( $progress, $color, $progress_head, $progress_sub, $progress_ring, $status_done, $status_pending );
+                        }
+
                         if ( ! empty( $rows ) ) {
-                                $body .= '<h3 style="margin:16px 0 8px 0;">' . esc_html__( 'Updated items', 'lpr-backorder-allocator' ) . '</h3>';
-                                $body .= self::render_eta_table( $rows );
+                                $body .= '<h3 style="margin:16px 0 8px 0;">' . esc_html( $updated_heading ) . '</h3>';
+                                $body .= self::render_eta_table( $rows, $th_item, $th_prev, $th_new, $unallocated_label );
                         }
 
                         if ( ! empty( $overview_rows ) ) {
-                                $body .= '<h3 style="margin:16px 0 8px 0;">' . esc_html__( 'Backordered items', 'lpr-backorder-allocator' ) . '</h3>';
-                                $body .= self::render_backorder_overview( $overview_rows );
+                                $body .= '<h3 style="margin:16px 0 8px 0;">' . esc_html( $overview_heading ) . '</h3>';
+                                $body .= self::render_backorder_overview( $overview_rows, $th_item, $th_new, $unallocated_label );
                         }
 
                         if ( $foot ) {
@@ -2584,16 +2772,184 @@ public static function update_line_eta( int $order_id ): void {
                 }
 
                 /**
+                 * Build progress metadata for the email ring.
+                 */
+                protected static function build_progress_steps( ?\WC_Order $order, array $overview_rows, array $labels, string $unallocated_label, string $done_label, string $pending_label ): array {
+                        $order_date        = '';
+                        $has_allocs        = false;
+                        $eta_dates         = array();
+                        $eta_label_fallback = '';
+
+                        if ( $order instanceof \WC_Order ) {
+                                $created = $order->get_date_created();
+                                if ( $created ) {
+                                        $order_date = function_exists( 'wc_format_datetime' ) ? wc_format_datetime( $created, wc_date_format() ) : $created->date_i18n( get_option( 'date_format', 'Y-m-d' ) );
+                                }
+
+                                foreach ( $order->get_items( 'line_item' ) as $item ) {
+                                        if ( ! $item instanceof \WC_Order_Item_Product ) {
+                                                continue;
+                                        }
+                                        $allocs = $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_ALLOCATIONS' ) ? ORDER_ITEM_META_ALLOCATIONS : 'lpr_allocations', true );
+                                        if ( is_array( $allocs ) ) {
+                                                foreach ( $allocs as $alloc_row ) {
+                                                        $status = isset( $alloc_row['status'] ) ? sanitize_key( (string) $alloc_row['status'] ) : 'reserved';
+                                                        if ( 'released' === $status ) {
+                                                                continue;
+                                                        }
+                                                        $has_allocs = true;
+                                                        break;
+                                                }
+                                        }
+
+                                        $eta_val = (string) $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_LINE_ETA' ) ? ORDER_ITEM_META_LINE_ETA : '_lpr_line_eta', true );
+                                        if ( '' !== trim( $eta_val ) && '' === $eta_label_fallback ) {
+                                                $eta_label_fallback = $eta_val;
+                                        }
+                                        $eta_obj = lpr_allocator_parse_date( $eta_val );
+                                        if ( $eta_obj ) {
+                                                $eta_dates[] = $eta_obj;
+                                        }
+                                }
+                        }
+
+                        if ( empty( $eta_dates ) && ! empty( $overview_rows ) ) {
+                                foreach ( $overview_rows as $row ) {
+                                        $eta_val = isset( $row['eta'] ) ? (string) $row['eta'] : ( isset( $row['new'] ) ? (string) $row['new'] : '' );
+                                        if ( '' !== trim( $eta_val ) && '' === $eta_label_fallback ) {
+                                                $eta_label_fallback = $eta_val;
+                                        }
+                                        $eta_obj = lpr_allocator_parse_date( $eta_val );
+                                        if ( $eta_obj ) {
+                                                $eta_dates[] = $eta_obj;
+                                        }
+                                }
+                        }
+
+                        $overall_eta = null;
+                        foreach ( $eta_dates as $candidate ) {
+                                if ( ! $overall_eta || $candidate->getTimestamp() > $overall_eta->getTimestamp() ) {
+                                        $overall_eta = $candidate;
+                                }
+                        }
+
+                        $eta_received = false;
+                        if ( $overall_eta ) {
+                                $eta_label    = lpr_allocator_format_store_date( $overall_eta->format( 'Y-m-d' ) );
+                                $eta_received = true;
+                        } elseif ( '' !== trim( $eta_label_fallback ) ) {
+                                $eta_label    = $eta_label_fallback;
+                                $eta_received = true;
+                        } else {
+                                $eta_label = $unallocated_label;
+                        }
+
+                        $steps = array(
+                                array(
+                                        'label'    => $labels['order'] ?? __( 'Order placed', 'lpr-backorder-allocator' ),
+                                        'complete' => true,
+                                        'detail'   => $order_date,
+                                ),
+                                array(
+                                        'label'    => $labels['po'] ?? __( 'PO allocated', 'lpr-backorder-allocator' ),
+                                        'complete' => $has_allocs,
+                                        'detail'   => $has_allocs ? $done_label : $pending_label,
+                                ),
+                                array(
+                                        'label'    => $labels['eta'] ?? __( 'ETA received', 'lpr-backorder-allocator' ),
+                                        'complete' => $eta_received,
+                                        'detail'   => $eta_received ? $eta_label : $pending_label,
+                                ),
+                                array(
+                                        'label'    => $labels['delivery'] ?? __( 'Estimated delivery', 'lpr-backorder-allocator' ),
+                                        'complete' => $eta_received,
+                                        'detail'   => $eta_label,
+                                ),
+                        );
+
+                        $completed = 0;
+                        foreach ( $steps as $step ) {
+                                if ( ! empty( $step['complete'] ) ) {
+                                        $completed++;
+                                }
+                        }
+
+                        $percent = count( $steps ) > 0 ? round( ( $completed / count( $steps ) ) * 100 ) : 0;
+
+                        return array(
+                                'steps'   => $steps,
+                                'percent' => max( 0, min( 100, $percent ) ),
+                        );
+                }
+
+                /**
+                 * Render the visual progress wheel and status list.
+                 */
+                protected static function render_progress_block( array $progress, string $color, string $heading, string $subheading, string $complete_tpl, string $done_label, string $pending_label ): string {
+                        if ( empty( $progress['steps'] ) ) {
+                                return '';
+                        }
+
+                        $percent      = (int) ( $progress['percent'] ?? 0 );
+                        $ring_label   = str_replace( '%complete%', (string) $percent, $complete_tpl );
+                        $ring_color   = $color ?: '#1a1a1a';
+                        $ring_back    = '#e5e7eb';
+                        $steps_html   = '';
+
+                        foreach ( $progress['steps'] as $step ) {
+                                $complete = ! empty( $step['complete'] );
+                                $state    = $complete ? $done_label : $pending_label;
+                                $detail   = isset( $step['detail'] ) ? (string) $step['detail'] : '';
+                                $pill     = $complete ? $ring_color : $ring_back;
+                                $icon     = $complete ? '✓' : '•';
+
+                                $steps_html .= '<div style="display:flex;align-items:center;margin:6px 0;">';
+                                $steps_html .= '<span style="display:inline-flex;width:22px;height:22px;border-radius:50%;background:' . esc_attr( $pill ) . ';color:' . ( $complete ? '#fff' : '#111' ) . ';align-items:center;justify-content:center;font-weight:700;font-size:12px;">' . esc_html( $icon ) . '</span>';
+                                $steps_html .= '<div style="margin-left:10px;">';
+                                $steps_html .= '<div style="font-weight:600;color:#111;font-size:14px;">' . esc_html( $step['label'] ?? '' ) . '</div>';
+                                $steps_html .= '<div style="color:#555;font-size:12px;">' . esc_html( $state );
+                                if ( '' !== trim( $detail ) ) {
+                                        $steps_html .= ' · ' . esc_html( $detail );
+                                }
+                                $steps_html .= '</div></div></div>';
+                        }
+
+                        $html  = '<div style="margin:20px 0;padding:16px;border:1px solid #eee;border-radius:12px;">';
+                        if ( '' !== trim( $heading ) ) {
+                                $html .= '<div style="font-weight:700;font-size:16px;margin-bottom:6px;">' . esc_html( $heading ) . '</div>';
+                        }
+                        if ( '' !== trim( $subheading ) ) {
+                                $html .= '<div style="color:#555;margin-bottom:12px;font-size:13px;">' . esc_html( $subheading ) . '</div>';
+                        }
+                        $html .= '<div style="display:flex;align-items:center;gap:18px;flex-wrap:wrap;">';
+                        $html .= '<div style="position:relative;width:170px;height:170px;flex-shrink:0;">';
+                        $html .= '<div style="position:absolute;inset:0;border-radius:50%;background:conic-gradient(' . esc_attr( $ring_color ) . ' ' . $percent . '%, ' . esc_attr( $ring_back ) . ' ' . $percent . '%);"></div>';
+                        $html .= '<div style="position:absolute;inset:16px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;text-align:center;font-weight:700;color:' . esc_attr( $ring_color ) . ';font-size:14px;padding:10px;">' . esc_html( $ring_label ) . '</div>';
+                        $html .= '</div>';
+                        $html .= '<div style="flex:1;min-width:220px;">' . $steps_html . '</div>';
+                        $html .= '</div></div>';
+
+                        return $html;
+                }
+
+                /**
                  * Render ETA rows as a HTML table.
                  */
-                protected static function render_eta_table( array $rows ): string {
+                protected static function render_eta_table( array $rows, string $heading_item, string $heading_prev, string $heading_new, string $unallocated_label ): string {
                         $html  = '<table cellspacing="0" cellpadding="6" border="0" style="width:100%;border-collapse:collapse;">';
-                        $html .= '<thead><tr><th align="left">' . esc_html__( 'Item', 'lpr-backorder-allocator' ) . '</th><th align="left">' . esc_html__( 'Previous', 'lpr-backorder-allocator' ) . '</th><th align="left">' . esc_html__( 'New ETA', 'lpr-backorder-allocator' ) . '</th></tr></thead><tbody>';
+                        $html .= '<thead><tr><th align="left">' . esc_html( $heading_item ) . '</th><th align="left">' . esc_html( $heading_prev ) . '</th><th align="left">' . esc_html( $heading_new ) . '</th></tr></thead><tbody>';
 
                         foreach ( $rows as $row ) {
                                 $name = isset( $row['name'] ) ? (string) $row['name'] : '';
-                                $prev = isset( $row['prev'] ) ? (string) $row['prev'] : '—';
-                                $new  = isset( $row['new'] ) ? (string) $row['new'] : '—';
+                                $prev = isset( $row['prev'] ) ? (string) $row['prev'] : $unallocated_label;
+                                $new  = isset( $row['new'] ) ? (string) $row['new'] : $unallocated_label;
+
+                                if ( '' === trim( $prev ) ) {
+                                        $prev = $unallocated_label;
+                                }
+                                if ( '' === trim( $new ) ) {
+                                        $new = $unallocated_label;
+                                }
 
                                 $html .= '<tr><td>' . esc_html( $name ) . '</td><td>' . esc_html( $prev ) . '</td><td>' . esc_html( $new ) . '</td></tr>';
                         }
@@ -2606,16 +2962,16 @@ public static function update_line_eta( int $order_id ): void {
                 /**
                  * Render a simple overview table of backordered lines.
                  */
-                protected static function render_backorder_overview( array $rows ): string {
+                protected static function render_backorder_overview( array $rows, string $heading_item, string $heading_eta, string $unallocated_label ): string {
                         $html  = '<table cellspacing="0" cellpadding="6" border="0" style="width:100%;border-collapse:collapse;">';
-                        $html .= '<thead><tr><th align="left">' . esc_html__( 'Item', 'lpr-backorder-allocator' ) . '</th><th align="left">' . esc_html__( 'Current ETA', 'lpr-backorder-allocator' ) . '</th></tr></thead><tbody>';
+                        $html .= '<thead><tr><th align="left">' . esc_html( $heading_item ) . '</th><th align="left">' . esc_html( $heading_eta ) . '</th></tr></thead><tbody>';
 
                         foreach ( $rows as $row ) {
                                 $name = isset( $row['name'] ) ? (string) $row['name'] : '';
-                                $eta  = isset( $row['new'] ) ? (string) $row['new'] : ( isset( $row['eta'] ) ? (string) $row['eta'] : '—' );
+                                $eta  = isset( $row['new'] ) ? (string) $row['new'] : ( isset( $row['eta'] ) ? (string) $row['eta'] : $unallocated_label );
 
                                 if ( '' === trim( $eta ) ) {
-                                        $eta = '—';
+                                        $eta = $unallocated_label;
                                 }
 
                                 $html .= '<tr><td>' . esc_html( $name ) . '</td><td>' . esc_html( $eta ) . '</td></tr>';
@@ -2795,6 +3151,9 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
                                         $quantities[ absint( $item_id ) ] = (int) $qty;
                                 }
                         }
+
+                        $settings = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : Settings::defaults();
+                        $unallocated = (string) ( $settings['email_unallocated_label'] ?? __( 'Unallocated', 'lpr-backorder-allocator' ) );
 
                         foreach ( $order->get_items( 'line_item' ) as $item ) {
                                 if ( ! $item instanceof \WC_Order_Item_Product ) {
@@ -3170,7 +3529,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
                                 $product = $item->get_product();
                                 $sku     = $product instanceof \WC_Product ? $product->get_sku() : '';
                                 $eta     = (string) $item->get_meta( $eta_meta, true );
-                                $eta_h   = $eta ? lpr_allocator_format_store_date( $eta ) : __( 'Unallocated', 'lpr-backorder-allocator' );
+                                $eta_h   = $eta ? lpr_allocator_format_store_date( $eta ) : $unallocated;
 
                                 $rows[] = array(
                                         'name' => $item->get_name() . ( $sku ? ' [' . $sku . ']' : '' ),
