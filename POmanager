@@ -82,6 +82,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                                 'order_statuses'        => array( 'processing', 'on-hold' ),
                                 'inform_customer_eta'   => false,
                                 'frontend_extra_pool'   => false,
+                                'frontend_notice_emoji' => true,
                                 'frontend_notice_template' => __( '%qty% units expected (ETA %eta%)', 'lpr-backorder-allocator' ),
                                 'frontend_cart_notice_template' => __( 'Next free stock: %qty% units expected (ETA %eta%)', 'lpr-backorder-allocator' ),
                                 'frontend_refresh_interval' => 900,
@@ -152,6 +153,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
 
                         $inform = ! empty( $raw['inform_customer_eta'] );
                         $front  = ! empty( $raw['frontend_extra_pool'] );
+                        $emoji  = isset( $raw['frontend_notice_emoji'] ) ? (bool) $raw['frontend_notice_emoji'] : $defaults['frontend_notice_emoji'];
 
                         $notice_tpl = isset( $raw['frontend_notice_template'] ) ? wp_kses_post( $raw['frontend_notice_template'] ) : '';
                         if ( '' === trim( $notice_tpl ) ) {
@@ -189,6 +191,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                                 'order_statuses'        => $statuses,
                                 'inform_customer_eta'   => (bool) $inform,
                                 'frontend_extra_pool'   => (bool) $front,
+                                'frontend_notice_emoji' => (bool) $emoji,
                                 'frontend_notice_template' => $notice_tpl,
                                 'frontend_cart_notice_template' => $cart_notice_tpl,
                                 'frontend_refresh_interval' => (int) $interval,
@@ -337,6 +340,14 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                 ),
 
                                 array(
+                                        'title'   => __( 'Show factory emoji', 'lpr-backorder-allocator' ),
+                                        'desc'    => __( 'Prefix the product page notice with a 🏭 emoji.', 'lpr-backorder-allocator' ),
+                                        'id'      => 'lpr_allocator_frontend_notice_emoji',
+                                        'type'    => 'checkbox',
+                                        'default' => 'yes',
+                                ),
+
+                                array(
                                         'title'       => __( 'Product page notice text', 'lpr-backorder-allocator' ),
                                         'desc'        => __( 'Use %qty% and %eta% placeholders. Example: "%qty% units expected (ETA %eta%)"', 'lpr-backorder-allocator' ),
                                         'id'          => 'lpr_allocator_frontend_notice_template',
@@ -439,13 +450,14 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
 		 * Provide field values to WC renderer from our single option via pre_option_*.
 		 */
 		protected static function prime_field_values( array $settings ): void {
-                        $map = array(
-                                'lpr_allocator_order_statuses'             => (array) $settings['order_statuses'],
-                                'lpr_allocator_inform_customer_eta'        => $settings['inform_customer_eta'] ? 'yes' : 'no',
-                                'lpr_allocator_frontend_extra_pool'        => $settings['frontend_extra_pool'] ? 'yes' : 'no',
-                                'lpr_allocator_frontend_notice_template'   => (string) $settings['frontend_notice_template'],
-                                'lpr_allocator_frontend_cart_notice_template' => (string) $settings['frontend_cart_notice_template'],
-                                'lpr_allocator_frontend_refresh_interval'  => (int) $settings['frontend_refresh_interval'],
+                                $map = array(
+                                        'lpr_allocator_order_statuses'             => (array) $settings['order_statuses'],
+                                        'lpr_allocator_inform_customer_eta'        => $settings['inform_customer_eta'] ? 'yes' : 'no',
+                                        'lpr_allocator_frontend_extra_pool'        => $settings['frontend_extra_pool'] ? 'yes' : 'no',
+                                        'lpr_allocator_frontend_notice_emoji'      => $settings['frontend_notice_emoji'] ? 'yes' : 'no',
+                                        'lpr_allocator_frontend_notice_template'   => (string) $settings['frontend_notice_template'],
+                                        'lpr_allocator_frontend_cart_notice_template' => (string) $settings['frontend_cart_notice_template'],
+                                        'lpr_allocator_frontend_refresh_interval'  => (int) $settings['frontend_refresh_interval'],
                                 'lpr_allocator_auto_allocation_interval'   => (int) $settings['auto_allocation_interval'],
                                 'lpr_allocator_brand_logo_url'             => (string) $settings['brand_logo_url'],
                                 'lpr_allocator_brand_primary_color'        => (string) $settings['brand_primary_color'],
@@ -537,6 +549,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                         'order_statuses'             => $posted_statuses,
                                         'inform_customer_eta'        => ! empty( $_POST['lpr_allocator_inform_customer_eta'] ),
                                         'frontend_extra_pool'        => ! empty( $_POST['lpr_allocator_frontend_extra_pool'] ),
+                                        'frontend_notice_emoji'      => ! empty( $_POST['lpr_allocator_frontend_notice_emoji'] ),
                                         'frontend_notice_template'   => isset( $_POST['lpr_allocator_frontend_notice_template'] ) ? (string) wp_unslash( $_POST['lpr_allocator_frontend_notice_template'] ) : '',
                                         'frontend_cart_notice_template' => isset( $_POST['lpr_allocator_frontend_cart_notice_template'] ) ? (string) wp_unslash( $_POST['lpr_allocator_frontend_cart_notice_template'] ) : '',
                                         'frontend_refresh_interval'  => isset( $_POST['lpr_allocator_frontend_refresh_interval'] ) ? (int) $_POST['lpr_allocator_frontend_refresh_interval'] : 0,
@@ -738,6 +751,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                         }
 
                         $settings = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array();
+                        $use_emoji = isset( $settings['frontend_notice_emoji'] ) ? (bool) $settings['frontend_notice_emoji'] : Settings::defaults()['frontend_notice_emoji'];
                         $notice   = self::build_notice_text(
                                 $qty,
                                 $eta,
@@ -749,7 +763,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                                 return $text;
                         }
 
-                        $formatted_notice = '🏭 ' . $notice;
+                        $formatted_notice = ( $use_emoji ? '🏭 ' : '' ) . $notice;
 
                         return $text ? trim( $text . '<br />' . $formatted_notice ) : $formatted_notice;
                 }
@@ -7481,6 +7495,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ) {
                                 update_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_ETA' ) ? PRODUCT_META_NEXT_EXTRA_ETA : '_lpr_next_extra_eta', (string) ( $next_with_free['eta'] ?? '' ) );
                                 update_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_INCOMING_DETAILS' ) ? PRODUCT_META_INCOMING_DETAILS : '_lpr_incoming_po_details', $entries );
 
+                                if ( function_exists( 'wc_delete_product_transients' ) ) {
+                                        wc_delete_product_transients( $product_id );
+                                }
+
                                 $new_ids[] = (int) $product_id;
                         }
 
@@ -7494,6 +7512,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ) {
                                         delete_post_meta( (int) $old_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_QTY' ) ? PRODUCT_META_NEXT_EXTRA_QTY : '_lpr_next_extra_qty' );
                                         delete_post_meta( (int) $old_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_ETA' ) ? PRODUCT_META_NEXT_EXTRA_ETA : '_lpr_next_extra_eta' );
                                         delete_post_meta( (int) $old_id, defined( __NAMESPACE__ . '\PRODUCT_META_INCOMING_DETAILS' ) ? PRODUCT_META_INCOMING_DETAILS : '_lpr_incoming_po_details' );
+
+                                        if ( function_exists( 'wc_delete_product_transients' ) ) {
+                                                wc_delete_product_transients( (int) $old_id );
+                                        }
                                 }
                         }
 
