@@ -1053,52 +1053,127 @@ function lpr_allocator_enqueue_datepicker_assets(): void {
                 . '  margin-top: 6px;\n'
                 . '  min-width: 240px;\n'
                 . '  position: absolute;\n'
+                . '}\n'
+                . '#lpr-allocator-datepicker-overlay {\n'
+                . '  align-items: center;\n'
+                . '  background: rgba(120, 120, 120, 0.85);\n'
+                . '  display: none;\n'
+                . '  inset: 0;\n'
+                . '  justify-content: center;\n'
+                . '  position: fixed;\n'
+                . '  z-index: 100001;\n'
+                . '}\n'
+                . '#lpr-allocator-datepicker-overlay.is-active {\n'
+                . '  display: flex;\n'
+                . '}\n'
+                . '#lpr-allocator-datepicker-overlay .lpr-datepicker-surface {\n'
+                . '  background: #e6e7e8;\n'
+                . '  border: 1px solid #c3c4c7;\n'
+                . '  border-radius: 6px;\n'
+                . '  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);\n'
+                . '  max-width: 360px;\n'
+                . '  padding: 14px 16px;\n'
+                . '  width: 100%;\n'
+                . '}\n'
+                . '#lpr-allocator-datepicker-overlay .ui-datepicker {\n'
+                . '  box-shadow: none;\n'
+                . '  margin: 0 auto;\n'
+                . '  position: static !important;\n'
                 . '}'
         );
         wp_enqueue_script( 'wc-admin-meta-boxes' );
         wp_enqueue_script( 'jquery-ui-datepicker' );
 
-$datepicker_js = "jQuery(function($){\n"
-. "\tvar allocatorDateFormat = 'dd-mm-yy';\n"
-. "\tfunction normalizeAllocatorDate($input){\n"
-. "\t\tvar val = ($input.val() || '').trim();\n"
-. "\t\tvar isoMatch = val.match(/^(\\d{4})-(\\d{2})-(\\d{2})$/);\n"
-. "\t\tif(isoMatch){\n"
-. "\t\t\t$input.val(isoMatch[3] + '-' + isoMatch[2] + '-' + isoMatch[1]);\n"
-. "\t\t\treturn;\n"
-. "\t\t}\n"
-. "\t\tvar longMatch = val.match(/^(\\d{2})-(\\d{2})-(\\d{4})$/);\n"
-. "\t\tif(longMatch){\n"
-. "\t\t\t$input.val(longMatch[1] + '-' + longMatch[2] + '-' + longMatch[3]);\n"
-. "\t\t\treturn;\n"
-. "\t\t}\n"
-. "\t\tvar shortMatch = val.match(/^(\\d{2})-(\\d{2})-(\\d{2})$/);\n"
-. "\t\tif(shortMatch){\n"
-. "\t\t\tvar yr = parseInt(shortMatch[3], 10);\n"
-. "\t\t\tvar fullYear = 2000 + yr;\n"
-. "\t\t\tvar current = new Date().getFullYear();\n"
-. "\t\t\tif(fullYear > current + 50){\n"
-. "\t\t\t\tfullYear -= 100;\n"
-. "\t\t\t}\n"
-. "\t\t\t$input.val(shortMatch[1] + '-' + shortMatch[2] + '-' + fullYear);\n"
-. "\t\t}\n"
-. "\t}\n"
-                . "\tfunction initAllocatorDatepickers(context){\n"
-                . "\t\tvar $ctx = context ? $(context) : $(document.body);\n"
-                . "\t\t$ctx.find('.wc_input_date, .date-picker').each(function(){\n"
-                . "\t\t\tvar $input = $(this);\n"
-                . "\t\t\tnormalizeAllocatorDate($input);\n"
-                . "\t\t\tif($input.hasClass('hasDatepicker')){\n"
-                . "\t\t\t\t$input.datepicker('destroy');\n"
-                . "\t\t\t}\n"
-                . "\t\t\t$input.datepicker({ dateFormat: allocatorDateFormat });\n"
-                . "\t\t});\n"
-                . "\t}\n"
-                . "\tinitAllocatorDatepickers();\n"
-                . "\t$(document.body).on('wc-init-datepickers', function(event, context){\n"
-                . "\t\tinitAllocatorDatepickers(context);\n"
-                . "\t});\n"
-                . "});";
+
+        $datepicker_js = <<<'JS'
+jQuery(function($){
+    var allocatorDateFormat = 'dd-mm-yy';
+
+    function ensureAllocatorOverlay(){
+        var $overlay = $('#lpr-allocator-datepicker-overlay');
+        if(!$overlay.length){
+            $overlay = $('<div id="lpr-allocator-datepicker-overlay" aria-hidden="true" role="presentation"><div class="lpr-datepicker-surface"></div></div>');
+            $('body').append($overlay);
+        }
+        return $overlay;
+    }
+
+    function openAllocatorOverlay(inst){
+        var $overlay = ensureAllocatorOverlay();
+        var $surface = $overlay.find('.lpr-datepicker-surface');
+
+        $surface.append(inst.dpDiv);
+        inst.dpDiv.addClass('lpr-datepicker-modal');
+        $overlay.attr('aria-hidden','false').addClass('is-active');
+    }
+
+    function closeAllocatorOverlay(){
+        var $overlay = $('#lpr-allocator-datepicker-overlay');
+        if(!$overlay.length){
+            return;
+        }
+
+        $overlay.attr('aria-hidden','true').removeClass('is-active');
+        $('#ui-datepicker-div').removeClass('lpr-datepicker-modal').appendTo(document.body);
+    }
+
+    function normalizeAllocatorDate($input){
+        var val = ($input.val() || '').trim();
+        var isoMatch = val.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+        if(isoMatch){
+            $input.val(isoMatch[3] + '-' + isoMatch[2] + '-' + isoMatch[1]);
+            return;
+        }
+
+        var longMatch = val.match(/^(\d{2})-(\d{2})-(\d{4})$/);
+        if(longMatch){
+            $input.val(longMatch[1] + '-' + longMatch[2] + '-' + longMatch[3]);
+            return;
+        }
+
+        var shortMatch = val.match(/^(\d{2})-(\d{2})-(\d{2})$/);
+        if(shortMatch){
+            var yr = parseInt(shortMatch[3], 10);
+            var fullYear = 2000 + yr;
+            var current = new Date().getFullYear();
+
+            if(fullYear > current + 50){
+                fullYear -= 100;
+            }
+
+            $input.val(shortMatch[1] + '-' + shortMatch[2] + '-' + fullYear);
+        }
+    }
+
+    function initAllocatorDatepickers(context){
+        var $ctx = context ? $(context) : $(document.body);
+
+        $ctx.find('.wc_input_date, .date-picker').each(function(){
+            var $input = $(this);
+
+            normalizeAllocatorDate($input);
+            if($input.hasClass('hasDatepicker')){
+                $input.datepicker('destroy');
+            }
+
+            $input.datepicker({
+                dateFormat: allocatorDateFormat,
+                beforeShow: function(input, inst){
+                    openAllocatorOverlay(inst);
+                },
+                onClose: function(){
+                    closeAllocatorOverlay();
+                }
+            });
+        });
+    }
+
+    initAllocatorDatepickers();
+    $(document.body).on('wc-init-datepickers', function(event, context){
+        initAllocatorDatepickers(context);
+    });
+});
+JS;
 
         if ( function_exists( 'wc_enqueue_js' ) ) {
                 wc_enqueue_js( $datepicker_js );
