@@ -9092,8 +9092,51 @@ if ( ! class_exists( __NAMESPACE__ . '\Backordered_Products_Page' ) ) {
 
 			$idx       = class_exists( __NAMESPACE__ . '\Backorder_Indexer' ) ? Backorder_Indexer::get_index( false ) : array( 'built_at' => 0, 'rows' => array() );
 			$built_ts  = isset( $idx['built_at'] ) ? (int) $idx['built_at'] : 0;
-			$rows_all  = isset( $idx['rows'] ) && is_array( $idx['rows'] ) ? $idx['rows'] : array();
-			$rows_view = self::filter_rows( $rows_all, $view );
+                        $rows_all  = isset( $idx['rows'] ) && is_array( $idx['rows'] ) ? $idx['rows'] : array();
+                        $rows_view = self::filter_rows( $rows_all, $view );
+
+                        // Preload the order index for the displayed products to show linked orders per product row.
+                        $orders_by_product = array();
+                        if ( class_exists( __NAMESPACE__ . '\Backorder_Order_Indexer' ) ) {
+                                $order_idx   = Backorder_Order_Indexer::get_index( false );
+                                $order_rows  = isset( $order_idx['rows'] ) && is_array( $order_idx['rows'] ) ? $order_idx['rows'] : array();
+                                $visible_ids = array_map( 'intval', array_keys( $rows_view ) );
+                                $visible_map = array_fill_keys( $visible_ids, true );
+
+                                foreach ( $order_rows as $row ) {
+                                        $pid = isset( $row['product_id'] ) ? (int) $row['product_id'] : 0;
+                                        if ( $pid <= 0 || ! isset( $visible_map[ $pid ] ) ) {
+                                                continue;
+                                        }
+
+                                        $is_backorder_line = ! empty( $row['is_backorder_line'] );
+                                        $backordered_qty   = isset( $row['qty_backordered'] ) ? (int) $row['qty_backordered'] : 0;
+                                        if ( ! $is_backorder_line || $backordered_qty <= 0 ) {
+                                                continue;
+                                        }
+
+                                        $order_id = isset( $row['order_id'] ) ? (int) $row['order_id'] : 0;
+                                        if ( $order_id <= 0 ) {
+                                                continue;
+                                        }
+
+                                        if ( ! isset( $orders_by_product[ $pid ] ) ) {
+                                                $orders_by_product[ $pid ] = array();
+                                        }
+
+                                        if ( isset( $orders_by_product[ $pid ][ $order_id ] ) ) {
+                                                continue; // Already captured this order for this product.
+                                        }
+
+                                        $orders_by_product[ $pid ][ $order_id ] = array(
+                                                'customer'     => (string) ( $row['customer'] ?? '' ),
+                                                'order_number' => (string) ( $row['order_number'] ?? $order_id ),
+                                                'order_url'    => (string) ( $row['order_url'] ?? '' ),
+                                                'order_date'   => (string) ( $row['order_date'] ?? '' ),
+                                                'status'       => (string) ( $row['status'] ?? '' ),
+                                        );
+                                }
+                        }
 
 			// Sort: need desc, then desired desc.
 			uasort(
@@ -9184,46 +9227,83 @@ if ( ! class_exists( __NAMESPACE__ . '\Backordered_Products_Page' ) ) {
 					.lpr-backorders-table { width:100%; border-collapse: collapse; }
 					.lpr-backorders-table th, .lpr-backorders-table td { padding:8px; border-bottom:1px solid #e5e5e5; text-align:left; vertical-align:top; }
 					.lpr-backorders-table th.num, .lpr-backorders-table td.num { text-align:right; white-space:nowrap; }
-					.lpr-quick-form { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
+                                        .lpr-quick-form { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
                                         .lpr-quick-form input[type="number"] { width:90px; }
                                         .lpr-quick-form input[type="text"] { width:140px; }
-					.tablenav-pages { margin-top: 12px; }
-				</style>
+                                        .lpr-orders-dropdown { display:none; margin-top:8px; padding:8px 10px; border:1px solid #dcdcde; background:#f6f7f7; border-radius:4px; max-width:460px; }
+                                        .lpr-orders-dropdown ul { margin:4px 0 0; padding-left:18px; }
+                                        .lpr-orders-dropdown li { margin:4px 0; line-height:1.4; }
+                                        .lpr-orders-dropdown .order-meta { display:block; color:#6c6c6c; font-size:12px; }
+                                        .tablenav-pages { margin-top: 12px; }
+                                </style>
 
-				<table class="widefat striped lpr-backorders-table">
-					<thead>
-						<tr>
-							<th><?php echo esc_html__( 'Product / Variation', 'lpr-backorder-allocator' ); ?></th>
-							<th class="num"><?php echo esc_html__( 'Backordered', 'lpr-backorder-allocator' ); ?></th>
-							<th class="num"><?php echo esc_html__( 'Allocated', 'lpr-backorder-allocator' ); ?></th>
-							<th class="num"><?php echo esc_html__( 'Required to Allocate', 'lpr-backorder-allocator' ); ?></th>
-							<th><?php echo esc_html__( 'Quick add to Supplier PO draft', 'lpr-backorder-allocator' ); ?></th>
-						</tr>
-					</thead>
-					<tbody>
-						<?php if ( empty( $subset ) ) : ?>
-							<tr><td colspan="5"><?php echo esc_html__( 'No results for this view.', 'lpr-backorder-allocator' ); ?></td></tr>
-						<?php else : ?>
-							<?php foreach ( $subset as $pid => $agg ) :
-								$desired = (int) ( $agg['desired_total'] ?? 0 );
+                                <table class="widefat striped lpr-backorders-table">
+                                        <thead>
+                                                <tr>
+                                                        <th><?php echo esc_html__( 'Product / Variation', 'lpr-backorder-allocator' ); ?></th>
+                                                        <th><?php echo esc_html__( 'Linked Orders', 'lpr-backorder-allocator' ); ?></th>
+                                                        <th class="num"><?php echo esc_html__( 'Backordered', 'lpr-backorder-allocator' ); ?></th>
+                                                        <th class="num"><?php echo esc_html__( 'Allocated', 'lpr-backorder-allocator' ); ?></th>
+                                                        <th class="num"><?php echo esc_html__( 'Required to Allocate', 'lpr-backorder-allocator' ); ?></th>
+                                                        <th><?php echo esc_html__( 'Quick add to Supplier PO draft', 'lpr-backorder-allocator' ); ?></th>
+                                                </tr>
+                                        </thead>
+                                        <tbody>
+                                                <?php if ( empty( $subset ) ) : ?>
+                                                        <tr><td colspan="6"><?php echo esc_html__( 'No results for this view.', 'lpr-backorder-allocator' ); ?></td></tr>
+                                                <?php else : ?>
+                                                        <?php foreach ( $subset as $pid => $agg ) :
+                                                                $desired = (int) ( $agg['desired_total'] ?? 0 );
 								$alloc   = (int) ( $agg['allocated_total'] ?? 0 );
                                 // Clamp allocated not to exceed desired for display sanity.
 								if ( $alloc > $desired ) { $alloc = $desired; }
 								$need    = max( 0, (int) ( $agg['need_total'] ?? ( $desired - $alloc ) ) );
 								$label   = function_exists( __NAMESPACE__ . '\lpr_allocator_product_option_label' ) ? lpr_allocator_product_option_label( (int) $pid ) : ( '#' . (int) $pid );
-								$edit    = get_edit_post_link( (int) $pid, 'url' );
-								?>
-								<tr>
-									<td>
-										<?php if ( $edit ) : ?>
-											<a href="<?php echo esc_url( $edit ); ?>"><?php echo esc_html( $label ); ?></a>
-										<?php else : ?>
-											<?php echo esc_html( $label ); ?>
-										<?php endif; ?>
-									</td>
-									<td class="num"><?php echo esc_html( (string) $desired ); ?></td>
-									<td class="num"><?php echo esc_html( (string) $alloc ); ?></td>
-									<td class="num"><strong><?php echo esc_html( (string) $need ); ?></strong></td>
+                                                                $edit    = get_edit_post_link( (int) $pid, 'url' );
+                                                                $orders  = $orders_by_product[ $pid ] ?? array();
+                                                                $toggle_id = 'lpr-orders-' . (int) $pid;
+                                                                ?>
+                                                                <tr>
+                                                                        <td>
+                                                                                <?php if ( $edit ) : ?>
+                                                                                        <a href="<?php echo esc_url( $edit ); ?>"><?php echo esc_html( $label ); ?></a>
+                                                                                <?php else : ?>
+                                                                                        <?php echo esc_html( $label ); ?>
+                                                                                <?php endif; ?>
+                                                                        </td>
+                                                                        <td>
+                                                                                <div class="lpr-orders-cell">
+                                                                                        <?php if ( ! empty( $orders ) ) : ?>
+                                                                                                <button type="button" class="button lpr-orders-toggle" data-target="<?php echo esc_attr( $toggle_id ); ?>" data-label-show="<?php echo esc_attr( __( 'Show orders', 'lpr-backorder-allocator' ) ); ?>" data-label-hide="<?php echo esc_attr( __( 'Hide orders', 'lpr-backorder-allocator' ) ); ?>" aria-expanded="false"><?php echo esc_html__( 'Show orders', 'lpr-backorder-allocator' ); ?></button>
+                                                                                                <div id="<?php echo esc_attr( $toggle_id ); ?>" class="lpr-orders-dropdown" aria-hidden="true">
+                                                                                                        <ul>
+                                                                                                                <?php foreach ( $orders as $order ) : ?>
+                                                                                                                        <li>
+                                                                                                                                <strong><?php echo esc_html( $order['customer'] ?: __( 'Customer', 'lpr-backorder-allocator' ) ); ?></strong><br />
+                                                                                                                                <?php if ( ! empty( $order['order_url'] ) ) : ?>
+                                                                                                                                        <a href="<?php echo esc_url( $order['order_url'] ); ?>"><?php echo esc_html( sprintf( __( 'Order #%s', 'lpr-backorder-allocator' ), $order['order_number'] ) ); ?></a>
+                                                                                                                                <?php else : ?>
+                                                                                                                                        <?php echo esc_html( sprintf( __( 'Order #%s', 'lpr-backorder-allocator' ), $order['order_number'] ) ); ?>
+                                                                                                                                <?php endif; ?>
+                                                                                                                                <span class="order-meta">
+                                                                                                                                        <?php if ( ! empty( $order['order_date'] ) ) : ?>
+                                                                                                                                                <?php echo esc_html( $order['order_date'] ); ?>
+                                                                                                                                                &middot;
+                                                                                                                                        <?php endif; ?>
+                                                                                                                                        <?php echo esc_html( $order['status'] ); ?>
+                                                                                                                                </span>
+                                                                                                                        </li>
+                                                                                                                <?php endforeach; ?>
+                                                                                                        </ul>
+                                                                                                </div>
+                                                                                        <?php else : ?>
+                                                                                                <span class="description"><?php echo esc_html__( 'No linked orders found.', 'lpr-backorder-allocator' ); ?></span>
+                                                                                        <?php endif; ?>
+                                                                                </div>
+                                                                        </td>
+                                                                        <td class="num"><?php echo esc_html( (string) $desired ); ?></td>
+                                                                        <td class="num"><?php echo esc_html( (string) $alloc ); ?></td>
+                                                                        <td class="num"><strong><?php echo esc_html( (string) $need ); ?></strong></td>
 									<td>
 										<form class="lpr-quick-form" method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
 											<input type="hidden" name="action" value="lpr_quick_add_to_po" />
@@ -9271,11 +9351,31 @@ if ( ! class_exists( __NAMESPACE__ . '\Backordered_Products_Page' ) ) {
 							);
 							?>
 						</span>
-					</div>
-				<?php endif; ?>
-			</div>
-			<?php
-		}
+                                        </div>
+                                <?php endif; ?>
+                                <script>
+                                document.addEventListener('DOMContentLoaded', function() {
+                                        document.querySelectorAll('.lpr-orders-toggle').forEach(function(btn) {
+                                                btn.addEventListener('click', function() {
+                                                        var targetId = this.getAttribute('data-target');
+                                                        var target = targetId ? document.getElementById(targetId) : null;
+                                                        if (!target) {
+                                                                return;
+                                                        }
+                                                        var isOpen = target.style.display === 'block';
+                                                        target.style.display = isOpen ? 'none' : 'block';
+                                                        target.setAttribute('aria-hidden', isOpen ? 'true' : 'false');
+                                                        this.setAttribute('aria-expanded', isOpen ? 'false' : 'true');
+                                                        var show = this.getAttribute('data-label-show') || this.textContent;
+                                                        var hide = this.getAttribute('data-label-hide') || this.textContent;
+                                                        this.textContent = isOpen ? show : hide;
+                                                });
+                                        });
+                                });
+                                </script>
+                        </div>
+                        <?php
+                }
 	}
 	Backordered_Products_Page::init();
 }
