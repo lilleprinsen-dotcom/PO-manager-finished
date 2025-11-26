@@ -1182,6 +1182,8 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_get_po_allocation_index'
                         return array();
                 }
 
+                $meta_exists = metadata_exists( 'post', $po_id, PO_META_ALLOC_INDEX );
+
                 $index = get_post_meta( $po_id, PO_META_ALLOC_INDEX, true );
                 if ( ! is_array( $index ) ) {
                         $index = array();
@@ -1204,6 +1206,11 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_get_po_allocation_index'
                         // Normalize storage if we cleaned anything.
                         update_post_meta( $po_id, PO_META_ALLOC_INDEX, array_values( $sanitized ) );
                         return array_values( $sanitized );
+                }
+
+                if ( ! $meta_exists ) {
+                        // Brand new POs have no allocations; skip the expensive DB rebuild until an allocation is stored.
+                        return array();
                 }
 
                 $rebuilt = lpr_allocator_rebuild_po_alloc_index( $po_id );
