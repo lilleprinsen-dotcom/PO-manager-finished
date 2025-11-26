@@ -2779,6 +2779,7 @@ public static function update_line_eta( int $order_id ): void {
                         $has_allocs        = false;
                         $eta_dates         = array();
                         $eta_label_fallback = '';
+                        $eta_display       = $unallocated_label;
 
                         if ( $order instanceof \WC_Order ) {
                                 $created = $order->get_date_created();
@@ -2837,9 +2838,11 @@ public static function update_line_eta( int $order_id ): void {
                         if ( $overall_eta ) {
                                 $eta_label    = lpr_allocator_format_store_date( $overall_eta->format( 'Y-m-d' ) );
                                 $eta_received = true;
+                                $eta_display  = $eta_label;
                         } elseif ( '' !== trim( $eta_label_fallback ) ) {
                                 $eta_label    = $eta_label_fallback;
                                 $eta_received = true;
+                                $eta_display  = $eta_label;
                         } else {
                                 $eta_label = $unallocated_label;
                         }
@@ -2862,8 +2865,8 @@ public static function update_line_eta( int $order_id ): void {
                                 ),
                                 array(
                                         'label'    => $labels['delivery'] ?? __( 'Estimated delivery', 'lpr-backorder-allocator' ),
-                                        'complete' => $eta_received,
-                                        'detail'   => $eta_label,
+                                        'complete' => false,
+                                        'detail'   => $pending_label,
                                 ),
                         );
 
@@ -2877,8 +2880,9 @@ public static function update_line_eta( int $order_id ): void {
                         $percent = count( $steps ) > 0 ? round( ( $completed / count( $steps ) ) * 100 ) : 0;
 
                         return array(
-                                'steps'   => $steps,
-                                'percent' => max( 0, min( 100, $percent ) ),
+                                'steps'     => $steps,
+                                'percent'   => max( 0, min( 100, $percent ) ),
+                                'eta_label' => $eta_display,
                         );
                 }
 
@@ -2890,43 +2894,46 @@ public static function update_line_eta( int $order_id ): void {
                                 return '';
                         }
 
-                        $percent      = (int) ( $progress['percent'] ?? 0 );
-                        $ring_label   = str_replace( '%complete%', (string) $percent, $complete_tpl );
-                        $ring_color   = $color ?: '#1a1a1a';
-                        $ring_back    = '#e5e7eb';
-                        $steps_html   = '';
+                        $percent     = (int) ( $progress['percent'] ?? 0 );
+                        $eta_label   = (string) ( $progress['eta_label'] ?? '' );
+                        $ring_label  = str_replace( '%complete%', (string) $percent, $complete_tpl );
+                        $ring_color  = $color ?: '#1a1a1a';
+                        $ring_back   = '#e5e7eb';
+                        $steps_html  = '';
 
                         foreach ( $progress['steps'] as $step ) {
                                 $complete = ! empty( $step['complete'] );
                                 $state    = $complete ? $done_label : $pending_label;
                                 $detail   = isset( $step['detail'] ) ? (string) $step['detail'] : '';
                                 $pill     = $complete ? $ring_color : $ring_back;
-                                $icon     = $complete ? '✓' : '•';
+                                $icon     = $complete ? '✅' : '⏳';
 
-                                $steps_html .= '<div style="display:flex;align-items:center;margin:6px 0;">';
-                                $steps_html .= '<span style="display:inline-flex;width:22px;height:22px;border-radius:50%;background:' . esc_attr( $pill ) . ';color:' . ( $complete ? '#fff' : '#111' ) . ';align-items:center;justify-content:center;font-weight:700;font-size:12px;">' . esc_html( $icon ) . '</span>';
-                                $steps_html .= '<div style="margin-left:10px;">';
-                                $steps_html .= '<div style="font-weight:600;color:#111;font-size:14px;">' . esc_html( $step['label'] ?? '' ) . '</div>';
-                                $steps_html .= '<div style="color:#555;font-size:12px;">' . esc_html( $state );
+                                $steps_html .= '<div style="display:flex;align-items:center;gap:12px;margin:6px 0;padding:10px 12px;border-radius:14px;background:rgba(0,0,0,0.03);">';
+                                $steps_html .= '<span style="display:inline-flex;width:30px;height:30px;border-radius:12px;background:' . esc_attr( $pill ) . ';color:' . ( $complete ? '#fff' : '#111' ) . ';align-items:center;justify-content:center;font-weight:700;font-size:14px;box-shadow:0 8px 20px rgba(0,0,0,0.06);">' . esc_html( $icon ) . '</span>';
+                                $steps_html .= '<div style="text-align:left;">';
+                                $steps_html .= '<div style="font-weight:700;color:#0f172a;font-size:14px;">' . esc_html( $step['label'] ?? '' ) . '</div>';
+                                $steps_html .= '<div style="color:#475569;font-size:12px;">' . esc_html( $state );
                                 if ( '' !== trim( $detail ) ) {
                                         $steps_html .= ' · ' . esc_html( $detail );
                                 }
                                 $steps_html .= '</div></div></div>';
                         }
 
-                        $html  = '<div style="margin:20px 0;padding:16px;border:1px solid #eee;border-radius:12px;">';
+                        $html  = '<div style="margin:20px 0;padding:20px;border-radius:20px;background:linear-gradient(135deg,#f8fafc,#fefce8);box-shadow:0 16px 30px rgba(15,23,42,0.08);text-align:center;">';
                         if ( '' !== trim( $heading ) ) {
-                                $html .= '<div style="font-weight:700;font-size:16px;margin-bottom:6px;">' . esc_html( $heading ) . '</div>';
+                                $html .= '<div style="font-weight:800;font-size:18px;margin-bottom:4px;color:#0f172a;">' . esc_html( $heading ) . ' ✨</div>';
                         }
                         if ( '' !== trim( $subheading ) ) {
-                                $html .= '<div style="color:#555;margin-bottom:12px;font-size:13px;">' . esc_html( $subheading ) . '</div>';
+                                $html .= '<div style="color:#475569;margin-bottom:16px;font-size:13px;">' . esc_html( $subheading ) . '</div>';
                         }
-                        $html .= '<div style="display:flex;align-items:center;gap:18px;flex-wrap:wrap;">';
-                        $html .= '<div style="position:relative;width:170px;height:170px;flex-shrink:0;">';
+                        $html .= '<div style="display:flex;align-items:center;justify-content:center;gap:24px;flex-wrap:wrap;">';
+                        $html .= '<div style="position:relative;width:190px;height:190px;flex-shrink:0;">';
                         $html .= '<div style="position:absolute;inset:0;border-radius:50%;background:conic-gradient(' . esc_attr( $ring_color ) . ' ' . $percent . '%, ' . esc_attr( $ring_back ) . ' ' . $percent . '%);"></div>';
-                        $html .= '<div style="position:absolute;inset:16px;border-radius:50%;background:#fff;display:flex;align-items:center;justify-content:center;text-align:center;font-weight:700;color:' . esc_attr( $ring_color ) . ';font-size:14px;padding:10px;">' . esc_html( $ring_label ) . '</div>';
+                        $html .= '<div style="position:absolute;inset:16px;border-radius:50%;background:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;font-weight:800;color:' . esc_attr( $ring_color ) . ';font-size:16px;padding:12px;line-height:1.4;">';
+                        $html .= esc_html( $ring_label ) . '<span style="display:block;color:#0f172a;font-size:12px;margin-top:6px;">🚚 ' . esc_html( $eta_label ?: $pending_label ) . '</span>';
                         $html .= '</div>';
-                        $html .= '<div style="flex:1;min-width:220px;">' . $steps_html . '</div>';
+                        $html .= '</div>';
+                        $html .= '<div style="flex:1;min-width:240px;max-width:360px;margin:0 auto;">' . $steps_html . '</div>';
                         $html .= '</div></div>';
 
                         return $html;
