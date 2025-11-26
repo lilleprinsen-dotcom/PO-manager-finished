@@ -729,18 +729,26 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                                 return $text;
                         }
 
-                        $eta      = (string) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_ETA' ) ? PRODUCT_META_NEXT_EXTRA_ETA : '_lpr_next_extra_eta', true );
-                        $eta_text = $eta ? $eta : __( 'No ETA set', 'lpr-backorder-allocator' );
+                        $eta = trim( (string) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_ETA' ) ? PRODUCT_META_NEXT_EXTRA_ETA : '_lpr_next_extra_eta', true ) );
+                        if ( '' === $eta ) {
+                                return $text;
+                        }
 
                         $settings = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array();
                         $notice   = self::build_notice_text(
                                 $qty,
-                                $eta_text,
+                                $eta,
                                 $settings['frontend_notice_template'] ?? '',
                                 Settings::defaults()['frontend_notice_template']
                         );
 
-                        return $notice ? ( $text ? trim( $text . ' ' . $notice ) : $notice ) : $text;
+                        if ( '' === $notice ) {
+                                return $text;
+                        }
+
+                        $formatted_notice = '🏭 ' . $notice;
+
+                        return $text ? trim( $text . '<br />' . $formatted_notice ) : $formatted_notice;
                 }
 
                 /**
@@ -861,13 +869,15 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Cart' ) ) {
                                 return;
                         }
 
-                        $eta      = (string) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_ETA' ) ? PRODUCT_META_NEXT_EXTRA_ETA : '_lpr_next_extra_eta', true );
-                        $eta_text = $eta ? $eta : __( 'No ETA set', 'lpr-backorder-allocator' );
+                        $eta = trim( (string) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_ETA' ) ? PRODUCT_META_NEXT_EXTRA_ETA : '_lpr_next_extra_eta', true ) );
+                        if ( '' === $eta ) {
+                                return;
+                        }
 
                         $settings = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array();
                         $notice   = Incoming_Stock_Storefront::build_notice_text(
                                 $qty,
-                                $eta_text,
+                                $eta,
                                 $settings['frontend_cart_notice_template'] ?? '',
                                 Settings::defaults()['frontend_cart_notice_template']
                         );
