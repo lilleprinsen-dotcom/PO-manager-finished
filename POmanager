@@ -1651,6 +1651,78 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_remove_po_allocations_fr
         }
 }
 
+
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_release_allocations_on_status_change' ) ) {
+	/**
+	 * Release all allocations on an order when it moves into a cancelled/refunded/failed state.
+	 *
+	 * Supports localized/custom status slugs such as "kansellert" in addition to the standard
+	 * WooCommerce cancelled status.
+	 *
+	 * @param int             $order_id
+	 * @param string          $old_status
+	 * @param string          $new_status
+	 * @param \WC_Order|null $order
+	 * @return void
+	 */
+	function lpr_allocator_release_allocations_on_status_change( int $order_id, string $old_status = '', string $new_status = '', $order = null ): void {
+		$normalized = sanitize_key( preg_replace( '/^wc-/', '', (string) $new_status ) );
+		$cancelled  = array( 'cancelled', 'canceled', 'kansellert', 'refunded', 'failed', 'trash' );
+		if ( ! in_array( $normalized, $cancelled, true ) ) {
+			return; // Only act on cancellation-like statuses.
+		}
+
+		if ( ! ( $order instanceof \WC_Order ) ) {
+			$order = function_exists( 'wc_get_order' ) ? wc_get_order( $order_id ) : null;
+		}
+		if ( ! ( $order instanceof \WC_Order ) ) {
+			return;
+		}
+
+		$meta_key      = defined( __NAMESPACE__ . '\ORDER_ITEM_META_ALLOCATIONS' ) ? ORDER_ITEM_META_ALLOCATIONS : 'lpr_allocations';
+		$needs_rebuild = false;
+
+		foreach ( $order->get_items( 'line_item' ) as $item ) {
+			if ( ! ( $item instanceof \WC_Order_Item_Product ) ) {
+				continue;
+			}
+
+			$allocs = $item->get_meta( $meta_key, true );
+			if ( ! is_array( $allocs ) ) {
+				continue;
+			}
+
+			$changed = false;
+			foreach ( $allocs as &$row ) {
+				$status = isset( $row['status'] ) ? sanitize_key( (string) $row['status'] ) : 'reserved';
+				if ( 'released' === $status ) {
+					continue;
+				}
+
+				lpr_allocator_touch_allocation_status( $row, 'released' );
+				$changed = true;
+			}
+			unset( $row );
+
+			if ( $changed ) {
+				$item->update_meta_data( $meta_key, $allocs );
+				$item->save();
+				$needs_rebuild = true;
+			}
+		}
+
+		if ( $needs_rebuild ) {
+			if ( function_exists( __NAMESPACE__ . '\lpr_allocator_reapply_po_allocations_for_order' ) ) {
+				lpr_allocator_reapply_po_allocations_for_order( (int) $order->get_id() );
+			}
+			if ( class_exists( __NAMESPACE__ . '\ETA' ) ) {
+				ETA::update_line_eta( (int) $order->get_id() );
+			}
+		}
+	}
+}
+
+add_action( 'woocommerce_order_status_changed', __NAMESPACE__ . '\lpr_allocator_release_allocations_on_status_change', 9, 4 );
 add_action( 'woocommerce_order_status_changed', __NAMESPACE__ . '\lpr_allocator_reapply_po_allocations_for_order', 10, 1 );
 
 if ( ! class_exists( __NAMESPACE__ . '\Supplier_PO_CPT' ) ) {
