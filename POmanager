@@ -95,6 +95,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                                 'email_footer_text_no'  => '',
                                 'eta_email_subject'     => __( 'Your order ETA has been updated', 'lpr-backorder-allocator' ),
                                 'eta_email_intro'       => __( 'We’ve updated the expected arrival for the items below:', 'lpr-backorder-allocator' ),
+                                'email_eta_disclaimer'  => __( 'All dates are estimates; delays can occur.', 'lpr-backorder-allocator' ),
                                 'email_progress_heading'           => __( 'Order progress', 'lpr-backorder-allocator' ),
                                 'email_progress_subheading'        => __( 'A quick view of where your order stands.', 'lpr-backorder-allocator' ),
                                 'email_progress_complete_label'    => __( '%complete%% complete', 'lpr-backorder-allocator' ),
@@ -222,6 +223,11 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                                 $eta_intro = $defaults['eta_email_intro'];
                         }
 
+                        $eta_disclaimer = isset( $raw['email_eta_disclaimer'] ) ? wp_kses_post( $raw['email_eta_disclaimer'] ) : '';
+                        if ( '' === trim( $eta_disclaimer ) ) {
+                                $eta_disclaimer = $defaults['email_eta_disclaimer'];
+                        }
+
                         $progress_heading        = isset( $raw['email_progress_heading'] ) ? sanitize_text_field( $raw['email_progress_heading'] ) : '';
                         $progress_subheading     = isset( $raw['email_progress_subheading'] ) ? sanitize_text_field( $raw['email_progress_subheading'] ) : '';
                         $progress_complete_label = isset( $raw['email_progress_complete_label'] ) ? sanitize_text_field( $raw['email_progress_complete_label'] ) : '';
@@ -255,6 +261,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                                 'email_footer_text_no'  => $footer,
                                 'eta_email_subject'     => $eta_subject,
                                 'eta_email_intro'       => $eta_intro,
+                                'email_eta_disclaimer'  => $eta_disclaimer,
                                 'email_progress_heading'        => '' === trim( $progress_heading ) ? $defaults['email_progress_heading'] : $progress_heading,
                                 'email_progress_subheading'     => '' === trim( $progress_subheading ) ? $defaults['email_progress_subheading'] : $progress_subheading,
                                 'email_progress_complete_label' => '' === trim( $progress_complete_label ) ? $defaults['email_progress_complete_label'] : $progress_complete_label,
@@ -383,6 +390,16 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                         'css'         => 'min-width: 400px; height: 80px;',
                                         'placeholder' => $defaults['eta_email_intro'],
                                         'default'     => $defaults['eta_email_intro'],
+                                ),
+
+                                array(
+                                        'title'       => __( 'Date disclaimer', 'lpr-backorder-allocator' ),
+                                        'desc'        => __( 'Shown below ETA details to remind customers that dates are estimates and delays can occur.', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_email_eta_disclaimer',
+                                        'type'        => 'textarea',
+                                        'css'         => 'min-width: 400px; height: 60px;',
+                                        'placeholder' => $defaults['email_eta_disclaimer'],
+                                        'default'     => $defaults['email_eta_disclaimer'],
                                 ),
 
                                 array(
@@ -723,6 +740,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                   'lpr_allocator_email_footer_text_no'       => (string) $settings['email_footer_text_no'],
                                   'lpr_allocator_eta_email_subject'          => (string) $settings['eta_email_subject'],
                                   'lpr_allocator_eta_email_intro'            => (string) $settings['eta_email_intro'],
+                                  'lpr_allocator_email_eta_disclaimer'       => (string) $settings['email_eta_disclaimer'],
                                   'lpr_allocator_email_progress_heading'     => (string) $settings['email_progress_heading'],
                                   'lpr_allocator_email_progress_subheading'  => (string) $settings['email_progress_subheading'],
                                   'lpr_allocator_email_progress_complete_label' => (string) $settings['email_progress_complete_label'],
@@ -836,6 +854,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                 'email_footer_text_no'       => isset( $_POST['lpr_allocator_email_footer_text_no'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_footer_text_no'] ) : '',
                                 'eta_email_subject'          => isset( $_POST['lpr_allocator_eta_email_subject'] ) ? (string) wp_unslash( $_POST['lpr_allocator_eta_email_subject'] ) : '',
                                 'eta_email_intro'            => isset( $_POST['lpr_allocator_eta_email_intro'] ) ? (string) wp_unslash( $_POST['lpr_allocator_eta_email_intro'] ) : '',
+                                'email_eta_disclaimer'       => isset( $_POST['lpr_allocator_email_eta_disclaimer'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_eta_disclaimer'] ) : '',
                                 'email_progress_heading'     => isset( $_POST['lpr_allocator_email_progress_heading'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_progress_heading'] ) : '',
                                 'email_progress_subheading'  => isset( $_POST['lpr_allocator_email_progress_subheading'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_progress_subheading'] ) : '',
                                 'email_progress_complete_label' => isset( $_POST['lpr_allocator_email_progress_complete_label'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_progress_complete_label'] ) : '',
@@ -2716,6 +2735,7 @@ public static function update_line_eta( int $order_id ): void {
                         $logo          = (string) ( $settings['brand_logo_url']       ?? '' );
                         $color         = (string) ( $settings['brand_primary_color']  ?? '#1a1a1a' );
                         $foot          = (string) ( $settings['email_footer_text_no'] ?? '' );
+                        $disclaimer    = (string) ( $settings['email_eta_disclaimer'] ?? ( $defaults['email_eta_disclaimer'] ?? '' ) );
                         $progress_head = (string) ( $settings['email_progress_heading'] ?? ( $defaults['email_progress_heading'] ?? '' ) );
                         $progress_sub  = (string) ( $settings['email_progress_subheading'] ?? ( $defaults['email_progress_subheading'] ?? '' ) );
                         $progress_ring = (string) ( $settings['email_progress_complete_label'] ?? ( $defaults['email_progress_complete_label'] ?? '%complete%%' ) );
@@ -2758,6 +2778,10 @@ public static function update_line_eta( int $order_id ): void {
                         if ( ! empty( $overview_rows ) ) {
                                 $body .= '<h3 style="margin:16px 0 8px 0;">' . esc_html( $overview_heading ) . '</h3>';
                                 $body .= self::render_backorder_overview( $overview_rows, $th_item, $th_new, $unallocated_label );
+                        }
+
+                        if ( '' !== trim( (string) $disclaimer ) ) {
+                                $body .= '<p style="margin-top:12px;color:#475569;font-size:12px;font-style:italic;">' . wp_kses_post( $disclaimer ) . '</p>';
                         }
 
                         if ( $foot ) {
@@ -2847,6 +2871,9 @@ public static function update_line_eta( int $order_id ): void {
                                 $eta_label = $unallocated_label;
                         }
 
+                        $delivery_detail  = $eta_received ? $eta_label : $pending_label;
+                        $delivery_complete = $eta_received;
+
                         $steps = array(
                                 array(
                                         'label'    => $labels['order'] ?? __( 'Order placed', 'lpr-backorder-allocator' ),
@@ -2865,8 +2892,8 @@ public static function update_line_eta( int $order_id ): void {
                                 ),
                                 array(
                                         'label'    => $labels['delivery'] ?? __( 'Estimated delivery', 'lpr-backorder-allocator' ),
-                                        'complete' => false,
-                                        'detail'   => $pending_label,
+                                        'complete' => $delivery_complete,
+                                        'detail'   => $delivery_detail,
                                 ),
                         );
 
@@ -2940,11 +2967,28 @@ public static function update_line_eta( int $order_id ): void {
                 }
 
                 /**
+                 * Shared wrapper for email tables to ensure consistent styling.
+                 */
+                protected static function wrap_email_table( string $head_html, string $body_html ): string {
+                        $table  = '<div style="margin:8px 0 12px;overflow:hidden;border:1px solid #e2e8f0;border-radius:12px;box-shadow:0 12px 30px rgba(15,23,42,0.06);">';
+                        $table .= '<table cellspacing="0" cellpadding="0" border="0" style="width:100%;border-collapse:collapse;font-size:14px;">';
+                        $table .= $head_html . $body_html;
+                        $table .= '</table></div>';
+
+                        return $table;
+                }
+
+                /**
                  * Render ETA rows as a HTML table.
                  */
                 protected static function render_eta_table( array $rows, string $heading_item, string $heading_prev, string $heading_new, string $unallocated_label ): string {
-                        $html  = '<table cellspacing="0" cellpadding="6" border="0" style="width:100%;border-collapse:collapse;">';
-                        $html .= '<thead><tr><th align="left">' . esc_html( $heading_item ) . '</th><th align="left">' . esc_html( $heading_prev ) . '</th><th align="left">' . esc_html( $heading_new ) . '</th></tr></thead><tbody>';
+                        $head  = '<thead style="background:#f8fafc;"><tr>';
+                        $head .= '<th align="left" style="padding:12px;color:#0f172a;font-size:13px;font-weight:700;border-bottom:1px solid #e2e8f0;">' . esc_html( $heading_item ) . '</th>';
+                        $head .= '<th align="left" style="padding:12px;color:#0f172a;font-size:13px;font-weight:700;border-bottom:1px solid #e2e8f0;">' . esc_html( $heading_prev ) . '</th>';
+                        $head .= '<th align="left" style="padding:12px;color:#0f172a;font-size:13px;font-weight:700;border-bottom:1px solid #e2e8f0;">' . esc_html( $heading_new ) . '</th>';
+                        $head .= '</tr></thead>';
+
+                        $body = '<tbody style="background:#fff;">';
 
                         foreach ( $rows as $row ) {
                                 $name = isset( $row['name'] ) ? (string) $row['name'] : '';
@@ -2958,20 +3002,28 @@ public static function update_line_eta( int $order_id ): void {
                                         $new = $unallocated_label;
                                 }
 
-                                $html .= '<tr><td>' . esc_html( $name ) . '</td><td>' . esc_html( $prev ) . '</td><td>' . esc_html( $new ) . '</td></tr>';
+                                $body .= '<tr>';
+                                $body .= '<td style="padding:12px;border-bottom:1px solid #e2e8f0;color:#0f172a;font-weight:600;">' . esc_html( $name ) . '</td>';
+                                $body .= '<td style="padding:12px;border-bottom:1px solid #e2e8f0;color:#475569;">' . esc_html( $prev ) . '</td>';
+                                $body .= '<td style="padding:12px;border-bottom:1px solid #e2e8f0;color:#0f172a;">' . esc_html( $new ) . '</td>';
+                                $body .= '</tr>';
                         }
 
-                        $html .= '</tbody></table>';
+                        $body .= '</tbody>';
 
-                        return $html;
+                        return self::wrap_email_table( $head, $body );
                 }
 
                 /**
                  * Render a simple overview table of backordered lines.
                  */
                 protected static function render_backorder_overview( array $rows, string $heading_item, string $heading_eta, string $unallocated_label ): string {
-                        $html  = '<table cellspacing="0" cellpadding="6" border="0" style="width:100%;border-collapse:collapse;">';
-                        $html .= '<thead><tr><th align="left">' . esc_html( $heading_item ) . '</th><th align="left">' . esc_html( $heading_eta ) . '</th></tr></thead><tbody>';
+                        $head  = '<thead style="background:#f8fafc;"><tr>';
+                        $head .= '<th align="left" style="padding:12px;color:#0f172a;font-size:13px;font-weight:700;border-bottom:1px solid #e2e8f0;">' . esc_html( $heading_item ) . '</th>';
+                        $head .= '<th align="left" style="padding:12px;color:#0f172a;font-size:13px;font-weight:700;border-bottom:1px solid #e2e8f0;">' . esc_html( $heading_eta ) . '</th>';
+                        $head .= '</tr></thead>';
+
+                        $body = '<tbody style="background:#fff;">';
 
                         foreach ( $rows as $row ) {
                                 $name = isset( $row['name'] ) ? (string) $row['name'] : '';
@@ -2981,12 +3033,15 @@ public static function update_line_eta( int $order_id ): void {
                                         $eta = $unallocated_label;
                                 }
 
-                                $html .= '<tr><td>' . esc_html( $name ) . '</td><td>' . esc_html( $eta ) . '</td></tr>';
+                                $body .= '<tr>';
+                                $body .= '<td style="padding:12px;border-bottom:1px solid #e2e8f0;color:#0f172a;font-weight:600;">' . esc_html( $name ) . '</td>';
+                                $body .= '<td style="padding:12px;border-bottom:1px solid #e2e8f0;color:#0f172a;">' . esc_html( $eta ) . '</td>';
+                                $body .= '</tr>';
                         }
 
-                        $html .= '</tbody></table>';
+                        $body .= '</tbody>';
 
-                        return $html;
+                        return self::wrap_email_table( $head, $body );
                 }
 
                 /**
