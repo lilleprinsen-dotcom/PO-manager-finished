@@ -2923,24 +2923,28 @@ public static function update_line_eta( int $order_id ): void {
                                         'label'    => $labels['order'] ?? __( 'Order placed', 'lpr-backorder-allocator' ),
                                         'complete' => true,
                                         'detail'   => $order_date,
+                                        'type'     => 'order',
                                 ),
                                 array(
                                         'label'    => $labels['po'] ?? __( 'PO allocated', 'lpr-backorder-allocator' ),
                                         'complete' => 'complete' === $po_state,
                                         'detail'   => $po_detail,
                                         'state'    => $po_state,
+                                        'type'     => 'po',
                                 ),
                                 array(
                                         'label'    => $labels['eta'] ?? __( 'ETA received', 'lpr-backorder-allocator' ),
                                         'complete' => $eta_received,
                                         'detail'   => $eta_received ? $eta_label : $pending_label,
                                         'state'    => $eta_state,
+                                        'type'     => 'eta',
                                 ),
                                 array(
                                         'label'    => $labels['delivery'] ?? __( 'Estimated delivery', 'lpr-backorder-allocator' ),
                                         'complete' => $delivery_complete,
                                         'detail'   => $delivery_detail,
                                         'state'    => $ship_state,
+                                        'type'     => 'delivery',
                                 ),
                         );
 
@@ -2974,25 +2978,35 @@ public static function update_line_eta( int $order_id ): void {
                                 return '';
                         }
 
-                        $percent     = (int) ( $progress['percent'] ?? 0 );
-                        $eta_label   = (string) ( $progress['eta_label'] ?? '' );
-                        $ring_label  = str_replace( '%complete%', (string) $percent, $complete_tpl );
-                        $ring_color  = $color ?: '#1a1a1a';
-                        $ring_back   = '#e5e7eb';
-                        $eta_text    = $eta_label ?: $pending_label;
-                        $steps_html  = '<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;">';
+                        $percent      = (int) ( $progress['percent'] ?? 0 );
+                        $eta_label    = (string) ( $progress['eta_label'] ?? '' );
+                        $ring_label   = str_replace( '%complete%', (string) $percent, $complete_tpl );
+                        $ring_color   = $color ?: '#1a1a1a';
+                        $ring_back    = '#e5e7eb';
+                        $eta_text     = $eta_label ?: $pending_label;
+                        $circum       = 2 * pi() * 60;
+                        $progress_len = $circum * ( max( 0, min( 100, $percent ) ) / 100 );
+                        $offset       = $circum - $progress_len;
+                        $icons        = array(
+                                'order'    => '🛒',
+                                'po'       => '📦',
+                                'eta'      => '⏰',
+                                'delivery' => '🚚',
+                        );
+                        $steps_html   = '<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;">';
 
                         foreach ( $progress['steps'] as $step ) {
                                 $complete    = ! empty( $step['complete'] );
                                 $state       = isset( $step['state'] ) ? (string) $step['state'] : ( $complete ? 'complete' : 'pending' );
                                 $detail      = isset( $step['detail'] ) ? (string) $step['detail'] : '';
-                                $icon        = 'complete' === $state ? '✅' : ( 'partial' === $state ? '➡️' : '⏳' );
+                                $type        = isset( $step['type'] ) ? (string) $step['type'] : '';
+                                $icon        = isset( $icons[ $type ] ) ? $icons[ $type ] : ( 'complete' === $state ? '✅' : ( 'partial' === $state ? '➡️' : '⏳' ) );
                                 $pill        = 'complete' === $state ? $ring_color : ( 'partial' === $state ? '#fbbf24' : $ring_back );
                                 $state_label = 'complete' === $state ? $done_label : ( 'partial' === $state ? __( 'In progress', 'lpr-backorder-allocator' ) : $pending_label );
 
                                 $steps_html .= '<tr>'; // icon column
-                                $steps_html .= '<td valign="top" style="padding:8px 10px 8px 0;width:34px;">';
-                                $steps_html .= '<div style="width:30px;height:30px;border-radius:12px;background:' . esc_attr( $pill ) . ';color:' . ( 'complete' === $state ? '#fff' : '#111827' ) . ';text-align:center;line-height:30px;font-weight:700;font-size:14px;">' . esc_html( $icon ) . '</div>';
+                                $steps_html .= '<td valign="top" style="padding:8px 10px 8px 0;width:40px;">';
+                                $steps_html .= '<div style="width:36px;height:36px;border-radius:14px;background:' . esc_attr( $pill ) . ';color:' . ( 'complete' === $state ? '#fff' : '#0f172a' ) . ';text-align:center;line-height:36px;font-weight:700;font-size:16px;">' . esc_html( $icon ) . '</div>';
                                 $steps_html .= '</td>';
 
                                 $steps_html .= '<td valign="top" style="padding:8px 0 8px 0;border-bottom:1px solid #e2e8f0;">';
@@ -3008,25 +3022,30 @@ public static function update_line_eta( int $order_id ): void {
 
                         $steps_html .= '</table>';
 
-                        $bar  = '<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;">';
-                        $bar .= '<tr><td style="padding:0 0 6px 0;font-size:12px;color:#0f172a;font-weight:700;">' . esc_html( $ring_label ) . '</td></tr>';
-                        $bar .= '<tr><td style="padding:0 0 10px 0;">';
-                        $bar .= '<div style="width:100%;background:' . esc_attr( $ring_back ) . ';height:12px;border-radius:999px;">';
-                        $bar .= '<div style="width:' . $percent . '%;max-width:95%;background:' . esc_attr( $ring_color ) . ';height:12px;border-radius:999px;"></div>';
-                        $bar .= '</div>';
-                        $bar .= '</td></tr>';
-                        $bar .= '<tr><td style="font-size:12px;color:#334155;">' . esc_html( sprintf( __( 'ETA: %s (in progress)', 'lpr-backorder-allocator' ), $eta_text ) ) . '</td></tr>';
-                        $bar .= '</table>';
+                        $ring  = '<div style="position:relative;width:160px;height:160px;">';
+                        $ring .= '<svg width="160" height="160" viewBox="0 0 160 160" xmlns="http://www.w3.org/2000/svg">';
+                        $ring .= '<circle cx="80" cy="80" r="60" stroke="' . esc_attr( $ring_back ) . '" stroke-width="14" fill="none" />';
+                        $ring .= '<circle cx="80" cy="80" r="60" stroke="' . esc_attr( $ring_color ) . '" stroke-width="14" fill="none" stroke-linecap="round" stroke-dasharray="' . esc_attr( number_format( $circum, 2, '.', '' ) ) . '" stroke-dashoffset="' . esc_attr( number_format( $offset, 2, '.', '' ) ) . '" transform="rotate(-90 80 80)" />';
+                        $ring .= '</svg>';
+                        $ring .= '<div style="position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);text-align:center;">';
+                        $ring .= '<div style="font-weight:800;font-size:18px;color:#0f172a;">' . esc_html( $ring_label ) . '</div>';
+                        $ring .= '<div style="font-size:12px;color:#475569;margin-top:4px;">' . esc_html( $eta_text ) . '</div>';
+                        $ring .= '</div>';
+                        $ring .= '</div>';
 
-                        $html  = '<div style="margin:20px 0;padding:16px;border:1px solid #e2e8f0;border-radius:14px;background:#f8fafc;">';
+                        $html  = '<div style="margin:20px 0;padding:18px;border:1px solid #e2e8f0;border-radius:16px;background:#ffffff;box-shadow:0 14px 32px rgba(15,23,42,0.08);">';
                         if ( '' !== trim( $heading ) ) {
-                                $html .= '<div style="font-weight:800;font-size:18px;margin-bottom:4px;color:#0f172a;">' . esc_html( $heading ) . '</div>';
+                                $html .= '<div style="font-weight:800;font-size:18px;margin-bottom:4px;color:#0f172a;">✨ ' . esc_html( $heading ) . '</div>';
                         }
                         if ( '' !== trim( $subheading ) ) {
                                 $html .= '<div style="color:#475569;margin-bottom:12px;font-size:13px;">' . esc_html( $subheading ) . '</div>';
                         }
-                        $html .= $bar;
-                        $html .= '<div style="margin-top:8px;">' . $steps_html . '</div>';
+                        $html .= '<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;">';
+                        $html .= '<tr>';
+                        $html .= '<td valign="top" align="center" style="padding:8px 12px;width:190px;">' . $ring . '</td>';
+                        $html .= '<td valign="top" style="padding:8px 12px;">' . $steps_html . '</td>';
+                        $html .= '</tr>';
+                        $html .= '</table>';
                         $html .= '</div>';
 
                         return $html;
