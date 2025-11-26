@@ -32,6 +32,9 @@ if ( ! defined( __NAMESPACE__ . '\ORDER_ITEM_META_LINE_ETA' ) ) {
 if ( ! defined( __NAMESPACE__ . '\ORDER_ITEM_META_ALLOCATIONS' ) ) {
         define( __NAMESPACE__ . '\ORDER_ITEM_META_ALLOCATIONS', 'lpr_allocations' );
 }
+if ( ! defined( __NAMESPACE__ . '\ORDER_ITEM_META_FORCE_ALLOCATION' ) ) {
+        define( __NAMESPACE__ . '\ORDER_ITEM_META_FORCE_ALLOCATION', '_lpr_force_allocation' );
+}
 if ( ! defined( __NAMESPACE__ . '\ORDER_META_REQUESTED_DELIVERY' ) ) {
         define( __NAMESPACE__ . '\ORDER_META_REQUESTED_DELIVERY', '_lpr_requested_delivery_date' );
 }
@@ -2063,10 +2066,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder' ) ) {
 			if ( $order_id <= 0 || ! function_exists( 'wc_get_order' ) ) {
 				return false;
 			}
-			$order = wc_get_order( $order_id );
-			if ( ! $order instanceof \WC_Order ) {
-				return false;
-			}
+                        $order = wc_get_order( $order_id );
+                        if ( ! $order instanceof \WC_Order ) {
+                                return false;
+                        }
 
 			$settings = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array( 'order_statuses' => array( 'processing', 'on-hold' ) );
 			$status   = $order->get_status(); // bare slug like 'processing'
@@ -2075,12 +2078,18 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder' ) ) {
 			}
 
 			$product = $item->get_product();
-			if ( ! $product instanceof \WC_Product ) {
-				return false;
-			}
-			if ( ! method_exists( $product, 'backorders_allowed' ) || ! $product->backorders_allowed() ) {
-				return false;
-			}
+                        if ( ! $product instanceof \WC_Product ) {
+                                return false;
+                        }
+
+                        $force_qty = (int) $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_FORCE_ALLOCATION' ) ? ORDER_ITEM_META_FORCE_ALLOCATION : '_lpr_force_allocation', true );
+                        if ( $force_qty > 0 ) {
+                                return true;
+                        }
+
+                        if ( ! method_exists( $product, 'backorders_allowed' ) || ! $product->backorders_allowed() ) {
+                                return false;
+                        }
 
 			$qty = max( 0, (int) $item->get_quantity() );
 
@@ -2363,12 +2372,16 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
 	 */
 	class Order_Allocations_Metabox {
 
-		public static function init(): void {
-			add_action( 'add_meta_boxes', array( __CLASS__, 'register_box' ), 20 );
-			// Extra registrations to better support HPOS screen routing.
-			add_action( 'add_meta_boxes_shop_order', array( __CLASS__, 'register_box' ), 20 );
-			add_action( 'add_meta_boxes_woocommerce_page_wc-orders', array( __CLASS__, 'register_box' ), 20 );
-		}
+                public static function init(): void {
+                        add_action( 'add_meta_boxes', array( __CLASS__, 'register_box' ), 20 );
+                        // Extra registrations to better support HPOS screen routing.
+                        add_action( 'add_meta_boxes_shop_order', array( __CLASS__, 'register_box' ), 20 );
+                        add_action( 'add_meta_boxes_woocommerce_page_wc-orders', array( __CLASS__, 'register_box' ), 20 );
+
+                        // Persist manual force-allocation flags.
+                        add_action( 'save_post_shop_order', array( __CLASS__, 'save_force_flags' ), 10, 2 );
+                        add_action( 'woocommerce_before_order_object_save', array( __CLASS__, 'save_force_flags_object' ), 10, 1 );
+                }
 
 		public static function register_box(): void {
 			if ( ! current_user_can( 'manage_woocommerce' ) ) {
@@ -2400,21 +2413,100 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
 		 * @param mixed $context
 		 * @return int
 		 */
-		protected static function resolve_order_id( $context ): int {
-			$order_id = 0;
-			if ( $context instanceof \WP_Post ) {
-				$order_id = (int) $context->ID;
-			}
-			if ( $order_id <= 0 && isset( $_GET['id'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification.Recommended
-				$order_id = absint( $_GET['id'] ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended
-			}
-			return $order_id;
-		}
+                protected static function resolve_order_id( $context ): int {
+                        $order_id = 0;
+                        if ( $context instanceof \WP_Post ) {
+                                $order_id = (int) $context->ID;
+                        }
+                        if ( $order_id <= 0 && isset( $_GET['id'] ) ) { // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                                $order_id = absint( $_GET['id'] ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        }
+                        return $order_id;
+                }
 
-		public static function render_box( $post_or_screen ): void {
-			if ( ! function_exists( 'wc_get_order' ) ) {
-				return;
-			}
+                /**
+                 * Save force-allocation flags for order items.
+                 *
+                 * @param int                $order_id
+                 * @param null|\WC_Order    $order_obj
+                 * @return void
+                 */
+                protected static function persist_force_flags( int $order_id, $order_obj = null ): void {
+                        if ( $order_id <= 0 || ! is_admin() ) {
+                                return;
+                        }
+                        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                                return;
+                        }
+                        $nonce = isset( $_POST['lpr_force_allocation_nonce'] ) ? sanitize_text_field( wp_unslash( $_POST['lpr_force_allocation_nonce'] ) ) : '';
+                        if ( ! $nonce || ! wp_verify_nonce( $nonce, 'lpr_force_allocation_' . $order_id ) ) {
+                                return;
+                        }
+
+                        $order = $order_obj instanceof \WC_Order ? $order_obj : wc_get_order( $order_id );
+                        if ( ! $order instanceof \WC_Order ) {
+                                return;
+                        }
+
+                        $flags = array();
+                        if ( isset( $_POST['lpr_force_allocation'] ) && is_array( $_POST['lpr_force_allocation'] ) ) {
+                                foreach ( wp_unslash( $_POST['lpr_force_allocation'] ) as $item_id => $val ) { // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
+                                        $flags[ absint( $item_id ) ] = true;
+                                }
+                        }
+
+                        $quantities = array();
+                        if ( isset( $_POST['lpr_force_allocation_qty'] ) && is_array( $_POST['lpr_force_allocation_qty'] ) ) {
+                                foreach ( wp_unslash( $_POST['lpr_force_allocation_qty'] ) as $item_id => $qty ) { // phpcs:ignore WordPress.Security.ValidatedSanitizedInput.InputNotSanitized
+                                        $quantities[ absint( $item_id ) ] = (int) $qty;
+                                }
+                        }
+
+                        foreach ( $order->get_items( 'line_item' ) as $item ) {
+                                if ( ! $item instanceof \WC_Order_Item_Product ) {
+                                        continue;
+                                }
+
+                                $item_id   = (int) $item->get_id();
+                                $qty       = max( 0, (int) $item->get_quantity() );
+                                $force_on  = isset( $flags[ $item_id ] );
+                                $force_qty = isset( $quantities[ $item_id ] ) ? (int) $quantities[ $item_id ] : $qty;
+                                $force_qty = max( 0, min( $qty, $force_qty ) );
+
+                                $meta_key = defined( __NAMESPACE__ . '\ORDER_ITEM_META_FORCE_ALLOCATION' ) ? ORDER_ITEM_META_FORCE_ALLOCATION : '_lpr_force_allocation';
+                                if ( $force_on && $force_qty > 0 ) {
+                                        $item->update_meta_data( $meta_key, $force_qty );
+                                } else {
+                                        $item->delete_meta_data( $meta_key );
+                                }
+
+                                if ( method_exists( $item, 'save' ) ) {
+                                        $item->save();
+                                }
+                        }
+                }
+
+                public static function save_force_flags( $post_id, $post ): void {
+                        if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) {
+                                return;
+                        }
+                        if ( $post && 'shop_order' !== $post->post_type ) {
+                                return;
+                        }
+                        self::persist_force_flags( (int) $post_id );
+                }
+
+                public static function save_force_flags_object( $order ): void {
+                        if ( ! ( $order instanceof \WC_Order ) ) {
+                                return;
+                        }
+                        self::persist_force_flags( (int) $order->get_id(), $order );
+                }
+
+                public static function render_box( $post_or_screen ): void {
+                        if ( ! function_exists( 'wc_get_order' ) ) {
+                                return;
+                        }
 			$order_id = self::resolve_order_id( $post_or_screen );
 			if ( $order_id <= 0 ) {
 				echo '<p>' . esc_html__( 'Order not found.', 'lpr-backorder-allocator' ) . '</p>';
@@ -2426,11 +2518,13 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
 				ETA::update_line_eta( $order_id );
 			}
 
-			$order = wc_get_order( $order_id );
-			if ( ! $order instanceof \WC_Order ) {
-				echo '<p>' . esc_html__( 'Order not found.', 'lpr-backorder-allocator' ) . '</p>';
-			 return;
-			}
+                        $order = wc_get_order( $order_id );
+                        if ( ! $order instanceof \WC_Order ) {
+                                echo '<p>' . esc_html__( 'Order not found.', 'lpr-backorder-allocator' ) . '</p>';
+                         return;
+                        }
+
+                        wp_nonce_field( 'lpr_force_allocation_' . (int) $order_id, 'lpr_force_allocation_nonce' );
 
                         $items = $order->get_items( 'line_item' );
 
@@ -2454,6 +2548,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
                         $css .= '.lpr-badge{display:inline-block;padding:2px 6px;border-radius:3px;background:#f0ad4e;color:#111;font-size:11px;margin-left:6px}';
                         $css .= '.lpr-badge.lpr-badge-vip{background:#c2274e;color:#fff;font-weight:600}';
                         $css .= '.lpr-unallocated{font-style:italic;opacity:0.8}';
+                        $css .= '.lpr-force-row{margin-top:6px;font-size:12px;opacity:0.9}';
+                        $css .= '.lpr-force-row input[type=number]{width:70px;margin-left:6px}';
                         echo '<style type="text/css">' . esc_html( $css ) . '</style>';
 
 			echo '<table class="widefat striped lpr-alloc-eta">';
@@ -2475,23 +2571,33 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
                                 }
 
                                 $product   = $item->get_product();
-				$name      = $item->get_name();
-				$qty       = (int) $item->get_quantity();
-				$sku       = $product instanceof \WC_Product ? $product->get_sku() : '';
-				$line_eta  = (string) $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_LINE_ETA' ) ? ORDER_ITEM_META_LINE_ETA : '_lpr_line_eta', true );
-				$allocs    = $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_ALLOCATIONS' ) ? ORDER_ITEM_META_ALLOCATIONS : 'lpr_allocations', true );
-				$needs     = class_exists( __NAMESPACE__ . '\Backorder' ) ? Backorder::needs_allocation( $item ) : false;
+                                $name      = $item->get_name();
+                                $qty       = (int) $item->get_quantity();
+                                $sku       = $product instanceof \WC_Product ? $product->get_sku() : '';
+                                $line_eta  = (string) $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_LINE_ETA' ) ? ORDER_ITEM_META_LINE_ETA : '_lpr_line_eta', true );
+                                $allocs    = $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_ALLOCATIONS' ) ? ORDER_ITEM_META_ALLOCATIONS : 'lpr_allocations', true );
+                                $needs     = class_exists( __NAMESPACE__ . '\Backorder' ) ? Backorder::needs_allocation( $item ) : false;
+                                $force_qty = (int) $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_FORCE_ALLOCATION' ) ? ORDER_ITEM_META_FORCE_ALLOCATION : '_lpr_force_allocation', true );
 
-				echo '<tr>';
-				echo '<td>';
-				echo esc_html( $name );
-				if ( $sku ) {
-					echo ' <small>#' . esc_html( $sku ) . '</small>';
-				}
-				if ( $needs ) {
-					echo ' <span class="lpr-badge">' . esc_html__( 'Backorder', 'lpr-backorder-allocator' ) . '</span>';
-				}
-				echo '</td>';
+                                echo '<tr>';
+                                echo '<td>';
+                                echo esc_html( $name );
+                                if ( $sku ) {
+                                        echo ' <small>#' . esc_html( $sku ) . '</small>';
+                                }
+                                if ( $force_qty > 0 ) {
+                                        echo ' <span class="lpr-badge">' . esc_html__( 'Needs allocation', 'lpr-backorder-allocator' ) . '</span>';
+                                } elseif ( $needs ) {
+                                        echo ' <span class="lpr-badge">' . esc_html__( 'Backorder', 'lpr-backorder-allocator' ) . '</span>';
+                                }
+
+                                $prefill = $force_qty > 0 ? $force_qty : $qty;
+                                echo '<div class="lpr-force-row">';
+                                echo '<label><input type="checkbox" name="lpr_force_allocation[' . esc_attr( (string) $item->get_id() ) . ']" value="1" ' . checked( $force_qty > 0, true, false ) . ' /> ' . esc_html__( 'Force allocation', 'lpr-backorder-allocator' ) . '</label>';
+                                echo '<input type="number" name="lpr_force_allocation_qty[' . esc_attr( (string) $item->get_id() ) . ']" min="1" max="' . esc_attr( (string) $qty ) . '" value="' . esc_attr( (string) $prefill ) . '" />';
+                                echo '<span style="margin-left:6px;">' . esc_html__( 'Treat as needing PO allocation even if in stock.', 'lpr-backorder-allocator' ) . '</span>';
+                                echo '</div>';
+                                echo '</td>';
 
 				echo '<td>' . esc_html( (string) $qty ) . '</td>';
 
@@ -4234,22 +4340,26 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_calc_backorder_need' ) )
 	 * @return int Remaining units needing allocation (>=0).
 	 */
 	function lpr_allocator_calc_backorder_need( \WC_Order_Item_Product $item ): int {
-		if ( ! $item instanceof \WC_Order_Item_Product ) {
-			return 0;
-		}
-		$qty = max( 0, (int) $item->get_quantity() );
-		$product = $item->get_product();
-		if ( ! ( $product instanceof \WC_Product ) ) {
-			return 0;
-		}
+                if ( ! $item instanceof \WC_Order_Item_Product ) {
+                        return 0;
+                }
+                $qty = max( 0, (int) $item->get_quantity() );
+                $product = $item->get_product();
+                if ( ! ( $product instanceof \WC_Product ) ) {
+                        return 0;
+                }
 
-		// Desired backorder amount from item meta if present.
-		$desired = 0;
-		foreach ( array( 'Backordered', '_backordered', 'backordered' ) as $k ) {
-			$v = $item->get_meta( $k, true );
-			if ( '' !== $v && null !== $v ) {
-				$desired = max( $desired, (int) $v );
-			}
+                // Desired backorder amount from item meta if present.
+                $desired = 0;
+                $force_qty = (int) $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_FORCE_ALLOCATION' ) ? ORDER_ITEM_META_FORCE_ALLOCATION : '_lpr_force_allocation', true );
+                if ( $force_qty > 0 ) {
+                        $desired = min( $qty, $force_qty );
+                }
+                foreach ( array( 'Backordered', '_backordered', 'backordered' ) as $k ) {
+                        $v = $item->get_meta( $k, true );
+                        if ( '' !== $v && null !== $v ) {
+                                $desired = max( $desired, (int) $v );
+                        }
 		}
 		if ( 0 === $desired && method_exists( $product, 'is_on_backorder' ) && $product->is_on_backorder( $qty ) ) {
 			$desired = $qty; // fallback when exact backordered count unknown
