@@ -84,6 +84,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                                 'frontend_extra_pool'   => false,
                                 'frontend_notice_emoji' => true,
                                 'frontend_notice_template' => __( '%qty% units expected (ETA %eta%)', 'lpr-backorder-allocator' ),
+                                'frontend_notice_color'    => '#2f855a',
                                 'frontend_cart_notice_template' => __( 'Next free stock: %qty% units expected (ETA %eta%)', 'lpr-backorder-allocator' ),
                                 'frontend_refresh_interval' => 900,
                                 'auto_allocation_interval' => 0,
@@ -165,6 +166,11 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                                 $cart_notice_tpl = $defaults['frontend_cart_notice_template'];
                         }
 
+                        $notice_color = isset( $raw['frontend_notice_color'] ) ? sanitize_hex_color( $raw['frontend_notice_color'] ) : '';
+                        if ( empty( $notice_color ) ) {
+                                $notice_color = $defaults['frontend_notice_color'];
+                        }
+
                         $allowed_intervals = array( 300, 900, 1800, 3600, 7200 );
                         $interval         = isset( $raw['frontend_refresh_interval'] ) ? (int) $raw['frontend_refresh_interval'] : $defaults['frontend_refresh_interval'];
                         if ( ! in_array( $interval, $allowed_intervals, true ) ) {
@@ -193,6 +199,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                                 'frontend_extra_pool'   => (bool) $front,
                                 'frontend_notice_emoji' => (bool) $emoji,
                                 'frontend_notice_template' => $notice_tpl,
+                                'frontend_notice_color'    => $notice_color,
                                 'frontend_cart_notice_template' => $cart_notice_tpl,
                                 'frontend_refresh_interval' => (int) $interval,
                                 'auto_allocation_interval' => (int) $alloc_interval,
@@ -358,6 +365,16 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                 ),
 
                                 array(
+                                        'title'       => __( 'Product page notice color', 'lpr-backorder-allocator' ),
+                                        'desc'        => __( 'Hex color applied to the incoming stock notice.', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_frontend_notice_color',
+                                        'type'        => 'text',
+                                        'css'         => 'width: 140px;',
+                                        'placeholder' => Settings::defaults()['frontend_notice_color'],
+                                        'default'     => Settings::defaults()['frontend_notice_color'],
+                                ),
+
+                                array(
                                         'title'       => __( 'Cart notice text', 'lpr-backorder-allocator' ),
                                         'desc'        => __( 'Shown under cart line items. Use %qty% and %eta% placeholders.', 'lpr-backorder-allocator' ),
                                         'id'          => 'lpr_allocator_frontend_cart_notice_template',
@@ -456,6 +473,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                         'lpr_allocator_frontend_extra_pool'        => $settings['frontend_extra_pool'] ? 'yes' : 'no',
                                         'lpr_allocator_frontend_notice_emoji'      => $settings['frontend_notice_emoji'] ? 'yes' : 'no',
                                         'lpr_allocator_frontend_notice_template'   => (string) $settings['frontend_notice_template'],
+                                        'lpr_allocator_frontend_notice_color'      => (string) $settings['frontend_notice_color'],
                                         'lpr_allocator_frontend_cart_notice_template' => (string) $settings['frontend_cart_notice_template'],
                                         'lpr_allocator_frontend_refresh_interval'  => (int) $settings['frontend_refresh_interval'],
                                 'lpr_allocator_auto_allocation_interval'   => (int) $settings['auto_allocation_interval'],
@@ -551,6 +569,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                         'frontend_extra_pool'        => ! empty( $_POST['lpr_allocator_frontend_extra_pool'] ),
                                         'frontend_notice_emoji'      => ! empty( $_POST['lpr_allocator_frontend_notice_emoji'] ),
                                         'frontend_notice_template'   => isset( $_POST['lpr_allocator_frontend_notice_template'] ) ? (string) wp_unslash( $_POST['lpr_allocator_frontend_notice_template'] ) : '',
+                                        'frontend_notice_color'      => isset( $_POST['lpr_allocator_frontend_notice_color'] ) ? (string) wp_unslash( $_POST['lpr_allocator_frontend_notice_color'] ) : '',
                                         'frontend_cart_notice_template' => isset( $_POST['lpr_allocator_frontend_cart_notice_template'] ) ? (string) wp_unslash( $_POST['lpr_allocator_frontend_cart_notice_template'] ) : '',
                                         'frontend_refresh_interval'  => isset( $_POST['lpr_allocator_frontend_refresh_interval'] ) ? (int) $_POST['lpr_allocator_frontend_refresh_interval'] : 0,
                                         'auto_allocation_interval'   => isset( $_POST['lpr_allocator_auto_allocation_interval'] ) ? (int) $_POST['lpr_allocator_auto_allocation_interval'] : 0,
@@ -704,9 +723,9 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                                 add_filter( 'woocommerce_get_availability', array( __CLASS__, 'inject_notice_into_availability' ), 25, 2 );
                         }
 
-                        // Surface a dedicated notice block directly beneath the Add to Cart button on single product pages.
-                        if ( ! has_action( 'woocommerce_after_add_to_cart_form', array( __CLASS__, 'output_below_add_to_cart' ) ) ) {
-                                add_action( 'woocommerce_after_add_to_cart_form', array( __CLASS__, 'output_below_add_to_cart' ), 12 );
+                        // Surface a dedicated notice block directly above the price on single product pages (tested with Flatsome).
+                        if ( ! has_action( 'woocommerce_single_product_summary', array( __CLASS__, 'output_above_price' ) ) ) {
+                                add_action( 'woocommerce_single_product_summary', array( __CLASS__, 'output_above_price' ), 9 );
                         }
                 }
 
@@ -767,9 +786,9 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                 }
 
                 /**
-                 * Output a standalone incoming stock notice beneath the Add to Cart button.
+                 * Output a standalone incoming stock notice above the price area.
                  */
-                public static function output_below_add_to_cart(): void {
+                public static function output_above_price(): void {
                         global $product;
 
                         $notice = self::notice_for_product( $product, 'frontend_notice_template', 'frontend_notice_emoji', 'frontend_notice_template' );
@@ -778,7 +797,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                                 return;
                         }
 
-                        echo '<div class="lpr-incoming-single-product" style="margin-top:10px;">' . $notice . '</div>';
+                        echo '<div class="lpr-incoming-single-product" style="margin-bottom:10px;">' . $notice . '</div>';
                 }
 
                 /**
@@ -865,12 +884,18 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                                 $settings[ $template_key ] ?? '',
                                 Settings::defaults()[ $fallback_tpl_key ]
                         );
+                        $color     = isset( $settings['frontend_notice_color'] ) ? sanitize_hex_color( $settings['frontend_notice_color'] ) : Settings::defaults()['frontend_notice_color'];
+                        if ( empty( $color ) ) {
+                                $color = Settings::defaults()['frontend_notice_color'];
+                        }
 
                         if ( '' === $notice ) {
                                 return '';
                         }
 
-                        return ( $use_emoji ? '🏭 ' : '' ) . $notice;
+                        $notice = ( $use_emoji ? '🏭 ' : '' ) . $notice;
+
+                        return sprintf( '<span class="lpr-incoming-notice" style="color:%s;">%s</span>', esc_attr( $color ), $notice );
                 }
         }
         Incoming_Stock_Storefront::init();
