@@ -72,30 +72,74 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
 	 */
 	class Settings {
 
-		/**
-		 * Default settings.
-		 *
-		 * @return array
-		 */
-		public static function defaults(): array {
+                /**
+                 * Supported customer-facing languages.
+                 */
+                protected static function sanitize_language( $language ): string {
+                        $language = is_string( $language ) ? strtolower( trim( $language ) ) : '';
+
+                        return in_array( $language, array( 'en', 'no' ), true ) ? $language : 'en';
+                }
+
+                /**
+                 * Customer-facing default strings for a given language.
+                 */
+                protected static function localized_customer_defaults( string $language ): array {
+                        $language = self::sanitize_language( $language );
+
+                        $map = array(
+                                'en' => array(
+                                        'frontend_notice_template'      => __( '%qty% units expected (ETA %eta%)', 'lpr-backorder-allocator' ),
+                                        'frontend_cart_notice_template' => __( 'Next free stock: %qty% units expected (ETA %eta%)', 'lpr-backorder-allocator' ),
+                                        'eta_email_subject'             => __( 'Your order ETA has been updated', 'lpr-backorder-allocator' ),
+                                        'eta_email_intro'               => __( 'We’ve updated the expected arrival for the items below:', 'lpr-backorder-allocator' ),
+                                ),
+                                'no' => array(
+                                        'frontend_notice_template'      => __( '%qty% enheter forventes (ETA %eta%)', 'lpr-backorder-allocator' ),
+                                        'frontend_cart_notice_template' => __( 'Neste ledige lager: %qty% enheter forventes (ETA %eta%)', 'lpr-backorder-allocator' ),
+                                        'eta_email_subject'             => __( 'Leveringstid for bestillingen din er oppdatert', 'lpr-backorder-allocator' ),
+                                        'eta_email_intro'               => __( 'Vi har oppdatert forventet levering for varene nedenfor:', 'lpr-backorder-allocator' ),
+                                ),
+                        );
+
+                        return $map[ $language ];
+                }
+
+                /**
+                 * Default settings for a specific language.
+                 */
+                public static function defaults_for_language( string $language ): array {
+                        $language   = self::sanitize_language( $language );
+                        $localized  = self::localized_customer_defaults( $language );
+
                         return array(
+                                'language'              => $language,
                                 'order_statuses'        => array( 'processing', 'on-hold' ),
                                 'inform_customer_eta'   => false,
                                 'frontend_extra_pool'   => false,
                                 'frontend_notice_emoji' => true,
-                                'frontend_notice_template' => __( '%qty% units expected (ETA %eta%)', 'lpr-backorder-allocator' ),
-                                'frontend_notice_color'    => '#2f855a',
-                                'frontend_cart_notice_template' => __( 'Next free stock: %qty% units expected (ETA %eta%)', 'lpr-backorder-allocator' ),
-                                'frontend_refresh_interval' => 900,
-                                'auto_allocation_interval' => 0,
+                                'frontend_notice_template'      => $localized['frontend_notice_template'],
+                                'frontend_notice_color'         => '#2f855a',
+                                'frontend_cart_notice_template' => $localized['frontend_cart_notice_template'],
+                                'frontend_refresh_interval'     => 900,
+                                'auto_allocation_interval'      => 0,
                                 'brand_logo_url'        => '',
                                 'brand_primary_color'   => '#1a1a1a',
                                 'brand_support_email'   => '',
                                 'brand_support_phone'   => '',
                                 'email_footer_text_no'  => '',
-                                'eta_email_subject'     => __( 'Your order ETA has been updated', 'lpr-backorder-allocator' ),
-                                'eta_email_intro'       => __( 'We’ve updated the expected arrival for the items below:', 'lpr-backorder-allocator' ),
+                                'eta_email_subject'     => $localized['eta_email_subject'],
+                                'eta_email_intro'       => $localized['eta_email_intro'],
                         );
+                }
+
+                /**
+                 * Default settings.
+                 *
+                 * @return array
+                 */
+                public static function defaults(): array {
+                        return self::defaults_for_language( 'en' );
                 }
 
 		/**
@@ -105,16 +149,21 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
 			return OPTION_KEY;
 		}
 
-		/**
-		 * Get merged settings with defaults applied.
-		 */
-		public static function get(): array {
-			$stored = get_option( self::key(), array() );
-			if ( ! is_array( $stored ) ) {
-				$stored = array();
-			}
-			return array_replace( self::defaults(), $stored );
-		}
+                /**
+                 * Get merged settings with defaults applied.
+                 */
+                public static function get(): array {
+                        $stored = get_option( self::key(), array() );
+                        if ( ! is_array( $stored ) ) {
+                                $stored = array();
+                        }
+                        $language = isset( $stored['language'] ) ? self::sanitize_language( $stored['language'] ) : self::defaults()['language'];
+
+                        $settings = array_replace( self::defaults_for_language( $language ), $stored );
+                        $settings['language'] = $language;
+
+                        return $settings;
+                }
 
 		/**
 		 * Update settings. Ensures autoload = no on first write.
@@ -138,8 +187,9 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
 		 * @param array $raw
 		 * @return array
 		 */
-		public static function sanitize( array $raw ): array {
-			$defaults = self::defaults();
+                public static function sanitize( array $raw ): array {
+                        $language = isset( $raw['language'] ) ? self::sanitize_language( $raw['language'] ) : self::defaults()['language'];
+                        $defaults = self::defaults_for_language( $language );
 
 			// Order statuses: store as bare slugs (e.g., 'processing').
 			$statuses = array();
@@ -206,6 +256,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                         }
 
                         return array(
+                                'language'              => $language,
                                 'order_statuses'        => $statuses,
                                 'inform_customer_eta'   => (bool) $inform,
                                 'frontend_extra_pool'   => (bool) $front,
@@ -280,27 +331,41 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
 		/**
 		 * Build fields array for WC settings renderer.
 		 */
-		protected static function get_fields( array $settings ): array {
-			// Build order status options with bare keys (strip 'wc-').
-			$wc_statuses = function_exists( 'wc_get_order_statuses' ) ? wc_get_order_statuses() : array();
-			$status_opts = array();
-			foreach ( $wc_statuses as $key => $label ) {
-				$bare               = preg_replace( '/^wc-/', '', $key );
-				$status_opts[ $bare ] = $label;
-			}
+                protected static function get_fields( array $settings ): array {
+                        // Build order status options with bare keys (strip 'wc-').
+                        $wc_statuses = function_exists( 'wc_get_order_statuses' ) ? wc_get_order_statuses() : array();
+                        $status_opts = array();
+                        foreach ( $wc_statuses as $key => $label ) {
+                                $bare               = preg_replace( '/^wc-/', '', $key );
+                                $status_opts[ $bare ] = $label;
+                        }
 
-			return array(
-				array(
-					'title' => __( 'Backorder Allocator Settings', 'lpr-backorder-allocator' ),
-					'type'  => 'title',
-					'desc'  => __( 'Configure admin-only allocator behavior and customer-facing communication toggles. Allocation never adjusts stock.', 'lpr-backorder-allocator' ),
-					'id'    => 'lpr_allocator_section_main',
-				),
+                        $language_defaults = Settings::defaults_for_language( $settings['language'] ?? Settings::defaults()['language'] );
 
-				array(
-					'title'    => __( 'Order statuses to include', 'lpr-backorder-allocator' ),
-					'desc'     => __( 'Orders in these statuses are considered for allocation and reports.', 'lpr-backorder-allocator' ),
-					'id'       => 'lpr_allocator_order_statuses',
+                        return array(
+                                array(
+                                        'title' => __( 'Backorder Allocator Settings', 'lpr-backorder-allocator' ),
+                                        'type'  => 'title',
+                                        'desc'  => __( 'Configure admin-only allocator behavior and customer-facing communication toggles. Allocation never adjusts stock.', 'lpr-backorder-allocator' ),
+                                        'id'    => 'lpr_allocator_section_main',
+                                ),
+
+                                array(
+                                        'title'   => __( 'Language', 'lpr-backorder-allocator' ),
+                                        'desc'    => __( 'Sets the default language for customer-facing notices and emails.', 'lpr-backorder-allocator' ),
+                                        'id'      => 'lpr_allocator_language',
+                                        'type'    => 'select',
+                                        'options' => array(
+                                                'en' => __( 'English', 'lpr-backorder-allocator' ),
+                                                'no' => __( 'Norwegian', 'lpr-backorder-allocator' ),
+                                        ),
+                                        'default' => Settings::defaults()['language'],
+                                ),
+
+                                array(
+                                        'title'    => __( 'Order statuses to include', 'lpr-backorder-allocator' ),
+                                        'desc'     => __( 'Orders in these statuses are considered for allocation and reports.', 'lpr-backorder-allocator' ),
+                                        'id'       => 'lpr_allocator_order_statuses',
 					'type'     => 'multiselect',
 					'class'    => 'wc-enhanced-select',
 					'options'  => $status_opts,
@@ -321,8 +386,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                         'id'          => 'lpr_allocator_eta_email_subject',
                                         'type'        => 'text',
                                         'css'         => 'min-width: 400px;',
-                                        'placeholder' => Settings::defaults()['eta_email_subject'],
-                                        'default'     => Settings::defaults()['eta_email_subject'],
+                                        'placeholder' => $language_defaults['eta_email_subject'],
+                                        'default'     => $language_defaults['eta_email_subject'],
                                 ),
 
                                 array(
@@ -331,8 +396,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                         'id'          => 'lpr_allocator_eta_email_intro',
                                         'type'        => 'textarea',
                                         'css'         => 'min-width: 400px; height: 80px;',
-                                        'placeholder' => Settings::defaults()['eta_email_intro'],
-                                        'default'     => Settings::defaults()['eta_email_intro'],
+                                        'placeholder' => $language_defaults['eta_email_intro'],
+                                        'default'     => $language_defaults['eta_email_intro'],
                                 ),
 
                                 array(
@@ -394,8 +459,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                         'id'          => 'lpr_allocator_frontend_notice_template',
                                         'type'        => 'text',
                                         'css'         => 'min-width: 400px;',
-                                        'placeholder' => Settings::defaults()['frontend_notice_template'],
-                                        'default'     => Settings::defaults()['frontend_notice_template'],
+                                        'placeholder' => $language_defaults['frontend_notice_template'],
+                                        'default'     => $language_defaults['frontend_notice_template'],
                                 ),
 
                                 array(
@@ -404,8 +469,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                         'id'          => 'lpr_allocator_frontend_notice_color',
                                         'type'        => 'text',
                                         'css'         => 'width: 140px;',
-                                        'placeholder' => Settings::defaults()['frontend_notice_color'],
-                                        'default'     => Settings::defaults()['frontend_notice_color'],
+                                        'placeholder' => $language_defaults['frontend_notice_color'],
+                                        'default'     => $language_defaults['frontend_notice_color'],
                                 ),
 
                                 array(
@@ -414,8 +479,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                         'id'          => 'lpr_allocator_frontend_cart_notice_template',
                                         'type'        => 'text',
                                         'css'         => 'min-width: 400px;',
-                                        'placeholder' => Settings::defaults()['frontend_cart_notice_template'],
-                                        'default'     => Settings::defaults()['frontend_cart_notice_template'],
+                                        'placeholder' => $language_defaults['frontend_cart_notice_template'],
+                                        'default'     => $language_defaults['frontend_cart_notice_template'],
                                 ),
 
                                 array(
@@ -502,6 +567,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
 		 */
 		protected static function prime_field_values( array $settings ): void {
                                 $map = array(
+                                        'lpr_allocator_language'                => (string) $settings['language'],
                                         'lpr_allocator_order_statuses'             => (array) $settings['order_statuses'],
                                         'lpr_allocator_inform_customer_eta'        => $settings['inform_customer_eta'] ? 'yes' : 'no',
                                         'lpr_allocator_frontend_extra_pool'        => $settings['frontend_extra_pool'] ? 'yes' : 'no',
@@ -600,6 +666,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
 
                         $posted_statuses = isset( $_POST['lpr_allocator_order_statuses'] ) ? (array) wp_unslash( $_POST['lpr_allocator_order_statuses'] ) : array();
                                 $raw = array(
+                                        'language'                   => isset( $_POST['lpr_allocator_language'] ) ? (string) wp_unslash( $_POST['lpr_allocator_language'] ) : Settings::defaults()['language'],
                                         'order_statuses'             => $posted_statuses,
                                         'inform_customer_eta'        => ! empty( $_POST['lpr_allocator_inform_customer_eta'] ),
                                         'frontend_extra_pool'        => ! empty( $_POST['lpr_allocator_frontend_extra_pool'] ),
@@ -681,16 +748,18 @@ if ( ! class_exists( __NAMESPACE__ . '\Email_Notification_Preview' ) ) {
                                 '%customer_name%' => __( 'Customer', 'lpr-backorder-allocator' ),
                         );
 
-                        $subject = __( 'Your order ETA has been updated', 'lpr-backorder-allocator' );
-                        $body    = '';
+                        $subject         = __( 'Your order ETA has been updated', 'lpr-backorder-allocator' );
+                        $body            = '';
+                        $sample_overview = $sample_rows;
                         if ( class_exists( __NAMESPACE__ . '\ETA' ) ) {
-                                $compiled = ETA::build_eta_email_content( $sample_rows, $settings, $tokens );
+                                $compiled = ETA::build_eta_email_content( $sample_rows, $settings, $tokens, $sample_overview );
                                 $subject  = $compiled['subject'] ?? $subject;
                                 $body     = $compiled['body'] ?? '';
                         }
 
                         if ( '' === $body ) {
-                                $fallback = ETA::build_eta_email_content( $sample_rows, Settings::defaults(), $tokens );
+                                $language = $settings['language'] ?? Settings::defaults()['language'];
+                                $fallback = ETA::build_eta_email_content( $sample_rows, Settings::defaults_for_language( $language ), $tokens, $sample_overview );
                                 $subject  = $fallback['subject'];
                                 $body     = $fallback['body'];
                         }
@@ -743,9 +812,9 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                                 add_filter( 'woocommerce_get_availability', array( __CLASS__, 'inject_notice_into_availability' ), 25, 2 );
                         }
 
-                        // Surface a dedicated notice block directly above the price on single product pages (tested with Flatsome).
+                        // Surface a dedicated notice block directly below the short description on single product pages (tested with Flatsome).
                         if ( ! has_action( 'woocommerce_single_product_summary', array( __CLASS__, 'output_above_price' ) ) ) {
-                                add_action( 'woocommerce_single_product_summary', array( __CLASS__, 'output_above_price' ), 9 );
+                                add_action( 'woocommerce_single_product_summary', array( __CLASS__, 'output_above_price' ), 21 );
                         }
                 }
 
@@ -806,7 +875,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                 }
 
                 /**
-                 * Output a standalone incoming stock notice above the price area.
+                 * Output a standalone incoming stock notice below the short description area.
                  */
                 public static function output_above_price(): void {
                         global $product;
@@ -896,17 +965,18 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                                 return '';
                         }
 
-                        $settings  = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : Settings::defaults();
-                        $use_emoji = isset( $settings[ $emoji_flag_key ] ) ? (bool) $settings[ $emoji_flag_key ] : Settings::defaults()[ $emoji_flag_key ];
+                        $settings          = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : Settings::defaults();
+                        $language_defaults = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::defaults_for_language( $settings['language'] ?? Settings::defaults()['language'] ) : Settings::defaults();
+                        $use_emoji         = isset( $settings[ $emoji_flag_key ] ) ? (bool) $settings[ $emoji_flag_key ] : $language_defaults[ $emoji_flag_key ];
                         $notice    = self::build_notice_text(
                                 $qty,
                                 $eta,
                                 $settings[ $template_key ] ?? '',
-                                Settings::defaults()[ $fallback_tpl_key ]
+                                $language_defaults[ $fallback_tpl_key ]
                         );
-                        $color     = isset( $settings['frontend_notice_color'] ) ? sanitize_hex_color( $settings['frontend_notice_color'] ) : Settings::defaults()['frontend_notice_color'];
+                        $color     = isset( $settings['frontend_notice_color'] ) ? sanitize_hex_color( $settings['frontend_notice_color'] ) : $language_defaults['frontend_notice_color'];
                         if ( empty( $color ) ) {
-                                $color = Settings::defaults()['frontend_notice_color'];
+                                $color = $language_defaults['frontend_notice_color'];
                         }
 
                         if ( '' === $notice ) {
@@ -998,12 +1068,13 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Cart' ) ) {
                                 return;
                         }
 
-                        $settings = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array();
+                        $settings          = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array();
+                        $language_defaults = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::defaults_for_language( $settings['language'] ?? Settings::defaults()['language'] ) : Settings::defaults();
                         $notice   = Incoming_Stock_Storefront::build_notice_text(
                                 $qty,
                                 $eta,
                                 $settings['frontend_cart_notice_template'] ?? '',
-                                Settings::defaults()['frontend_cart_notice_template']
+                                $language_defaults['frontend_cart_notice_template']
                         );
 
                         if ( '' === $notice ) {
@@ -2423,14 +2494,18 @@ public static function update_line_eta( int $order_id ): void {
                  * @param bool      $respect_setting
                  * @return bool
                  */
-                public static function send_eta_email( \WC_Order $order, array $rows, bool $respect_setting = true ): bool {
+                public static function send_eta_email( \WC_Order $order, array $rows, bool $respect_setting = true, array $overview_rows = array() ): bool {
                         $settings = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array();
 
                         if ( $respect_setting && empty( $settings['inform_customer_eta'] ) ) {
                                 return false;
                         }
 
-                        if ( empty( $rows ) ) {
+                        if ( empty( $overview_rows ) && class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
+                                $overview_rows = Order_Allocations_Metabox::build_eta_email_rows( $order );
+                        }
+
+                        if ( empty( $rows ) && empty( $overview_rows ) ) {
                                 return false;
                         }
 
@@ -2440,7 +2515,7 @@ public static function update_line_eta( int $order_id ): void {
                         }
 
                         $tokens   = self::email_tokens_for_order( $order );
-                        $compiled = self::build_eta_email_content( $rows, $settings, $tokens );
+                        $compiled = self::build_eta_email_content( $rows, $settings, $tokens, $overview_rows );
                         $subject  = $compiled['subject'] ?? '';
                         $body     = $compiled['body'] ?? '';
 
@@ -2465,8 +2540,9 @@ public static function update_line_eta( int $order_id ): void {
                  * @param array $tokens
                  * @return array{subject:string,body:string}
                  */
-                public static function build_eta_email_content( array $rows, array $settings, array $tokens ): array {
-                        $defaults = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::defaults() : array();
+                public static function build_eta_email_content( array $rows, array $settings, array $tokens, array $overview_rows = array() ): array {
+                        $language  = class_exists( __NAMESPACE__ . '\Settings' ) ? ( $settings['language'] ?? Settings::defaults()['language'] ) : 'en';
+                        $defaults  = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::defaults_for_language( $language ) : array();
 
                         $subject_tpl = (string) ( $settings['eta_email_subject'] ?? ( $defaults['eta_email_subject'] ?? __( 'Your order ETA has been updated', 'lpr-backorder-allocator' ) ) );
                         $intro_tpl   = (string) ( $settings['eta_email_intro'] ?? ( $defaults['eta_email_intro'] ?? __( 'We’ve updated the expected arrival for the items below:', 'lpr-backorder-allocator' ) ) );
@@ -2486,7 +2562,15 @@ public static function update_line_eta( int $order_id ): void {
                                 $body .= '<p>' . wp_kses_post( $intro ) . '</p>';
                         }
 
-                        $body .= self::render_eta_table( $rows );
+                        if ( ! empty( $rows ) ) {
+                                $body .= '<h3 style="margin:16px 0 8px 0;">' . esc_html__( 'Updated items', 'lpr-backorder-allocator' ) . '</h3>';
+                                $body .= self::render_eta_table( $rows );
+                        }
+
+                        if ( ! empty( $overview_rows ) ) {
+                                $body .= '<h3 style="margin:16px 0 8px 0;">' . esc_html__( 'Backordered items', 'lpr-backorder-allocator' ) . '</h3>';
+                                $body .= self::render_backorder_overview( $overview_rows );
+                        }
 
                         if ( $foot ) {
                                 $body .= '<p style="margin-top:16px;color:#777;font-size:12px;">' . wp_kses_post( $foot ) . '</p>';
@@ -2512,6 +2596,29 @@ public static function update_line_eta( int $order_id ): void {
                                 $new  = isset( $row['new'] ) ? (string) $row['new'] : '—';
 
                                 $html .= '<tr><td>' . esc_html( $name ) . '</td><td>' . esc_html( $prev ) . '</td><td>' . esc_html( $new ) . '</td></tr>';
+                        }
+
+                        $html .= '</tbody></table>';
+
+                        return $html;
+                }
+
+                /**
+                 * Render a simple overview table of backordered lines.
+                 */
+                protected static function render_backorder_overview( array $rows ): string {
+                        $html  = '<table cellspacing="0" cellpadding="6" border="0" style="width:100%;border-collapse:collapse;">';
+                        $html .= '<thead><tr><th align="left">' . esc_html__( 'Item', 'lpr-backorder-allocator' ) . '</th><th align="left">' . esc_html__( 'Current ETA', 'lpr-backorder-allocator' ) . '</th></tr></thead><tbody>';
+
+                        foreach ( $rows as $row ) {
+                                $name = isset( $row['name'] ) ? (string) $row['name'] : '';
+                                $eta  = isset( $row['new'] ) ? (string) $row['new'] : ( isset( $row['eta'] ) ? (string) $row['eta'] : '—' );
+
+                                if ( '' === trim( $eta ) ) {
+                                        $eta = '—';
+                                }
+
+                                $html .= '<tr><td>' . esc_html( $name ) . '</td><td>' . esc_html( $eta ) . '</td></tr>';
                         }
 
                         $html .= '</tbody></table>';
@@ -3041,7 +3148,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
                 /**
                  * Build email rows for backordered items on an order.
                  */
-                protected static function build_eta_email_rows( \WC_Order $order ): array {
+                public static function build_eta_email_rows( \WC_Order $order ): array {
                         if ( ! class_exists( __NAMESPACE__ . '\Backorder' ) ) {
                                 return array();
                         }
@@ -3107,7 +3214,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
                                 wp_send_json_error( array( 'message' => __( 'No backordered items to email.', 'lpr-backorder-allocator' ) ) );
                         }
 
-                        $sent = class_exists( __NAMESPACE__ . '\ETA' ) ? ETA::send_eta_email( $order, $rows, false ) : false;
+                        $sent = class_exists( __NAMESPACE__ . '\ETA' ) ? ETA::send_eta_email( $order, array(), false, $rows ) : false;
                         if ( ! $sent ) {
                                 wp_send_json_error( array( 'message' => __( 'Unable to send the ETA email.', 'lpr-backorder-allocator' ) ) );
                         }
