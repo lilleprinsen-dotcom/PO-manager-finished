@@ -317,9 +317,9 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
 
 		public static function init(): void {
 			add_filter( 'woocommerce_settings_tabs_array', array( __CLASS__, 'register_tab' ), 50 );
-			add_action( 'woocommerce_settings_tabs_' . self::TAB_ID, array( __CLASS__, 'render' ) );
-			add_action( 'woocommerce_update_options_' . self::TAB_ID, array( __CLASS__, 'save' ) );
-			add_action( 'woocommerce_settings_save_' . self::TAB_ID, array( __CLASS__, 'save' ) );
+                        add_action( 'woocommerce_settings_tabs_' . self::TAB_ID, array( __CLASS__, 'render' ) );
+                        add_action( 'woocommerce_update_options_' . self::TAB_ID, array( __CLASS__, 'save_general' ) );
+                        add_action( 'woocommerce_settings_save_' . self::TAB_ID, array( __CLASS__, 'save_general' ) );
 		}
 
 		/**
@@ -332,10 +332,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
 			return $tabs;
 		}
 
-		/**
-		 * Build fields array for WC settings renderer.
-		 */
-                protected static function get_fields( array $settings ): array {
+                /**
+                 * Build general (non-email) fields array for WC settings renderer.
+                 */
+                protected static function get_general_fields( array $settings ): array {
                         // Build order status options with bare keys (strip 'wc-').
                         $wc_statuses = function_exists( 'wc_get_order_statuses' ) ? wc_get_order_statuses() : array();
                         $status_opts = array();
@@ -350,7 +350,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                 array(
                                         'title' => __( 'Backorder Allocator Settings', 'lpr-backorder-allocator' ),
                                         'type'  => 'title',
-                                        'desc'  => __( 'Configure admin-only allocator behavior and customer-facing communication toggles. Allocation never adjusts stock.', 'lpr-backorder-allocator' ),
+                                        'desc'  => __( 'Configure allocator behavior and storefront notices. Allocation never adjusts stock.', 'lpr-backorder-allocator' ),
                                         'id'    => 'lpr_allocator_section_main',
                                 ),
 
@@ -359,10 +359,129 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                         'desc'     => __( 'Orders in these statuses are considered for allocation and reports.', 'lpr-backorder-allocator' ),
                                         'id'       => 'lpr_allocator_order_statuses',
                                         'type'     => 'multiselect',
-					'class'    => 'wc-enhanced-select',
-					'options'  => $status_opts,
-					'default'  => Settings::defaults()['order_statuses'],
-				),
+                                        'class'    => 'wc-enhanced-select',
+                                        'options'  => $status_opts,
+                                        'default'  => Settings::defaults()['order_statuses'],
+                                ),
+
+                                array(
+                                        'title'   => __( 'Automatic PO allocation', 'lpr-backorder-allocator' ),
+                                        'desc'    => __( 'Run the PO allocator on all open POs at this cadence. Uses the same logic as the Allocate button.', 'lpr-backorder-allocator' ),
+                                        'id'      => 'lpr_allocator_auto_allocation_interval',
+                                        'type'    => 'select',
+                                        'options' => array(
+                                                0     => __( 'Disabled', 'lpr-backorder-allocator' ),
+                                                900   => __( 'Every 15 minutes', 'lpr-backorder-allocator' ),
+                                                1800  => __( 'Every 30 minutes', 'lpr-backorder-allocator' ),
+                                                3600  => __( 'Every hour', 'lpr-backorder-allocator' ),
+                                                7200  => __( 'Every 2 hours', 'lpr-backorder-allocator' ),
+                                                14400 => __( 'Every 4 hours', 'lpr-backorder-allocator' ),
+                                        ),
+                                        'default' => 0,
+                                ),
+
+                                array(
+                                        'type'  => 'sectionend',
+                                        'id'    => 'lpr_allocator_section_main',
+                                ),
+
+                                array(
+                                        'title' => __( 'Storefront notices', 'lpr-backorder-allocator' ),
+                                        'type'  => 'title',
+                                        'desc'  => sprintf(
+                                                /* translators: %s: sample incoming supply notice shown on product pages */
+                                                __( 'Displays incoming supply on product pages (example: %s).', 'lpr-backorder-allocator' ),
+                                                sprintf(
+                                                        /* translators: 1: quantity, 2: ETA date */
+                                                        _n( '%1$d unit expected (ETA %2$s)', '%1$d units expected (ETA %2$s)', 1, 'lpr-backorder-allocator' ),
+                                                        1,
+                                                        lpr_allocator_format_store_date( '2025-12-07' )
+                                                )
+                                        ),
+                                        'id'    => 'lpr_allocator_section_frontend',
+                                ),
+
+                                array(
+                                        'title'   => __( 'Show incoming supply notice', 'lpr-backorder-allocator' ),
+                                        'desc'    => __( 'Append a notice for incoming POs to products on backorder.', 'lpr-backorder-allocator' ),
+                                        'id'      => 'lpr_allocator_frontend_extra_pool',
+                                        'type'    => 'checkbox',
+                                        'default' => 'no',
+                                ),
+
+                                array(
+                                        'title'   => __( 'Show factory emoji', 'lpr-backorder-allocator' ),
+                                        'desc'    => __( 'Prefix the product page notice with a 🏭 emoji.', 'lpr-backorder-allocator' ),
+                                        'id'      => 'lpr_allocator_frontend_notice_emoji',
+                                        'type'    => 'checkbox',
+                                        'default' => 'yes',
+                                ),
+
+                                array(
+                                        'title'       => __( 'Product page notice text', 'lpr-backorder-allocator' ),
+                                        'desc'        => __( 'Use %qty% and %eta% placeholders. Example: "%qty% units expected (ETA %eta%)"', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_frontend_notice_template',
+                                        'type'        => 'text',
+                                        'css'         => 'min-width: 400px;',
+                                        'placeholder' => $defaults['frontend_notice_template'],
+                                        'default'     => $defaults['frontend_notice_template'],
+                                ),
+
+                                array(
+                                        'title'       => __( 'Product page notice color', 'lpr-backorder-allocator' ),
+                                        'desc'        => __( 'Hex color applied to the incoming stock notice.', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_frontend_notice_color',
+                                        'type'        => 'text',
+                                        'css'         => 'width: 140px;',
+                                        'placeholder' => $defaults['frontend_notice_color'],
+                                        'default'     => $defaults['frontend_notice_color'],
+                                ),
+
+                                array(
+                                        'title'       => __( 'Cart notice text', 'lpr-backorder-allocator' ),
+                                        'desc'        => __( 'Shown under cart line items. Use %qty% and %eta% placeholders.', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_frontend_cart_notice_template',
+                                        'type'        => 'text',
+                                        'css'         => 'min-width: 400px;',
+                                        'placeholder' => $defaults['frontend_cart_notice_template'],
+                                        'default'     => $defaults['frontend_cart_notice_template'],
+                                ),
+
+                                array(
+                                        'title'   => __( 'Storefront refresh interval', 'lpr-backorder-allocator' ),
+                                        'desc'    => __( 'How often to refresh incoming supply data on product pages.', 'lpr-backorder-allocator' ),
+                                        'id'      => 'lpr_allocator_frontend_refresh_interval',
+                                        'type'    => 'select',
+                                        'options' => array(
+                                                300  => __( 'Every 5 minutes', 'lpr-backorder-allocator' ),
+                                                900  => __( 'Every 15 minutes', 'lpr-backorder-allocator' ),
+                                                1800 => __( 'Every 30 minutes', 'lpr-backorder-allocator' ),
+                                                3600 => __( 'Every hour', 'lpr-backorder-allocator' ),
+                                                7200 => __( 'Every 2 hours', 'lpr-backorder-allocator' ),
+                                        ),
+                                        'default' => Settings::defaults()['frontend_refresh_interval'],
+                                ),
+
+                                array(
+                                        'type' => 'sectionend',
+                                        'id'   => 'lpr_allocator_section_frontend',
+                                ),
+                        );
+                }
+
+                /**
+                 * Build email-focused fields array for the dedicated admin page.
+                 */
+                public static function get_email_fields( array $settings ): array {
+                        $defaults = Settings::defaults();
+
+                        return array(
+                                array(
+                                        'title' => __( 'Email notifications', 'lpr-backorder-allocator' ),
+                                        'type'  => 'title',
+                                        'desc'  => __( 'Control the trigger, copy, and branding for all customer emails.', 'lpr-backorder-allocator' ),
+                                        'id'    => 'lpr_allocator_section_email_main',
+                                ),
 
                                 array(
                                         'title'   => __( 'Inform customer of updated ETA', 'lpr-backorder-allocator' ),
@@ -558,171 +677,69 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                 ),
 
                                 array(
-                                        'title'   => __( 'Automatic PO allocation', 'lpr-backorder-allocator' ),
-                                        'desc'    => __( 'Run the PO allocator on all open POs at this cadence. Uses the same logic as the Allocate button.', 'lpr-backorder-allocator' ),
-                                        'id'      => 'lpr_allocator_auto_allocation_interval',
-                                        'type'    => 'select',
-                                        'options' => array(
-                                                0     => __( 'Disabled', 'lpr-backorder-allocator' ),
-                                                900   => __( 'Every 15 minutes', 'lpr-backorder-allocator' ),
-                                                1800  => __( 'Every 30 minutes', 'lpr-backorder-allocator' ),
-                                                3600  => __( 'Every hour', 'lpr-backorder-allocator' ),
-                                                7200  => __( 'Every 2 hours', 'lpr-backorder-allocator' ),
-                                                14400 => __( 'Every 4 hours', 'lpr-backorder-allocator' ),
-                                        ),
-                                        'default' => 0,
+                                        'title' => __( 'Branding', 'lpr-backorder-allocator' ),
+                                        'type'  => 'title',
+                                        'desc'  => __( 'Used for branded emails and admin displays.', 'lpr-backorder-allocator' ),
+                                        'id'    => 'lpr_allocator_section_brand',
+                                ),
+
+                                array(
+                                        'title'       => __( 'Brand logo URL', 'lpr-backorder-allocator' ),
+                                        'desc'        => __( 'Absolute URL to a logo image.', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_brand_logo_url',
+                                        'type'        => 'text',
+                                        'css'         => 'min-width: 400px;',
+                                        'placeholder' => 'https://example.com/logo.png',
+                                        'default'     => '',
+                                ),
+
+                                array(
+                                        'title'       => __( 'Primary color', 'lpr-backorder-allocator' ),
+                                        'desc'        => __( 'Hex color used in branded emails.', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_brand_primary_color',
+                                        'type'        => 'text',
+                                        'css'         => 'width: 140px;',
+                                        'placeholder' => '#1a1a1a',
+                                        'default'     => '#1a1a1a',
+                                ),
+
+                                array(
+                                        'title'       => __( 'Support email', 'lpr-backorder-allocator' ),
+                                        'desc'        => __( 'Shown in email headers and footer details.', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_brand_support_email',
+                                        'type'        => 'text',
+                                        'placeholder' => 'support@example.com',
+                                        'default'     => '',
+                                ),
+
+                                array(
+                                        'title'       => __( 'Support phone', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_brand_support_phone',
+                                        'type'        => 'text',
+                                        'placeholder' => '+46 70 123 45 67',
+                                        'default'     => '',
+                                ),
+
+                                array(
+                                        'title'       => __( 'Email footer text', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_email_footer_text_no',
+                                        'type'        => 'textarea',
+                                        'css'         => 'min-width: 400px; height: 100px;',
+                                        'placeholder' => __( 'Thank you for your order. Contact us if you have any questions.', 'lpr-backorder-allocator' ),
+                                        'default'     => '',
                                 ),
 
                                 array(
                                         'type'  => 'sectionend',
-                                        'id'    => 'lpr_allocator_section_main',
+                                        'id'    => 'lpr_allocator_section_brand',
                                 ),
-
-                                array(
-                                        'title' => __( 'Storefront notices', 'lpr-backorder-allocator' ),
-                                        'type'  => 'title',
-                                        'desc'  => sprintf(
-                                                /* translators: %s: sample incoming supply notice shown on product pages */
-                                                __( 'Displays incoming supply on product pages (example: %s).', 'lpr-backorder-allocator' ),
-                                                sprintf(
-                                                        /* translators: 1: quantity, 2: ETA date */
-                                                        _n( '%1$d unit expected (ETA %2$s)', '%1$d units expected (ETA %2$s)', 1, 'lpr-backorder-allocator' ),
-                                                        1,
-                                                        lpr_allocator_format_store_date( '2025-12-07' )
-                                                )
-                                        ),
-                                        'id'    => 'lpr_allocator_section_frontend',
-                                ),
-
-                                array(
-                                        'title'   => __( 'Show incoming supply notice', 'lpr-backorder-allocator' ),
-                                        'desc'    => __( 'Append a notice for incoming POs to products on backorder.', 'lpr-backorder-allocator' ),
-                                        'id'      => 'lpr_allocator_frontend_extra_pool',
-                                        'type'    => 'checkbox',
-                                        'default' => 'no',
-                                ),
-
-                                array(
-                                        'title'   => __( 'Show factory emoji', 'lpr-backorder-allocator' ),
-                                        'desc'    => __( 'Prefix the product page notice with a 🏭 emoji.', 'lpr-backorder-allocator' ),
-                                        'id'      => 'lpr_allocator_frontend_notice_emoji',
-                                        'type'    => 'checkbox',
-                                        'default' => 'yes',
-                                ),
-
-                                array(
-                                        'title'       => __( 'Product page notice text', 'lpr-backorder-allocator' ),
-                                        'desc'        => __( 'Use %qty% and %eta% placeholders. Example: "%qty% units expected (ETA %eta%)"', 'lpr-backorder-allocator' ),
-                                        'id'          => 'lpr_allocator_frontend_notice_template',
-                                        'type'        => 'text',
-                                        'css'         => 'min-width: 400px;',
-                                        'placeholder' => $defaults['frontend_notice_template'],
-                                        'default'     => $defaults['frontend_notice_template'],
-                                ),
-
-                                array(
-                                        'title'       => __( 'Product page notice color', 'lpr-backorder-allocator' ),
-                                        'desc'        => __( 'Hex color applied to the incoming stock notice.', 'lpr-backorder-allocator' ),
-                                        'id'          => 'lpr_allocator_frontend_notice_color',
-                                        'type'        => 'text',
-                                        'css'         => 'width: 140px;',
-                                        'placeholder' => $defaults['frontend_notice_color'],
-                                        'default'     => $defaults['frontend_notice_color'],
-                                ),
-
-                                array(
-                                        'title'       => __( 'Cart notice text', 'lpr-backorder-allocator' ),
-                                        'desc'        => __( 'Shown under cart line items. Use %qty% and %eta% placeholders.', 'lpr-backorder-allocator' ),
-                                        'id'          => 'lpr_allocator_frontend_cart_notice_template',
-                                        'type'        => 'text',
-                                        'css'         => 'min-width: 400px;',
-                                        'placeholder' => $defaults['frontend_cart_notice_template'],
-                                        'default'     => $defaults['frontend_cart_notice_template'],
-                                ),
-
-                                array(
-                                        'title'   => __( 'Storefront refresh interval', 'lpr-backorder-allocator' ),
-                                        'desc'    => __( 'How often to refresh incoming supply data on product pages.', 'lpr-backorder-allocator' ),
-                                        'id'      => 'lpr_allocator_frontend_refresh_interval',
-                                        'type'    => 'select',
-                                        'options' => array(
-                                                300  => __( 'Every 5 minutes', 'lpr-backorder-allocator' ),
-                                                900  => __( 'Every 15 minutes', 'lpr-backorder-allocator' ),
-                                                1800 => __( 'Every 30 minutes', 'lpr-backorder-allocator' ),
-                                                3600 => __( 'Every hour', 'lpr-backorder-allocator' ),
-                                                7200 => __( 'Every 2 hours', 'lpr-backorder-allocator' ),
-                                        ),
-                                        'default' => Settings::defaults()['frontend_refresh_interval'],
-                                ),
-
-                                array(
-                                        'type' => 'sectionend',
-                                        'id'   => 'lpr_allocator_section_frontend',
-                                ),
-
-                                array(
-                                        'title' => __( 'Branding', 'lpr-backorder-allocator' ),
-                                        'type'  => 'title',
-                                        'desc'  => __( 'Used for branded emails and admin displays.', 'lpr-backorder-allocator' ),
-					'id'    => 'lpr_allocator_section_brand',
-				),
-
-				array(
-					'title'       => __( 'Brand logo URL', 'lpr-backorder-allocator' ),
-					'desc'        => __( 'Absolute URL to a logo image.', 'lpr-backorder-allocator' ),
-					'id'          => 'lpr_allocator_brand_logo_url',
-					'type'        => 'text',
-					'css'         => 'min-width: 400px;',
-					'placeholder' => 'https://example.com/logo.png',
-					'default'     => '',
-				),
-
-				array(
-					'title'       => __( 'Primary color', 'lpr-backorder-allocator' ),
-					'desc'        => __( 'Hex color used in branded emails.', 'lpr-backorder-allocator' ),
-					'id'          => 'lpr_allocator_brand_primary_color',
-					'type'        => 'text',
-					'css'         => 'width: 120px;',
-					'placeholder' => '#1a1a1a',
-					'default'     => '#1a1a1a',
-				),
-
-				array(
-					'title'       => __( 'Support email', 'lpr-backorder-allocator' ),
-					'id'          => 'lpr_allocator_brand_support_email',
-					'type'        => 'email',
-					'placeholder' => 'support@example.com',
-					'default'     => '',
-				),
-
-				array(
-					"title"       => __( 'Support phone', 'lpr-backorder-allocator' ),
-					"id"          => 'lpr_allocator_brand_support_phone',
-					"type"        => 'text',
-					"placeholder" => '+46 70 123 45 67',
-					"default"     => '',
-				),
-
-				array(
-					'title'       => __( 'Email footer text', 'lpr-backorder-allocator' ),
-					'id'          => 'lpr_allocator_email_footer_text_no',
-					'type'        => 'textarea',
-					'css'         => 'min-width: 400px; height: 100px;',
-					'placeholder' => __( 'Thank you for your order. Contact us if you have any questions.', 'lpr-backorder-allocator' ),
-					'default'     => '',
-				),
-
-				array(
-					'type'  => 'sectionend',
-					'id'    => 'lpr_allocator_section_brand',
-				),
-			);
-		}
+                        );
+                }
 
 		/**
 		 * Provide field values to WC renderer from our single option via pre_option_*.
 		 */
-		protected static function prime_field_values( array $settings ): void {
+                public static function prime_field_values( array $settings ): void {
                                 $map = array(
                                         'lpr_allocator_order_statuses'             => (array) $settings['order_statuses'],
                                         'lpr_allocator_inform_customer_eta'        => $settings['inform_customer_eta'] ? 'yes' : 'no',
@@ -775,19 +792,174 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
 			if ( ! current_user_can( 'manage_woocommerce' ) ) {
 				return;
 			}
-			if ( ! function_exists( 'woocommerce_admin_fields' ) ) {
-				return;
-			}
+                        if ( ! function_exists( 'woocommerce_admin_fields' ) ) {
+                                return;
+                        }
                         $settings = Settings::get();
                         self::prime_field_values( $settings );
 
-                        $fields = self::get_fields( $settings );
+                        $fields = self::get_general_fields( $settings );
                         woocommerce_admin_fields( $fields );
+                }
+
+                /**
+                 * Save handler for general settings: collect POST, sanitize, and persist in a single option (autoload=no).
+                 */
+                public static function save_general(): void {
+			if ( ! current_user_can( 'manage_woocommerce' ) ) {
+				return;
+			}
+			if ( function_exists( 'check_admin_referer' ) ) {
+				// WooCommerce settings form nonce.
+				check_admin_referer( 'woocommerce-settings' );
+			}
+
+                        $settings        = Settings::get();
+                        $posted_statuses = isset( $_POST['lpr_allocator_order_statuses'] ) ? (array) wp_unslash( $_POST['lpr_allocator_order_statuses'] ) : array();
+
+                        $raw = $settings;
+                        $raw['order_statuses']              = $posted_statuses;
+                        $raw['frontend_extra_pool']         = ! empty( $_POST['lpr_allocator_frontend_extra_pool'] );
+                        $raw['frontend_notice_emoji']       = ! empty( $_POST['lpr_allocator_frontend_notice_emoji'] );
+                        $raw['frontend_notice_template']    = isset( $_POST['lpr_allocator_frontend_notice_template'] ) ? (string) wp_unslash( $_POST['lpr_allocator_frontend_notice_template'] ) : $settings['frontend_notice_template'];
+                        $raw['frontend_notice_color']       = isset( $_POST['lpr_allocator_frontend_notice_color'] ) ? (string) wp_unslash( $_POST['lpr_allocator_frontend_notice_color'] ) : $settings['frontend_notice_color'];
+                        $raw['frontend_cart_notice_template'] = isset( $_POST['lpr_allocator_frontend_cart_notice_template'] ) ? (string) wp_unslash( $_POST['lpr_allocator_frontend_cart_notice_template'] ) : $settings['frontend_cart_notice_template'];
+                        $raw['frontend_refresh_interval']   = isset( $_POST['lpr_allocator_frontend_refresh_interval'] ) ? (int) $_POST['lpr_allocator_frontend_refresh_interval'] : $settings['frontend_refresh_interval'];
+                        $raw['auto_allocation_interval']    = isset( $_POST['lpr_allocator_auto_allocation_interval'] ) ? (int) $_POST['lpr_allocator_auto_allocation_interval'] : $settings['auto_allocation_interval'];
+
+                        Settings::update( $raw );
+
+                        if ( class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ) {
+                                Incoming_Stock_Indexer::reset_schedule();
+                        }
+
+                        if ( class_exists( __NAMESPACE__ . '\Auto_PO_Allocator' ) ) {
+                                Auto_PO_Allocator::reset_schedule();
+                        }
+
+                        if ( class_exists( '\WC_Admin_Settings' ) ) {
+                                \WC_Admin_Settings::add_message( __( 'Backorder Allocator settings saved.', 'lpr-backorder-allocator' ) );
+                        }
+                }
+
+                /**
+                 * Save handler for dedicated email settings page.
+                 */
+                public static function save_email(): bool {
+                        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                                return false;
+                        }
+                        if ( function_exists( 'check_admin_referer' ) ) {
+                                check_admin_referer( 'lpr_email_settings', 'lpr_email_settings_nonce' );
+                        }
+
+                        $settings = Settings::get();
+                        $raw      = $settings;
+
+                        $raw['inform_customer_eta']           = ! empty( $_POST['lpr_allocator_inform_customer_eta'] );
+                        $raw['eta_email_subject']             = isset( $_POST['lpr_allocator_eta_email_subject'] ) ? (string) wp_unslash( $_POST['lpr_allocator_eta_email_subject'] ) : $settings['eta_email_subject'];
+                        $raw['eta_email_intro']               = isset( $_POST['lpr_allocator_eta_email_intro'] ) ? (string) wp_unslash( $_POST['lpr_allocator_eta_email_intro'] ) : $settings['eta_email_intro'];
+                        $raw['email_eta_disclaimer']          = isset( $_POST['lpr_allocator_email_eta_disclaimer'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_eta_disclaimer'] ) : $settings['email_eta_disclaimer'];
+                        $raw['email_progress_heading']        = isset( $_POST['lpr_allocator_email_progress_heading'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_progress_heading'] ) : $settings['email_progress_heading'];
+                        $raw['email_progress_subheading']     = isset( $_POST['lpr_allocator_email_progress_subheading'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_progress_subheading'] ) : $settings['email_progress_subheading'];
+                        $raw['email_progress_complete_label'] = isset( $_POST['lpr_allocator_email_progress_complete_label'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_progress_complete_label'] ) : $settings['email_progress_complete_label'];
+                        $raw['email_status_label_order_placed'] = isset( $_POST['lpr_allocator_email_status_label_order_placed'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_status_label_order_placed'] ) : $settings['email_status_label_order_placed'];
+                        $raw['email_status_label_po_allocated'] = isset( $_POST['lpr_allocator_email_status_label_po_allocated'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_status_label_po_allocated'] ) : $settings['email_status_label_po_allocated'];
+                        $raw['email_status_label_eta_received'] = isset( $_POST['lpr_allocator_email_status_label_eta_received'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_status_label_eta_received'] ) : $settings['email_status_label_eta_received'];
+                        $raw['email_status_label_delivery']     = isset( $_POST['lpr_allocator_email_status_label_delivery'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_status_label_delivery'] ) : $settings['email_status_label_delivery'];
+                        $raw['email_status_done_label']         = isset( $_POST['lpr_allocator_email_status_done_label'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_status_done_label'] ) : $settings['email_status_done_label'];
+                        $raw['email_status_pending_label']      = isset( $_POST['lpr_allocator_email_status_pending_label'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_status_pending_label'] ) : $settings['email_status_pending_label'];
+                        $raw['email_updated_heading']           = isset( $_POST['lpr_allocator_email_updated_heading'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_updated_heading'] ) : $settings['email_updated_heading'];
+                        $raw['email_overview_heading']          = isset( $_POST['lpr_allocator_email_overview_heading'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_overview_heading'] ) : $settings['email_overview_heading'];
+                        $raw['email_table_heading_item']        = isset( $_POST['lpr_allocator_email_table_heading_item'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_table_heading_item'] ) : $settings['email_table_heading_item'];
+                        $raw['email_table_heading_previous']    = isset( $_POST['lpr_allocator_email_table_heading_previous'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_table_heading_previous'] ) : $settings['email_table_heading_previous'];
+                        $raw['email_table_heading_new_eta']     = isset( $_POST['lpr_allocator_email_table_heading_new_eta'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_table_heading_new_eta'] ) : $settings['email_table_heading_new_eta'];
+                        $raw['email_unallocated_label']         = isset( $_POST['lpr_allocator_email_unallocated_label'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_unallocated_label'] ) : $settings['email_unallocated_label'];
+
+                        $raw['brand_logo_url']       = isset( $_POST['lpr_allocator_brand_logo_url'] ) ? (string) wp_unslash( $_POST['lpr_allocator_brand_logo_url'] ) : $settings['brand_logo_url'];
+                        $raw['brand_primary_color']  = isset( $_POST['lpr_allocator_brand_primary_color'] ) ? (string) wp_unslash( $_POST['lpr_allocator_brand_primary_color'] ) : $settings['brand_primary_color'];
+                        $raw['brand_support_email']  = isset( $_POST['lpr_allocator_brand_support_email'] ) ? (string) wp_unslash( $_POST['lpr_allocator_brand_support_email'] ) : $settings['brand_support_email'];
+                        $raw['brand_support_phone']  = isset( $_POST['lpr_allocator_brand_support_phone'] ) ? (string) wp_unslash( $_POST['lpr_allocator_brand_support_phone'] ) : $settings['brand_support_phone'];
+                        $raw['email_footer_text_no'] = isset( $_POST['lpr_allocator_email_footer_text_no'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_footer_text_no'] ) : $settings['email_footer_text_no'];
+
+                        return Settings::update( $raw );
+                }
+        }
+        Admin_Settings_Tab::init();
+}
+
+if ( ! class_exists( __NAMESPACE__ . '\Email_Settings_Page' ) ) {
+        /**
+         * Dedicated admin page for allocator email copy, branding, and colors.
+         */
+        class Email_Settings_Page {
+
+                const SLUG = 'lpr-email-settings';
+
+                public static function init(): void {
+                        add_action( 'admin_menu', array( __CLASS__, 'register_page' ) );
+                }
+
+                public static function register_page(): void {
+                        add_submenu_page(
+                                ADMIN_MENU_SLUG,
+                                __( 'Email Settings', 'lpr-backorder-allocator' ),
+                                __( 'Email Settings', 'lpr-backorder-allocator' ),
+                                'manage_woocommerce',
+                                self::SLUG,
+                                array( __CLASS__, 'render' ),
+                                4
+                        );
+                }
+
+                protected static function handle_save(): bool {
+                        if ( 'POST' !== $_SERVER['REQUEST_METHOD'] ) {
+                                return false;
+                        }
+                        if ( empty( $_POST['lpr_email_settings_nonce'] ) ) {
+                                return false;
+                        }
+
+                        $saved = Admin_Settings_Tab::save_email();
+
+                        if ( class_exists( '\WC_Admin_Settings' ) ) {
+                                if ( $saved ) {
+                                        \WC_Admin_Settings::add_message( __( 'Email settings saved.', 'lpr-backorder-allocator' ) );
+                                } else {
+                                        \WC_Admin_Settings::add_error( __( 'Email settings could not be saved.', 'lpr-backorder-allocator' ) );
+                                }
+                        }
+
+                        return $saved;
+                }
+
+                public static function render(): void {
+                        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                                return;
+                        }
+                        if ( ! function_exists( 'woocommerce_admin_fields' ) ) {
+                                return;
+                        }
+
+                        self::handle_save();
+
+                        $settings = Settings::get();
+                        Admin_Settings_Tab::prime_field_values( $settings );
+
+                        $fields = Admin_Settings_Tab::get_email_fields( $settings );
+
+                        echo '<div class="wrap">';
+                        echo '<h1>' . esc_html__( 'Email Settings', 'lpr-backorder-allocator' ) . '</h1>';
+                        echo '<form method="post" action="">';
+                        wp_nonce_field( 'lpr_email_settings', 'lpr_email_settings_nonce' );
+                        woocommerce_admin_fields( $fields );
+                        submit_button( __( 'Save Email Settings', 'lpr-backorder-allocator' ) );
 
                         $preview_nonce = wp_create_nonce( 'lpr_email_preview' );
                         echo '<p><button type="button" class="button" id="lpr-email-preview">' . esc_html__( 'Preview notification email', 'lpr-backorder-allocator' ) . '</button> <span class="description">' . esc_html__( 'Opens a preview of all allocator emails without sending them.', 'lpr-backorder-allocator' ) . '</span></p>';
+                        echo '</form>';
+                        echo '<div id="lpr-email-preview-wrap" style="display:none;"></div>';
                         ?>
-                        <div id="lpr-email-preview-wrap" style="display:none;"></div>
                         <script>
                         (function($){
                                 if(!document.getElementById('lpr-email-preview-style')){
@@ -822,72 +994,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                         })(jQuery);
                         </script>
                         <?php
-                }
-
-		/**
-		 * Save handler: collect POST, sanitize, and persist in a single option (autoload=no).
-		 */
-		public static function save(): void {
-			if ( ! current_user_can( 'manage_woocommerce' ) ) {
-				return;
-			}
-			if ( function_exists( 'check_admin_referer' ) ) {
-				// WooCommerce settings form nonce.
-				check_admin_referer( 'woocommerce-settings' );
-			}
-
-                        $posted_statuses = isset( $_POST['lpr_allocator_order_statuses'] ) ? (array) wp_unslash( $_POST['lpr_allocator_order_statuses'] ) : array();
-                                $raw = array(
-                                        'order_statuses'             => $posted_statuses,
-                                        'inform_customer_eta'        => ! empty( $_POST['lpr_allocator_inform_customer_eta'] ),
-                                        'frontend_extra_pool'        => ! empty( $_POST['lpr_allocator_frontend_extra_pool'] ),
-                                        'frontend_notice_emoji'      => ! empty( $_POST['lpr_allocator_frontend_notice_emoji'] ),
-                                        'frontend_notice_template'   => isset( $_POST['lpr_allocator_frontend_notice_template'] ) ? (string) wp_unslash( $_POST['lpr_allocator_frontend_notice_template'] ) : '',
-                                        'frontend_notice_color'      => isset( $_POST['lpr_allocator_frontend_notice_color'] ) ? (string) wp_unslash( $_POST['lpr_allocator_frontend_notice_color'] ) : '',
-                                        'frontend_cart_notice_template' => isset( $_POST['lpr_allocator_frontend_cart_notice_template'] ) ? (string) wp_unslash( $_POST['lpr_allocator_frontend_cart_notice_template'] ) : '',
-                                        'frontend_refresh_interval'  => isset( $_POST['lpr_allocator_frontend_refresh_interval'] ) ? (int) $_POST['lpr_allocator_frontend_refresh_interval'] : 0,
-                                        'auto_allocation_interval'   => isset( $_POST['lpr_allocator_auto_allocation_interval'] ) ? (int) $_POST['lpr_allocator_auto_allocation_interval'] : 0,
-                                        'brand_logo_url'             => isset( $_POST['lpr_allocator_brand_logo_url'] ) ? (string) wp_unslash( $_POST['lpr_allocator_brand_logo_url'] ) : '',
-                                'brand_primary_color'        => isset( $_POST['lpr_allocator_brand_primary_color'] ) ? (string) wp_unslash( $_POST['lpr_allocator_brand_primary_color'] ) : '',
-                                'brand_support_email'        => isset( $_POST['lpr_allocator_brand_support_email'] ) ? (string) wp_unslash( $_POST['lpr_allocator_brand_support_email'] ) : '',
-                                'brand_support_phone'        => isset( $_POST['lpr_allocator_brand_support_phone'] ) ? (string) wp_unslash( $_POST['lpr_allocator_brand_support_phone'] ) : '',
-                                'email_footer_text_no'       => isset( $_POST['lpr_allocator_email_footer_text_no'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_footer_text_no'] ) : '',
-                                'eta_email_subject'          => isset( $_POST['lpr_allocator_eta_email_subject'] ) ? (string) wp_unslash( $_POST['lpr_allocator_eta_email_subject'] ) : '',
-                                'eta_email_intro'            => isset( $_POST['lpr_allocator_eta_email_intro'] ) ? (string) wp_unslash( $_POST['lpr_allocator_eta_email_intro'] ) : '',
-                                'email_eta_disclaimer'       => isset( $_POST['lpr_allocator_email_eta_disclaimer'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_eta_disclaimer'] ) : '',
-                                'email_progress_heading'     => isset( $_POST['lpr_allocator_email_progress_heading'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_progress_heading'] ) : '',
-                                'email_progress_subheading'  => isset( $_POST['lpr_allocator_email_progress_subheading'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_progress_subheading'] ) : '',
-                                'email_progress_complete_label' => isset( $_POST['lpr_allocator_email_progress_complete_label'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_progress_complete_label'] ) : '',
-                                'email_status_label_order_placed' => isset( $_POST['lpr_allocator_email_status_label_order_placed'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_status_label_order_placed'] ) : '',
-                                'email_status_label_po_allocated' => isset( $_POST['lpr_allocator_email_status_label_po_allocated'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_status_label_po_allocated'] ) : '',
-                                'email_status_label_eta_received' => isset( $_POST['lpr_allocator_email_status_label_eta_received'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_status_label_eta_received'] ) : '',
-                                'email_status_label_delivery'     => isset( $_POST['lpr_allocator_email_status_label_delivery'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_status_label_delivery'] ) : '',
-                                'email_status_done_label'         => isset( $_POST['lpr_allocator_email_status_done_label'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_status_done_label'] ) : '',
-                                'email_status_pending_label'      => isset( $_POST['lpr_allocator_email_status_pending_label'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_status_pending_label'] ) : '',
-                                'email_updated_heading'           => isset( $_POST['lpr_allocator_email_updated_heading'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_updated_heading'] ) : '',
-                                'email_overview_heading'          => isset( $_POST['lpr_allocator_email_overview_heading'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_overview_heading'] ) : '',
-                                'email_table_heading_item'        => isset( $_POST['lpr_allocator_email_table_heading_item'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_table_heading_item'] ) : '',
-                                'email_table_heading_previous'    => isset( $_POST['lpr_allocator_email_table_heading_previous'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_table_heading_previous'] ) : '',
-                                'email_table_heading_new_eta'     => isset( $_POST['lpr_allocator_email_table_heading_new_eta'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_table_heading_new_eta'] ) : '',
-                                'email_unallocated_label'         => isset( $_POST['lpr_allocator_email_unallocated_label'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_unallocated_label'] ) : '',
-                        );
-
-                        Settings::update( $raw );
-
-                        if ( class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ) {
-                                Incoming_Stock_Indexer::reset_schedule();
-                        }
-
-                        if ( class_exists( __NAMESPACE__ . '\Auto_PO_Allocator' ) ) {
-                                Auto_PO_Allocator::reset_schedule();
-                        }
-
-                        if ( class_exists( '\WC_Admin_Settings' ) ) {
-                                \WC_Admin_Settings::add_message( __( 'Backorder Allocator settings saved.', 'lpr-backorder-allocator' ) );
-                        }
+                        echo '</div>';
                 }
         }
-        Admin_Settings_Tab::init();
+        Email_Settings_Page::init();
 }
 
 if ( ! class_exists( __NAMESPACE__ . '\Email_Notification_Preview' ) ) {
@@ -1498,7 +1608,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Menu' ) ) {
                                 __( 'Settings', 'lpr-backorder-allocator' ),
                                 'manage_woocommerce',
                                 ADMIN_MENU_SLUG . '-settings',
-                                array( __CLASS__, 'redirect_to_settings' )
+                                array( __CLASS__, 'redirect_to_settings' ),
+                                90
                         );
                 }
 
@@ -9334,7 +9445,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Orders_Page' ) ) {
                                 __( 'Backorder Orders', 'lpr-backorder-allocator' ),
                                 'manage_woocommerce',
                                 'lpr-backorder-orders',
-                                array( __CLASS__, 'render' )
+                                array( __CLASS__, 'render' ),
+                                2
                         );
                 }
 
@@ -9789,7 +9901,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Purchase_Orders_Page' ) ) {
                                 __( 'Incoming POs', 'lpr-backorder-allocator' ),
                                 'manage_woocommerce',
                                 'lpr-incoming-pos',
-                                array( __CLASS__, 'render' )
+                                array( __CLASS__, 'render' ),
+                                3
                         );
                 }
 
@@ -10148,10 +10261,11 @@ if ( ! class_exists( __NAMESPACE__ . '\Backordered_Products_Page' ) ) {
                                 __( 'Backordered Products', 'lpr-backorder-allocator' ),
                                 __( 'Backordered Products', 'lpr-backorder-allocator' ),
                                 'manage_woocommerce',
-				'lpr-backordered-products',
-				array( __CLASS__, 'render' )
-			);
-		}
+                                'lpr-backordered-products',
+                                array( __CLASS__, 'render' ),
+                                1
+                        );
+                }
 
 		protected static function filter_rows( array $rows, string $view ): array {
 			$out = array();
