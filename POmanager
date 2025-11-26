@@ -7730,7 +7730,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Integrity_Checker' ) ) {
                                         }
                                         unset( $alloc_row );
                                 } else {
-                                        $desired = function_exists( __NAMESPACE__ . '\\lpr_allocator_calc_backorder_desired' ) ? lpr_allocator_calc_backorder_desired( $item ) : max( 0, (int) $item->get_quantity() );
+                                        $desired = function_exists( __NAMESPACE__ . '\lpr_allocator_calc_backorder_desired' ) ? lpr_allocator_calc_backorder_desired( $item ) : max( 0, (int) $item->get_quantity() );
                                         $cap     = min( max( 0, (int) $item->get_quantity() ), max( 0, (int) $desired ) );
 
                                         $active_total = 0;
@@ -7814,7 +7814,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Integrity_Checker' ) ) {
                         }
 
                         foreach ( array_keys( $orders_to_refresh ) as $oid ) {
-                                if ( function_exists( __NAMESPACE__ . '\\lpr_allocator_reapply_po_allocations_for_order' ) ) {
+                                if ( function_exists( __NAMESPACE__ . '\lpr_allocator_reapply_po_allocations_for_order' ) ) {
                                         lpr_allocator_reapply_po_allocations_for_order( (int) $oid );
                                 }
                                 if ( class_exists( __NAMESPACE__ . '\ETA' ) ) {
