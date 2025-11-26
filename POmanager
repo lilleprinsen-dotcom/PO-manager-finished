@@ -695,10 +695,17 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                                 return;
                         }
 
-                        // Ensure we do not enqueue the filter multiple times if init runs twice.
+                        // Ensure we do not enqueue the filters multiple times if init runs twice.
                         if ( ! has_filter( 'woocommerce_get_availability_text', array( __CLASS__, 'append_incoming_notice' ) ) ) {
                                 add_filter( 'woocommerce_get_availability_text', array( __CLASS__, 'append_incoming_notice' ), 25, 2 );
                         }
+
+                        if ( ! has_filter( 'woocommerce_get_availability', array( __CLASS__, 'inject_notice_into_availability' ) ) ) {
+                                add_filter( 'woocommerce_get_availability', array( __CLASS__, 'inject_notice_into_availability' ), 25, 2 );
+                        }
+
+                        // Render a dedicated notice beneath the Add to cart button for themes that override availability text.
+                        add_action( 'woocommerce_after_add_to_cart_button', array( __CLASS__, 'render_after_add_to_cart_button' ), 15 );
                 }
 
                 /**
@@ -727,45 +734,57 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                  * @param \WC_Product $product  Product instance.
                  */
                 public static function append_incoming_notice( string $text, $product ): string {
-                        if ( ! self::is_enabled() ) {
-                                return $text;
-                        }
-
-                        if ( ! $product instanceof \WC_Product ) {
-                                return $text;
-                        }
-
-                        $product_id = (int) $product->get_id();
-                        if ( $product_id <= 0 ) {
-                                return $text;
-                        }
-
-                        $qty = (int) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_QTY' ) ? PRODUCT_META_NEXT_EXTRA_QTY : '_lpr_next_extra_qty', true );
-                        if ( $qty <= 0 ) {
-                                return $text;
-                        }
-
-                        $eta = trim( (string) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_ETA' ) ? PRODUCT_META_NEXT_EXTRA_ETA : '_lpr_next_extra_eta', true ) );
-                        if ( '' === $eta ) {
-                                return $text;
-                        }
-
-                        $settings = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array();
-                        $use_emoji = isset( $settings['frontend_notice_emoji'] ) ? (bool) $settings['frontend_notice_emoji'] : Settings::defaults()['frontend_notice_emoji'];
-                        $notice   = self::build_notice_text(
-                                $qty,
-                                $eta,
-                                $settings['frontend_notice_template'] ?? '',
-                                Settings::defaults()['frontend_notice_template']
-                        );
+                        $notice = self::notice_for_product( $product, 'frontend_notice_template', 'frontend_notice_emoji', 'frontend_notice_template' );
 
                         if ( '' === $notice ) {
                                 return $text;
                         }
 
-                        $formatted_notice = ( $use_emoji ? '🏭 ' : '' ) . $notice;
+                        return $text ? trim( $text . '<br />' . $notice ) : $notice;
+                }
 
-                        return $text ? trim( $text . '<br />' . $formatted_notice ) : $formatted_notice;
+                /**
+                 * Inject incoming notice for contexts that use the availability array (blocks).
+                 *
+                 * @param array       $availability Existing availability payload.
+                 * @param \WC_Product $product      Product instance.
+                 * @return array
+                 */
+                public static function inject_notice_into_availability( array $availability, $product ): array {
+                        $notice = self::notice_for_product( $product, 'frontend_notice_template', 'frontend_notice_emoji', 'frontend_notice_template' );
+
+                        if ( '' === $notice ) {
+                                return $availability;
+                        }
+
+                        $availability['availability'] = $availability['availability']
+                                ? trim( $availability['availability'] . '<br />' . $notice )
+                                : $notice;
+
+                        return $availability;
+                }
+
+                /**
+                 * Output the incoming notice directly beneath the Add to cart button.
+                 */
+                public static function render_after_add_to_cart_button(): void {
+                        if ( ! self::is_enabled() ) {
+                                return;
+                        }
+
+                        global $product;
+
+                        if ( ! $product instanceof \WC_Product ) {
+                                $product = wc_get_product( get_the_ID() ); // phpcs:ignore WordPress.WP.GlobalVariablesOverride.Prohibited
+                        }
+
+                        $notice = self::notice_for_product( $product, 'frontend_notice_template', 'frontend_notice_emoji', 'frontend_notice_template' );
+
+                        if ( '' === $notice ) {
+                                return;
+                        }
+
+                        echo '<div class="lpr-incoming-product-notice">' . $notice . '</div>';
                 }
 
                 /**
@@ -809,6 +828,55 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                                 $qty,
                                 $eta_text
                         );
+                }
+
+                /**
+                 * Build a fully formatted notice for a given product.
+                 *
+                 * @param \WC_Product $product
+                 * @param string      $template_key     Settings array key containing the template to use.
+                 * @param string      $emoji_flag_key   Settings array key containing the emoji flag.
+                 * @param string      $fallback_tpl_key Defaults key to use when template is empty.
+                 * @return string
+                 */
+                protected static function notice_for_product( $product, string $template_key, string $emoji_flag_key, string $fallback_tpl_key ): string {
+                        if ( ! self::is_enabled() ) {
+                                return '';
+                        }
+
+                        if ( ! $product instanceof \WC_Product ) {
+                                return '';
+                        }
+
+                        $product_id = (int) $product->get_id();
+                        if ( $product_id <= 0 ) {
+                                return '';
+                        }
+
+                        $qty = (int) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_QTY' ) ? PRODUCT_META_NEXT_EXTRA_QTY : '_lpr_next_extra_qty', true );
+                        if ( $qty <= 0 ) {
+                                return '';
+                        }
+
+                        $eta = trim( (string) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_ETA' ) ? PRODUCT_META_NEXT_EXTRA_ETA : '_lpr_next_extra_eta', true ) );
+                        if ( '' === $eta ) {
+                                return '';
+                        }
+
+                        $settings  = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : Settings::defaults();
+                        $use_emoji = isset( $settings[ $emoji_flag_key ] ) ? (bool) $settings[ $emoji_flag_key ] : Settings::defaults()[ $emoji_flag_key ];
+                        $notice    = self::build_notice_text(
+                                $qty,
+                                $eta,
+                                $settings[ $template_key ] ?? '',
+                                Settings::defaults()[ $fallback_tpl_key ]
+                        );
+
+                        if ( '' === $notice ) {
+                                return '';
+                        }
+
+                        return ( $use_emoji ? '🏭 ' : '' ) . $notice;
                 }
         }
         Incoming_Stock_Storefront::init();
