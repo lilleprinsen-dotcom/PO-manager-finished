@@ -81,6 +81,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                         return array(
                                 'order_statuses'        => array( 'processing', 'on-hold' ),
                                 'inform_customer_eta'   => false,
+                                'email_eta_subject'     => __( 'Your order ETA has been updated', 'lpr-backorder-allocator' ),
+                                'email_eta_intro'       => __( 'We’ve updated the expected arrival for the items below:', 'lpr-backorder-allocator' ),
                                 'frontend_extra_pool'   => false,
                                 'frontend_notice_emoji' => true,
                                 'frontend_notice_template' => __( '%qty% units expected (ETA %eta%)', 'lpr-backorder-allocator' ),
@@ -153,6 +155,15 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
 			}
 
                         $inform = ! empty( $raw['inform_customer_eta'] );
+                        $email_subject = isset( $raw['email_eta_subject'] ) ? sanitize_text_field( (string) $raw['email_eta_subject'] ) : '';
+                        if ( '' === trim( $email_subject ) ) {
+                                $email_subject = $defaults['email_eta_subject'];
+                        }
+
+                        $email_intro = isset( $raw['email_eta_intro'] ) ? wp_kses_post( $raw['email_eta_intro'] ) : '';
+                        if ( '' === trim( wp_strip_all_tags( $email_intro ) ) ) {
+                                $email_intro = $defaults['email_eta_intro'];
+                        }
                         $front  = ! empty( $raw['frontend_extra_pool'] );
                         $emoji  = isset( $raw['frontend_notice_emoji'] ) ? (bool) $raw['frontend_notice_emoji'] : $defaults['frontend_notice_emoji'];
 
@@ -193,10 +204,12 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
 			$phone  = isset( $raw['brand_support_phone'] ) ? sanitize_text_field( $raw['brand_support_phone'] ) : '';
 			$footer = isset( $raw['email_footer_text_no'] ) ? wp_kses_post( $raw['email_footer_text_no'] ) : '';
 
-			return array(
-                                'order_statuses'        => $statuses,
-                                'inform_customer_eta'   => (bool) $inform,
-                                'frontend_extra_pool'   => (bool) $front,
+                                return array(
+                                        'order_statuses'        => $statuses,
+                                        'inform_customer_eta'   => (bool) $inform,
+                                        'email_eta_subject'     => $email_subject,
+                                        'email_eta_intro'       => $email_intro,
+                                        'frontend_extra_pool'   => (bool) $front,
                                 'frontend_notice_emoji' => (bool) $emoji,
                                 'frontend_notice_template' => $notice_tpl,
                                 'frontend_notice_color'    => $notice_color,
@@ -447,14 +460,44 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
 					"default"     => '',
 				),
 
-				array(
-					'title'       => __( 'Email footer text', 'lpr-backorder-allocator' ),
-					'id'          => 'lpr_allocator_email_footer_text_no',
-					'type'        => 'textarea',
-					'css'         => 'min-width: 400px; height: 100px;',
-					'placeholder' => __( 'Thank you for your order. Contact us if you have any questions.', 'lpr-backorder-allocator' ),
-					'default'     => '',
-				),
+                                array(
+                                        'title'       => __( 'Email footer text', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_email_footer_text_no',
+                                        'type'        => 'textarea',
+                                        'css'         => 'min-width: 400px; height: 100px;',
+                                        'placeholder' => __( 'Thank you for your order. Contact us if you have any questions.', 'lpr-backorder-allocator' ),
+                                        'default'     => '',
+                                ),
+
+                                array(
+                                        'title' => __( 'Customer email template', 'lpr-backorder-allocator' ),
+                                        'type'  => 'title',
+                                        'desc'  => __( 'Customize the subject and introduction used for ETA update emails sent to customers. Use %order_number% and %customer_first_name% tokens.', 'lpr-backorder-allocator' ),
+                                        'id'    => 'lpr_allocator_section_email_template',
+                                ),
+
+                                array(
+                                        'title'       => __( 'Email subject', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_email_eta_subject',
+                                        'type'        => 'text',
+                                        'css'         => 'min-width: 400px;',
+                                        'placeholder' => Settings::defaults()['email_eta_subject'],
+                                        'default'     => Settings::defaults()['email_eta_subject'],
+                                ),
+
+                                array(
+                                        'title'       => __( 'Intro text', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_email_eta_intro',
+                                        'type'        => 'textarea',
+                                        'css'         => 'min-width: 400px; height: 80px;',
+                                        'placeholder' => Settings::defaults()['email_eta_intro'],
+                                        'default'     => Settings::defaults()['email_eta_intro'],
+                                ),
+
+                                array(
+                                        'type' => 'sectionend',
+                                        'id'   => 'lpr_allocator_section_email_template',
+                                ),
 
 				array(
 					'type'  => 'sectionend',
@@ -478,11 +521,13 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                         'lpr_allocator_frontend_refresh_interval'  => (int) $settings['frontend_refresh_interval'],
                                 'lpr_allocator_auto_allocation_interval'   => (int) $settings['auto_allocation_interval'],
                                 'lpr_allocator_brand_logo_url'             => (string) $settings['brand_logo_url'],
-                                'lpr_allocator_brand_primary_color'        => (string) $settings['brand_primary_color'],
-                                'lpr_allocator_brand_support_email'        => (string) $settings['brand_support_email'],
-                                'lpr_allocator_brand_support_phone'        => (string) $settings['brand_support_phone'],
-                                'lpr_allocator_email_footer_text_no'       => (string) $settings['email_footer_text_no'],
-                        );
+                                  'lpr_allocator_brand_primary_color'        => (string) $settings['brand_primary_color'],
+                                  'lpr_allocator_brand_support_email'        => (string) $settings['brand_support_email'],
+                                  'lpr_allocator_brand_support_phone'        => (string) $settings['brand_support_phone'],
+                                  'lpr_allocator_email_footer_text_no'       => (string) $settings['email_footer_text_no'],
+                                  'lpr_allocator_email_eta_subject'          => (string) $settings['email_eta_subject'],
+                                  'lpr_allocator_email_eta_intro'            => (string) $settings['email_eta_intro'],
+                          );
 
 			foreach ( $map as $opt => $val ) {
 				add_filter(
@@ -573,12 +618,14 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                         'frontend_cart_notice_template' => isset( $_POST['lpr_allocator_frontend_cart_notice_template'] ) ? (string) wp_unslash( $_POST['lpr_allocator_frontend_cart_notice_template'] ) : '',
                                         'frontend_refresh_interval'  => isset( $_POST['lpr_allocator_frontend_refresh_interval'] ) ? (int) $_POST['lpr_allocator_frontend_refresh_interval'] : 0,
                                         'auto_allocation_interval'   => isset( $_POST['lpr_allocator_auto_allocation_interval'] ) ? (int) $_POST['lpr_allocator_auto_allocation_interval'] : 0,
-                                        'brand_logo_url'             => isset( $_POST['lpr_allocator_brand_logo_url'] ) ? (string) wp_unslash( $_POST['lpr_allocator_brand_logo_url'] ) : '',
-                                'brand_primary_color'        => isset( $_POST['lpr_allocator_brand_primary_color'] ) ? (string) wp_unslash( $_POST['lpr_allocator_brand_primary_color'] ) : '',
-                                'brand_support_email'        => isset( $_POST['lpr_allocator_brand_support_email'] ) ? (string) wp_unslash( $_POST['lpr_allocator_brand_support_email'] ) : '',
-                                'brand_support_phone'        => isset( $_POST['lpr_allocator_brand_support_phone'] ) ? (string) wp_unslash( $_POST['lpr_allocator_brand_support_phone'] ) : '',
-                                'email_footer_text_no'       => isset( $_POST['lpr_allocator_email_footer_text_no'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_footer_text_no'] ) : '',
-                        );
+                                  'brand_logo_url'             => isset( $_POST['lpr_allocator_brand_logo_url'] ) ? (string) wp_unslash( $_POST['lpr_allocator_brand_logo_url'] ) : '',
+                          'brand_primary_color'        => isset( $_POST['lpr_allocator_brand_primary_color'] ) ? (string) wp_unslash( $_POST['lpr_allocator_brand_primary_color'] ) : '',
+                          'brand_support_email'        => isset( $_POST['lpr_allocator_brand_support_email'] ) ? (string) wp_unslash( $_POST['lpr_allocator_brand_support_email'] ) : '',
+                          'brand_support_phone'        => isset( $_POST['lpr_allocator_brand_support_phone'] ) ? (string) wp_unslash( $_POST['lpr_allocator_brand_support_phone'] ) : '',
+                          'email_footer_text_no'       => isset( $_POST['lpr_allocator_email_footer_text_no'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_footer_text_no'] ) : '',
+                          'email_eta_subject'          => isset( $_POST['lpr_allocator_email_eta_subject'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_eta_subject'] ) : '',
+                          'email_eta_intro'            => isset( $_POST['lpr_allocator_email_eta_intro'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_eta_intro'] ) : '',
+                  );
 
                         Settings::update( $raw );
 
@@ -622,13 +669,45 @@ if ( ! class_exists( __NAMESPACE__ . '\Email_Notification_Preview' ) ) {
                 }
 
                 /**
+                 * Apply supported tokens to an email template string.
+                 *
+                 * @param string $template
+                 * @param array  $context
+                 */
+                public static function apply_email_tokens( string $template, array $context ): string {
+                        $replacements = array(
+                                '%order_number%'        => isset( $context['order_number'] ) ? (string) $context['order_number'] : '',
+                                '%customer_first_name%' => isset( $context['customer_first_name'] ) ? (string) $context['customer_first_name'] : '',
+                        );
+
+                        return strtr( $template, $replacements );
+                }
+
+                /**
                  * Build a sample of all outgoing allocator emails.
                  */
                 protected static function build_preview_html( array $settings ): string {
+                        $subject_tpl = trim( (string) ( $settings['email_eta_subject'] ?? Settings::defaults()['email_eta_subject'] ) );
+                        if ( '' === $subject_tpl ) {
+                                $subject_tpl = Settings::defaults()['email_eta_subject'];
+                        }
+
+                        $intro_tpl = trim( (string) ( $settings['email_eta_intro'] ?? Settings::defaults()['email_eta_intro'] ) );
+                        if ( '' === $intro_tpl ) {
+                                $intro_tpl = Settings::defaults()['email_eta_intro'];
+                        }
+
+                        $sample_tokens = array(
+                                'order_number'        => '1234',
+                                'customer_first_name' => __( 'Customer', 'lpr-backorder-allocator' ),
+                        );
+
+                        $subject = self::apply_email_tokens( $subject_tpl, $sample_tokens );
+                        $intro   = self::apply_email_tokens( $intro_tpl, $sample_tokens );
+
                         $logo   = (string) ( $settings['brand_logo_url'] ?? '' );
                         $color  = (string) ( $settings['brand_primary_color'] ?? '#1a1a1a' );
                         $foot   = (string) ( $settings['email_footer_text_no'] ?? '' );
-                        $subject = __( 'Your order ETA has been updated', 'lpr-backorder-allocator' );
 
                         $sample_rows = array(
                                 array(
@@ -650,7 +729,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Email_Notification_Preview' ) ) {
                                         <div style="margin-bottom:12px;"><img src="<?php echo esc_url( $logo ); ?>" style="max-height:40px;" alt="" /></div>
                                 <?php endif; ?>
                                 <h2 style="color:<?php echo esc_attr( $color ); ?>;margin:0 0 12px 0;"><?php echo esc_html( $subject ); ?></h2>
-                                <p><?php echo esc_html__( 'Preview of ETA update email that can be sent to customers.', 'lpr-backorder-allocator' ); ?></p>
+                                <p><?php echo esc_html( $intro ); ?></p>
                                 <table cellspacing="0" cellpadding="6" border="0" style="width:100%;border-collapse:collapse;">
                                         <thead>
                                                 <tr>
@@ -2391,47 +2470,68 @@ public static function update_line_eta( int $order_id ): void {
 	self::$updating = false;
 }
 
-// ADD this helper just below update_line_eta()
-protected static function maybe_email_eta_changes( \WC_Order $order, array $changes ): void {
-	// Respect settings toggle
-	$settings = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array();
-	if ( empty( $settings['inform_customer_eta'] ) ) {
-		return;
-	}
-	$email = $order->get_billing_email();
-	if ( ! $email ) {
-		return;
-	}
+  // ADD this helper just below update_line_eta()
+  protected static function maybe_email_eta_changes( \WC_Order $order, array $changes, bool $force_send = false ): void {
+         if ( empty( $changes ) ) {
+                 return;
+         }
 
-	$logo  = (string) ( $settings['brand_logo_url']       ?? '' );
-	$color = (string) ( $settings['brand_primary_color']  ?? '#1a1a1a' );
-	$foot  = (string) ( $settings['email_footer_text_no'] ?? '' );
+         // Respect settings toggle unless manually forced.
+         $settings = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array();
+         if ( ! $force_send && empty( $settings['inform_customer_eta'] ) ) {
+                 return;
+         }
 
-	$subject = __( 'Your order ETA has been updated', 'lpr-backorder-allocator' );
+         $email = $order->get_billing_email();
+         if ( ! $email ) {
+                 return;
+         }
 
-	$logo_html = $logo ? '<div style="margin-bottom:12px;"><img src="' . esc_url( $logo ) . '" style="max-height:40px;" alt="" /></div>' : '';
-	$body  = '<div style="font-family:Arial,Helvetica,sans-serif;">' . $logo_html;
-	$body .= '<h2 style="color:' . esc_attr( $color ) . ';margin:0 0 12px 0;">' . esc_html( $subject ) . '</h2>';
-	$body .= '<p>' . esc_html__( 'We’ve updated the expected arrival for the items below:', 'lpr-backorder-allocator' ) . '</p>';
+         $subject_tpl = trim( (string) ( $settings['email_eta_subject'] ?? Settings::defaults()['email_eta_subject'] ) );
+         if ( '' === $subject_tpl ) {
+                 $subject_tpl = Settings::defaults()['email_eta_subject'];
+         }
 
-	$body .= '<table cellspacing="0" cellpadding="6" border="0" style="width:100%;border-collapse:collapse;">';
-	$body .= '<thead><tr><th align="left">' . esc_html__( 'Item', 'lpr-backorder-allocator' ) . '</th><th align="left">' . esc_html__( 'Previous', 'lpr-backorder-allocator' ) . '</th><th align="left">' . esc_html__( 'New ETA', 'lpr-backorder-allocator' ) . '</th></tr></thead><tbody>';
-	foreach ( $changes as $c ) {
-		$body .= '<tr><td>' . esc_html( (string) $c['name'] ) . '</td><td>' . esc_html( (string) $c['prev'] ) . '</td><td>' . esc_html( (string) $c['new'] ) . '</td></tr>';
-	}
-	$body .= '</tbody></table>';
+         $intro_tpl = trim( (string) ( $settings['email_eta_intro'] ?? Settings::defaults()['email_eta_intro'] ) );
+         if ( '' === $intro_tpl ) {
+                 $intro_tpl = Settings::defaults()['email_eta_intro'];
+         }
 
-	if ( $foot ) {
-		$body .= '<p style="margin-top:16px;color:#777;font-size:12px;">' . wp_kses_post( $foot ) . '</p>';
-	}
-	$body .= '</div>';
+         $tokens = array(
+                 'order_number'        => method_exists( $order, 'get_order_number' ) ? $order->get_order_number() : (string) $order->get_id(),
+                 'customer_first_name' => (string) $order->get_billing_first_name(),
+         );
 
-	if ( function_exists( 'wc_mail' ) ) {
-		wc_mail( $email, $subject, $body, array( 'Content-Type: text/html; charset=UTF-8' ) );
-	} else {
-		wp_mail( $email, $subject, $body, array( 'Content-Type: text/html; charset=UTF-8' ) );
-	}
-}
+         $subject = class_exists( __NAMESPACE__ . '\Email_Notification_Preview' ) ? Email_Notification_Preview::apply_email_tokens( $subject_tpl, $tokens ) : $subject_tpl;
+         $intro   = class_exists( __NAMESPACE__ . '\Email_Notification_Preview' ) ? Email_Notification_Preview::apply_email_tokens( $intro_tpl, $tokens ) : $intro_tpl;
+
+         $logo  = (string) ( $settings['brand_logo_url']       ?? '' );
+         $color = (string) ( $settings['brand_primary_color']  ?? '#1a1a1a' );
+         $foot  = (string) ( $settings['email_footer_text_no'] ?? '' );
+
+         $logo_html = $logo ? '<div style="margin-bottom:12px;"><img src="' . esc_url( $logo ) . '" style="max-height:40px;" alt="" /></div>' : '';
+         $body  = '<div style="font-family:Arial,Helvetica,sans-serif;">' . $logo_html;
+         $body .= '<h2 style="color:' . esc_attr( $color ) . ';margin:0 0 12px 0;">' . esc_html( $subject ) . '</h2>';
+         $body .= '<p>' . esc_html( $intro ) . '</p>';
+
+         $body .= '<table cellspacing="0" cellpadding="6" border="0" style="width:100%;border-collapse:collapse;">';
+         $body .= '<thead><tr><th align="left">' . esc_html__( 'Item', 'lpr-backorder-allocator' ) . '</th><th align="left">' . esc_html__( 'Previous', 'lpr-backorder-allocator' ) . '</th><th align="left">' . esc_html__( 'New ETA', 'lpr-backorder-allocator' ) . '</th></tr></thead><tbody>';
+         foreach ( $changes as $c ) {
+                 $body .= '<tr><td>' . esc_html( (string) $c['name'] ) . '</td><td>' . esc_html( (string) $c['prev'] ) . '</td><td>' . esc_html( (string) $c['new'] ) . '</td></tr>';
+         }
+         $body .= '</tbody></table>';
+
+         if ( $foot ) {
+                 $body .= '<p style="margin-top:16px;color:#777;font-size:12px;">' . wp_kses_post( $foot ) . '</p>';
+         }
+         $body .= '</div>';
+
+         if ( function_exists( 'wc_mail' ) ) {
+                 wc_mail( $email, $subject, $body, array( 'Content-Type: text/html; charset=UTF-8' ) );
+         } else {
+                 wp_mail( $email, $subject, $body, array( 'Content-Type: text/html; charset=UTF-8' ) );
+         }
+ }
 
 		/**
 		 * Hook: update ETA when orders save (classic + HPOS).
@@ -2489,6 +2589,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
                         // Persist manual force-allocation flags.
                         add_action( 'save_post_shop_order', array( __CLASS__, 'save_force_flags' ), 10, 2 );
                         add_action( 'woocommerce_before_order_object_save', array( __CLASS__, 'save_force_flags_object' ), 10, 1 );
+
+                        add_action( 'wp_ajax_lpr_force_eta_email', array( __CLASS__, 'ajax_force_eta_email' ) );
                 }
 
 		public static function register_box(): void {
@@ -2632,9 +2734,11 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
                          return;
                         }
 
-                        wp_nonce_field( 'lpr_force_allocation_' . (int) $order_id, 'lpr_force_allocation_nonce' );
+wp_nonce_field( 'lpr_force_allocation_' . (int) $order_id, 'lpr_force_allocation_nonce' );
 
-                        $items = $order->get_items( 'line_item' );
+$items = $order->get_items( 'line_item' );
+$force_email_nonce = wp_create_nonce( 'lpr_force_eta_email_' . (int) $order_id );
+$has_backorders    = false;
 
                         // VIP prioritization trigger.
                         $vip_nonce = wp_create_nonce( 'lpr_vip_' . (int) $order_id );
@@ -2683,9 +2787,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
                                 $qty       = (int) $item->get_quantity();
                                 $sku       = $product instanceof \WC_Product ? $product->get_sku() : '';
                                 $line_eta  = (string) $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_LINE_ETA' ) ? ORDER_ITEM_META_LINE_ETA : '_lpr_line_eta', true );
-                                $allocs    = $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_ALLOCATIONS' ) ? ORDER_ITEM_META_ALLOCATIONS : 'lpr_allocations', true );
-                                $needs     = class_exists( __NAMESPACE__ . '\Backorder' ) ? Backorder::needs_allocation( $item ) : false;
-                                $force_qty = (int) $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_FORCE_ALLOCATION' ) ? ORDER_ITEM_META_FORCE_ALLOCATION : '_lpr_force_allocation', true );
+$allocs    = $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_ALLOCATIONS' ) ? ORDER_ITEM_META_ALLOCATIONS : 'lpr_allocations', true );
+$needs     = class_exists( __NAMESPACE__ . '\Backorder' ) ? Backorder::needs_allocation( $item ) : false;
+$force_qty = (int) $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_FORCE_ALLOCATION' ) ? ORDER_ITEM_META_FORCE_ALLOCATION : '_lpr_force_allocation', true );
+$has_backorders = $has_backorders || $needs;
 
                                 echo '<tr>';
                                 echo '<td>';
@@ -2762,10 +2867,17 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
 				echo '</tr>';
 			}
 
-                        echo '</tbody></table>';
+                          echo '</tbody></table>';
 
-                        // Lightweight modal container and behaviors (one-time output).
-                        static $vip_script_done = false;
+                          if ( $has_backorders ) {
+                                  echo '<div style="margin:12px 0 10px;">';
+                                  echo '<button type="button" class="button lpr-send-eta-email" data-order="' . esc_attr( (string) $order_id ) . '" data-nonce="' . esc_attr( $force_email_nonce ) . '">' . esc_html__( 'Force send updated ETA', 'lpr-backorder-allocator' ) . '</button>';
+                                  echo '<span style="margin-left:10px;opacity:.8;">' . esc_html__( 'Email the current ETA to the customer for backordered items.', 'lpr-backorder-allocator' ) . '</span>';
+                                  echo '</div>';
+                          }
+
+                          // Lightweight modal container and behaviors (one-time output).
+                          static $vip_script_done = false;
                         if ( ! $vip_script_done ) {
                                 $vip_script_done = true;
                                 ?>
@@ -2878,12 +2990,92 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
                                                         window.alert('<?php echo esc_js( __( 'Unable to apply VIP changes.', 'lpr-backorder-allocator' ) ); ?>');
                                                 });
                                         });
+
+                                        $(document).on('click','.lpr-send-eta-email',function(e){
+                                                e.preventDefault();
+                                                var $btn = $(this);
+                                                var orderId = $btn.data('order');
+                                                var nonce = $btn.data('nonce');
+                                                if(!orderId || !nonce){
+                                                        return;
+                                                }
+                                                $btn.prop('disabled', true).addClass('lpr-loading');
+                                                $.post(ajaxurl,{action:'lpr_force_eta_email',order_id:orderId,_wpnonce:nonce},function(resp){
+                                                        $btn.prop('disabled', false).removeClass('lpr-loading');
+                                                        if(resp && resp.success){
+                                                                window.alert(resp.data && resp.data.message ? resp.data.message : '<?php echo esc_js( __( 'ETA email sent.', 'lpr-backorder-allocator' ) ); ?>');
+                                                                return;
+                                                        }
+                                                        if(resp && resp.data && resp.data.message){
+                                                                window.alert(resp.data.message);
+                                                                return;
+                                                        }
+                                                        window.alert('<?php echo esc_js( __( 'Unable to send ETA email.', 'lpr-backorder-allocator' ) ); ?>');
+                                                }).fail(function(){
+                                                        $btn.prop('disabled', false).removeClass('lpr-loading');
+                                                        window.alert('<?php echo esc_js( __( 'Unable to send ETA email.', 'lpr-backorder-allocator' ) ); ?>');
+                                                });
+                                        });
                                 })(jQuery);
-                                </script>
-                                <?php
+</script>
+<?php
                         }
                 }
         }
+
+        public static function ajax_force_eta_email(): void {
+                if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                        wp_send_json_error( array( 'message' => __( 'Insufficient permissions.', 'lpr-backorder-allocator' ) ) );
+                }
+
+                $order_id = isset( $_POST['order_id'] ) ? absint( $_POST['order_id'] ) : 0;
+                $nonce    = isset( $_POST['_wpnonce'] ) ? sanitize_text_field( wp_unslash( $_POST['_wpnonce'] ) ) : '';
+                if ( $order_id <= 0 || ! $nonce || ! wp_verify_nonce( $nonce, 'lpr_force_eta_email_' . $order_id ) ) {
+                        wp_send_json_error( array( 'message' => __( 'Invalid request.', 'lpr-backorder-allocator' ) ) );
+                }
+
+                if ( ! function_exists( 'wc_get_order' ) ) {
+                        wp_send_json_error( array( 'message' => __( 'WooCommerce not available.', 'lpr-backorder-allocator' ) ) );
+                }
+
+                $order = wc_get_order( $order_id );
+                if ( ! ( $order instanceof \WC_Order ) ) {
+                        wp_send_json_error( array( 'message' => __( 'Order not found.', 'lpr-backorder-allocator' ) ) );
+                }
+
+                $changes = array();
+                foreach ( $order->get_items( 'line_item' ) as $item ) {
+                        if ( ! ( $item instanceof \WC_Order_Item_Product ) ) {
+                                continue;
+                        }
+                        if ( ! class_exists( __NAMESPACE__ . '\Backorder' ) || ! Backorder::needs_allocation( $item ) ) {
+                                continue;
+                        }
+
+                        $product = $item->get_product();
+                        $sku     = $product instanceof \WC_Product ? $product->get_sku() : '';
+                        $name    = $item->get_name() . ( $sku ? ' [' . $sku . ']' : '' );
+                        $line_eta = (string) $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_LINE_ETA' ) ? ORDER_ITEM_META_LINE_ETA : '_lpr_line_eta', true );
+                        $eta_h    = $line_eta ? lpr_allocator_format_store_date( $line_eta ) : '—';
+
+                        $changes[] = array(
+                                'name' => $name,
+                                'prev' => '—',
+                                'new'  => $eta_h,
+                        );
+                }
+
+                if ( empty( $changes ) ) {
+                        wp_send_json_error( array( 'message' => __( 'No backordered items with ETAs to email.', 'lpr-backorder-allocator' ) ) );
+                }
+
+                if ( class_exists( __NAMESPACE__ . '\ETA' ) ) {
+                        ETA::maybe_email_eta_changes( $order, $changes, true );
+                }
+
+                wp_send_json_success( array( 'message' => __( 'ETA email sent to the customer.', 'lpr-backorder-allocator' ) ) );
+        }
+
         Order_Allocations_Metabox::init();
 }
 
