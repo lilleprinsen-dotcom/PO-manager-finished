@@ -2799,11 +2799,16 @@ public static function update_line_eta( int $order_id ): void {
                  * Build progress metadata for the email ring.
                  */
                 protected static function build_progress_steps( ?\WC_Order $order, array $overview_rows, array $labels, string $unallocated_label, string $done_label, string $pending_label ): array {
-                        $order_date        = '';
-                        $has_allocs        = false;
-                        $eta_dates         = array();
-                        $eta_label_fallback = '';
-                        $eta_display       = $unallocated_label;
+                        $order_date          = '';
+                        $has_allocs          = false;
+                        $backorder_lines     = 0;
+                        $allocated_lines     = 0;
+                        $full_allocated      = 0;
+                        $partial_allocated   = 0;
+                        $eta_dates           = array();
+                        $eta_label_fallback  = '';
+                        $eta_display         = $unallocated_label;
+                        $force_key           = defined( __NAMESPACE__ . '\\ORDER_ITEM_META_FORCE_ALLOCATION' ) ? ORDER_ITEM_META_FORCE_ALLOCATION : '_lpr_force_allocation';
 
                         if ( $order instanceof \WC_Order ) {
                                 $created = $order->get_date_created();
@@ -2815,19 +2820,27 @@ public static function update_line_eta( int $order_id ): void {
                                         if ( ! $item instanceof \WC_Order_Item_Product ) {
                                                 continue;
                                         }
-                                        $allocs = $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_ALLOCATIONS' ) ? ORDER_ITEM_META_ALLOCATIONS : 'lpr_allocations', true );
-                                        if ( is_array( $allocs ) ) {
-                                                foreach ( $allocs as $alloc_row ) {
-                                                        $status = isset( $alloc_row['status'] ) ? sanitize_key( (string) $alloc_row['status'] ) : 'reserved';
-                                                        if ( 'released' === $status ) {
-                                                                continue;
-                                                        }
+
+                                        $force_qty   = (int) $item->get_meta( $force_key, true );
+                                        $needs_alloc = class_exists( __NAMESPACE__ . '\\Backorder' ) ? Backorder::needs_allocation( $item ) : false;
+                                        $desired     = function_exists( __NAMESPACE__ . '\\lpr_allocator_calc_backorder_desired' ) ? lpr_allocator_calc_backorder_desired( $item ) : max( 0, (int) $item->get_quantity() );
+                                        $allocated   = function_exists( __NAMESPACE__ . '\\lpr_allocator_get_item_allocated_active' ) ? lpr_allocator_get_item_allocated_active( $item ) : 0;
+
+                                        if ( $needs_alloc || $force_qty > 0 || $desired > 0 ) {
+                                                $backorder_lines++;
+                                                if ( $allocated > 0 ) {
+                                                        $allocated_lines++;
                                                         $has_allocs = true;
-                                                        break;
+                                                }
+                                                $target_qty = max( $desired, $force_qty );
+                                                if ( $target_qty > 0 && $allocated >= $target_qty ) {
+                                                        $full_allocated++;
+                                                } elseif ( $allocated > 0 ) {
+                                                        $partial_allocated++;
                                                 }
                                         }
 
-                                        $eta_val = (string) $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_LINE_ETA' ) ? ORDER_ITEM_META_LINE_ETA : '_lpr_line_eta', true );
+                                        $eta_val = (string) $item->get_meta( defined( __NAMESPACE__ . '\\ORDER_ITEM_META_LINE_ETA' ) ? ORDER_ITEM_META_LINE_ETA : '_lpr_line_eta', true );
                                         if ( '' !== trim( $eta_val ) && '' === $eta_label_fallback ) {
                                                 $eta_label_fallback = $eta_val;
                                         }
@@ -2871,8 +2884,39 @@ public static function update_line_eta( int $order_id ): void {
                                 $eta_label = $unallocated_label;
                         }
 
-                        $delivery_detail  = $eta_received ? $eta_label : $pending_label;
-                        $delivery_complete = $eta_received;
+                        $delivery_detail   = $eta_received ? $eta_label : $pending_label;
+                        $delivery_complete = false; // Never show fully complete to customers.
+
+                        $po_state   = 'pending';
+                        $po_detail  = $pending_label;
+                        $eta_state  = $eta_received ? 'complete' : 'pending';
+                        $ship_state = $eta_received ? 'partial' : 'pending';
+
+                        if ( $backorder_lines > 0 ) {
+                                if ( $full_allocated === $backorder_lines ) {
+                                        $po_state  = 'complete';
+                                        $po_detail = sprintf(
+                                                /* translators: 1: allocated lines, 2: total lines */
+                                                __( 'Allocated (%1$d of %2$d lines)', 'lpr-backorder-allocator' ),
+                                                $full_allocated,
+                                                $backorder_lines
+                                        );
+                                } elseif ( $allocated_lines > 0 ) {
+                                        $po_state  = 'partial';
+                                        $po_detail = sprintf(
+                                                /* translators: 1: allocated lines, 2: total lines */
+                                                __( 'Partially allocated (%1$d of %2$d lines)', 'lpr-backorder-allocator' ),
+                                                $allocated_lines,
+                                                $backorder_lines
+                                        );
+                                } else {
+                                        $po_detail = sprintf(
+                                                /* translators: %d: number of backordered lines */
+                                                __( 'Awaiting allocation (%d lines)', 'lpr-backorder-allocator' ),
+                                                $backorder_lines
+                                        );
+                                }
+                        }
 
                         $steps = array(
                                 array(
@@ -2882,29 +2926,38 @@ public static function update_line_eta( int $order_id ): void {
                                 ),
                                 array(
                                         'label'    => $labels['po'] ?? __( 'PO allocated', 'lpr-backorder-allocator' ),
-                                        'complete' => $has_allocs,
-                                        'detail'   => $has_allocs ? $done_label : $pending_label,
+                                        'complete' => 'complete' === $po_state,
+                                        'detail'   => $po_detail,
+                                        'state'    => $po_state,
                                 ),
                                 array(
                                         'label'    => $labels['eta'] ?? __( 'ETA received', 'lpr-backorder-allocator' ),
                                         'complete' => $eta_received,
                                         'detail'   => $eta_received ? $eta_label : $pending_label,
+                                        'state'    => $eta_state,
                                 ),
                                 array(
                                         'label'    => $labels['delivery'] ?? __( 'Estimated delivery', 'lpr-backorder-allocator' ),
                                         'complete' => $delivery_complete,
                                         'detail'   => $delivery_detail,
+                                        'state'    => $ship_state,
                                 ),
                         );
 
                         $completed = 0;
+                        $partials  = 0;
                         foreach ( $steps as $step ) {
                                 if ( ! empty( $step['complete'] ) ) {
                                         $completed++;
+                                        continue;
+                                }
+                                if ( isset( $step['state'] ) && 'partial' === $step['state'] ) {
+                                        $partials++;
                                 }
                         }
 
-                        $percent = count( $steps ) > 0 ? round( ( $completed / count( $steps ) ) * 100 ) : 0;
+                        $percent_raw = count( $steps ) > 0 ? round( ( ( $completed + ( 0.5 * $partials ) ) / count( $steps ) ) * 100 ) : 0;
+                        $percent     = max( 0, min( 95, $percent_raw ) );
 
                         return array(
                                 'steps'     => $steps,
@@ -2926,42 +2979,55 @@ public static function update_line_eta( int $order_id ): void {
                         $ring_label  = str_replace( '%complete%', (string) $percent, $complete_tpl );
                         $ring_color  = $color ?: '#1a1a1a';
                         $ring_back   = '#e5e7eb';
-                        $steps_html  = '';
+                        $eta_text    = $eta_label ?: $pending_label;
+                        $steps_html  = '<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;">';
 
                         foreach ( $progress['steps'] as $step ) {
-                                $complete = ! empty( $step['complete'] );
-                                $state    = $complete ? $done_label : $pending_label;
-                                $detail   = isset( $step['detail'] ) ? (string) $step['detail'] : '';
-                                $pill     = $complete ? $ring_color : $ring_back;
-                                $icon     = $complete ? '✅' : '⏳';
+                                $complete    = ! empty( $step['complete'] );
+                                $state       = isset( $step['state'] ) ? (string) $step['state'] : ( $complete ? 'complete' : 'pending' );
+                                $detail      = isset( $step['detail'] ) ? (string) $step['detail'] : '';
+                                $icon        = 'complete' === $state ? '✅' : ( 'partial' === $state ? '➡️' : '⏳' );
+                                $pill        = 'complete' === $state ? $ring_color : ( 'partial' === $state ? '#fbbf24' : $ring_back );
+                                $state_label = 'complete' === $state ? $done_label : ( 'partial' === $state ? __( 'In progress', 'lpr-backorder-allocator' ) : $pending_label );
 
-                                $steps_html .= '<div style="display:flex;align-items:center;gap:12px;margin:6px 0;padding:10px 12px;border-radius:14px;background:rgba(0,0,0,0.03);">';
-                                $steps_html .= '<span style="display:inline-flex;width:30px;height:30px;border-radius:12px;background:' . esc_attr( $pill ) . ';color:' . ( $complete ? '#fff' : '#111' ) . ';align-items:center;justify-content:center;font-weight:700;font-size:14px;box-shadow:0 8px 20px rgba(0,0,0,0.06);">' . esc_html( $icon ) . '</span>';
-                                $steps_html .= '<div style="text-align:left;">';
+                                $steps_html .= '<tr>'; // icon column
+                                $steps_html .= '<td valign="top" style="padding:8px 10px 8px 0;width:34px;">';
+                                $steps_html .= '<div style="width:30px;height:30px;border-radius:12px;background:' . esc_attr( $pill ) . ';color:' . ( 'complete' === $state ? '#fff' : '#111827' ) . ';text-align:center;line-height:30px;font-weight:700;font-size:14px;">' . esc_html( $icon ) . '</div>';
+                                $steps_html .= '</td>';
+
+                                $steps_html .= '<td valign="top" style="padding:8px 0 8px 0;border-bottom:1px solid #e2e8f0;">';
                                 $steps_html .= '<div style="font-weight:700;color:#0f172a;font-size:14px;">' . esc_html( $step['label'] ?? '' ) . '</div>';
-                                $steps_html .= '<div style="color:#475569;font-size:12px;">' . esc_html( $state );
+                                $steps_html .= '<div style="color:#475569;font-size:12px;">' . esc_html( $state_label );
                                 if ( '' !== trim( $detail ) ) {
                                         $steps_html .= ' · ' . esc_html( $detail );
                                 }
-                                $steps_html .= '</div></div></div>';
+                                $steps_html .= '</div>';
+                                $steps_html .= '</td>';
+                                $steps_html .= '</tr>';
                         }
 
-                        $html  = '<div style="margin:20px 0;padding:20px;border-radius:20px;background:linear-gradient(135deg,#f8fafc,#fefce8);box-shadow:0 16px 30px rgba(15,23,42,0.08);text-align:center;">';
+                        $steps_html .= '</table>';
+
+                        $bar  = '<table role="presentation" cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;">';
+                        $bar .= '<tr><td style="padding:0 0 6px 0;font-size:12px;color:#0f172a;font-weight:700;">' . esc_html( $ring_label ) . '</td></tr>';
+                        $bar .= '<tr><td style="padding:0 0 10px 0;">';
+                        $bar .= '<div style="width:100%;background:' . esc_attr( $ring_back ) . ';height:12px;border-radius:999px;">';
+                        $bar .= '<div style="width:' . $percent . '%;max-width:95%;background:' . esc_attr( $ring_color ) . ';height:12px;border-radius:999px;"></div>';
+                        $bar .= '</div>';
+                        $bar .= '</td></tr>';
+                        $bar .= '<tr><td style="font-size:12px;color:#334155;">' . esc_html( sprintf( __( 'ETA: %s (in progress)', 'lpr-backorder-allocator' ), $eta_text ) ) . '</td></tr>';
+                        $bar .= '</table>';
+
+                        $html  = '<div style="margin:20px 0;padding:16px;border:1px solid #e2e8f0;border-radius:14px;background:#f8fafc;">';
                         if ( '' !== trim( $heading ) ) {
-                                $html .= '<div style="font-weight:800;font-size:18px;margin-bottom:4px;color:#0f172a;">' . esc_html( $heading ) . ' ✨</div>';
+                                $html .= '<div style="font-weight:800;font-size:18px;margin-bottom:4px;color:#0f172a;">' . esc_html( $heading ) . '</div>';
                         }
                         if ( '' !== trim( $subheading ) ) {
-                                $html .= '<div style="color:#475569;margin-bottom:16px;font-size:13px;">' . esc_html( $subheading ) . '</div>';
+                                $html .= '<div style="color:#475569;margin-bottom:12px;font-size:13px;">' . esc_html( $subheading ) . '</div>';
                         }
-                        $html .= '<div style="display:flex;align-items:center;justify-content:center;gap:24px;flex-wrap:wrap;">';
-                        $html .= '<div style="position:relative;width:190px;height:190px;flex-shrink:0;">';
-                        $html .= '<div style="position:absolute;inset:0;border-radius:50%;background:conic-gradient(' . esc_attr( $ring_color ) . ' ' . $percent . '%, ' . esc_attr( $ring_back ) . ' ' . $percent . '%);"></div>';
-                        $html .= '<div style="position:absolute;inset:16px;border-radius:50%;background:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;font-weight:800;color:' . esc_attr( $ring_color ) . ';font-size:16px;padding:12px;line-height:1.4;">';
-                        $html .= esc_html( $ring_label ) . '<span style="display:block;color:#0f172a;font-size:12px;margin-top:6px;">🚚 ' . esc_html( $eta_label ?: $pending_label ) . '</span>';
+                        $html .= $bar;
+                        $html .= '<div style="margin-top:8px;">' . $steps_html . '</div>';
                         $html .= '</div>';
-                        $html .= '</div>';
-                        $html .= '<div style="flex:1;min-width:240px;max-width:360px;margin:0 auto;">' . $steps_html . '</div>';
-                        $html .= '</div></div>';
 
                         return $html;
                 }
@@ -3028,6 +3094,7 @@ public static function update_line_eta( int $order_id ): void {
                         foreach ( $rows as $row ) {
                                 $name = isset( $row['name'] ) ? (string) $row['name'] : '';
                                 $eta  = isset( $row['new'] ) ? (string) $row['new'] : ( isset( $row['eta'] ) ? (string) $row['eta'] : $unallocated_label );
+                                $status = isset( $row['status'] ) ? (string) $row['status'] : '';
 
                                 if ( '' === trim( $eta ) ) {
                                         $eta = $unallocated_label;
@@ -3035,7 +3102,11 @@ public static function update_line_eta( int $order_id ): void {
 
                                 $body .= '<tr>';
                                 $body .= '<td style="padding:12px;border-bottom:1px solid #e2e8f0;color:#0f172a;font-weight:600;">' . esc_html( $name ) . '</td>';
-                                $body .= '<td style="padding:12px;border-bottom:1px solid #e2e8f0;color:#0f172a;">' . esc_html( $eta ) . '</td>';
+                                $body .= '<td style="padding:12px;border-bottom:1px solid #e2e8f0;color:#0f172a;">' . esc_html( $eta );
+                                if ( '' !== trim( $status ) ) {
+                                        $body .= '<div style="color:#475569;font-size:12px;margin-top:4px;">' . esc_html( $status ) . '</div>';
+                                }
+                                $body .= '</td>';
                                 $body .= '</tr>';
                         }
 
@@ -3574,8 +3645,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
                                 return array();
                         }
 
-                        $rows     = array();
-                        $eta_meta = defined( __NAMESPACE__ . '\ORDER_ITEM_META_LINE_ETA' ) ? ORDER_ITEM_META_LINE_ETA : '_lpr_line_eta';
+                        $rows        = array();
+                        $eta_meta    = defined( __NAMESPACE__ . '\ORDER_ITEM_META_LINE_ETA' ) ? ORDER_ITEM_META_LINE_ETA : '_lpr_line_eta';
+                        $settings    = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array();
+                        $unallocated = (string) ( $settings['email_unallocated_label'] ?? __( 'Unallocated', 'lpr-backorder-allocator' ) );
 
                         foreach ( $order->get_items( 'line_item' ) as $item ) {
                                 if ( ! $item instanceof \WC_Order_Item_Product ) {
@@ -3590,13 +3663,34 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
 
                                 $product = $item->get_product();
                                 $sku     = $product instanceof \WC_Product ? $product->get_sku() : '';
+                                $desired = function_exists( __NAMESPACE__ . '\lpr_allocator_calc_backorder_desired' ) ? lpr_allocator_calc_backorder_desired( $item ) : max( 0, (int) $item->get_quantity() );
+                                $allocated_qty = function_exists( __NAMESPACE__ . '\lpr_allocator_get_item_allocated_active' ) ? lpr_allocator_get_item_allocated_active( $item ) : 0;
+                                $target_qty    = max( $desired, $force_qty );
+
                                 $eta     = (string) $item->get_meta( $eta_meta, true );
                                 $eta_h   = $eta ? lpr_allocator_format_store_date( $eta ) : $unallocated;
 
+                                $allocation_label = '';
+                                if ( $target_qty > 0 ) {
+                                        if ( $allocated_qty >= $target_qty ) {
+                                                $allocation_label = __( 'Allocated in full', 'lpr-backorder-allocator' );
+                                        } elseif ( $allocated_qty > 0 ) {
+                                                $allocation_label = sprintf(
+                                                        /* translators: 1: allocated quantity, 2: ordered quantity */
+                                                        __( 'Partially allocated (%1$d of %2$d)', 'lpr-backorder-allocator' ),
+                                                        $allocated_qty,
+                                                        $target_qty
+                                                );
+                                        } else {
+                                                $allocation_label = __( 'Awaiting allocation', 'lpr-backorder-allocator' );
+                                        }
+                                }
+
                                 $rows[] = array(
-                                        'name' => $item->get_name() . ( $sku ? ' [' . $sku . ']' : '' ),
-                                        'prev' => '—',
-                                        'new'  => $eta_h,
+                                        'name'   => $item->get_name() . ( $sku ? ' [' . $sku . ']' : '' ),
+                                        'prev'   => '—',
+                                        'new'    => $eta_h,
+                                        'status' => $allocation_label,
                                 );
                         }
 
