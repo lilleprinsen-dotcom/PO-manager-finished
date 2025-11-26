@@ -996,203 +996,6 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_parse_date' ) ) {
         }
 }
 
-add_action( 'admin_enqueue_scripts', __NAMESPACE__ . '\lpr_allocator_enqueue_datepicker_assets' );
-/**
- * Enqueue a WooCommerce-style datepicker for ETA/admin date fields.
- */
-function lpr_allocator_enqueue_datepicker_assets(): void {
-        static $enqueued = false;
-
-	if ( $enqueued ) {
-		return;
-	}
-
-	$screen   = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
-	$screen_id = $screen ? (string) $screen->id : '';
-	$po_cpt   = defined( __NAMESPACE__ . '\\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po';
-	$page     = isset( $_GET['page'] ) ? sanitize_key( wp_unslash( $_GET['page'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
-
-	$targets = array( $po_cpt, 'shop_order', 'woocommerce_page_wc-orders' );
-        if ( $screen && ! in_array( $screen_id, $targets, true ) && 'lpr-backordered-products' !== $page ) {
-                return;
-        }
-
-        wp_enqueue_style( 'woocommerce_admin_styles' );
-        wp_add_inline_style(
-                'woocommerce_admin_styles',
-                '#ui-datepicker-div,\n'
-                . '.ui-datepicker,\n'
-                . '.ui-datepicker table,\n'
-                . '.ui-datepicker .ui-datepicker-header,\n'
-                . '.ui-datepicker .ui-state-default {\n'
-                . '  background-color: #fff !important;\n'
-                . '  border: 1px solid #d4d7db;\n'
-                . '  border-radius: 4px;\n'
-                . '  box-sizing: border-box;\n'
-                . '  padding: 4px 6px;\n'
-                . '  text-align: center;\n'
-                . '}\n'
-                . '.ui-datepicker .ui-state-hover,\n'
-                . '.ui-datepicker .ui-datepicker-next-hover,\n'
-                . '.ui-datepicker .ui-datepicker-prev-hover {\n'
-                . '  background-color: #e4e6e9 !important;\n'
-                . '}\n'
-                . '.ui-datepicker .ui-datepicker-header {\n'
-                . '  background-color: #f3f4f6 !important;\n'
-                . '  border: 1px solid #d4d7db;\n'
-                . '  border-radius: 4px;\n'
-                . '  padding: 8px;\n'
-                . '}\n'
-                . '.ui-datepicker table {\n'
-                . '  border-collapse: separate;\n'
-                . '  border-spacing: 4px;\n'
-                . '  width: 100%;\n'
-                . '}\n'
-                . '.ui-datepicker th {\n'
-                . '  color: #2c3338;\n'
-                . '  padding: 4px;\n'
-                . '  text-align: center;\n'
-                . '}\n'
-                . '#ui-datepicker-div {\n'
-                . '  background-color: #fff;\n'
-                . '  z-index: 100000 !important;\n'
-                . '  border: 1px solid #c3c4c7;\n'
-                . '  box-shadow: 0 8px 22px rgba(0,0,0,0.14);\n'
-                . '  color: #1d2327;\n'
-                . '  padding: 6px;\n'
-                . '  margin-top: 6px;\n'
-                . '  min-width: 240px;\n'
-                . '  position: absolute;\n'
-                . '}\n'
-                . '#lpr-allocator-datepicker-overlay {\n'
-                . '  align-items: center;\n'
-                . '  background: rgba(120, 120, 120, 0.85);\n'
-                . '  display: none;\n'
-                . '  inset: 0;\n'
-                . '  justify-content: center;\n'
-                . '  position: fixed;\n'
-                . '  z-index: 100001;\n'
-                . '}\n'
-                . '#lpr-allocator-datepicker-overlay.is-active {\n'
-                . '  display: flex;\n'
-                . '}\n'
-                . '#lpr-allocator-datepicker-overlay .lpr-datepicker-surface {\n'
-                . '  background: #e6e7e8;\n'
-                . '  border: 1px solid #c3c4c7;\n'
-                . '  border-radius: 6px;\n'
-                . '  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.18);\n'
-                . '  max-width: 360px;\n'
-                . '  padding: 14px 16px;\n'
-                . '  width: 100%;\n'
-                . '}\n'
-                . '#lpr-allocator-datepicker-overlay .ui-datepicker {\n'
-                . '  box-shadow: none;\n'
-                . '  margin: 0 auto;\n'
-                . '  position: static !important;\n'
-                . '}'
-        );
-        wp_enqueue_script( 'wc-admin-meta-boxes' );
-        wp_enqueue_script( 'jquery-ui-datepicker' );
-
-
-        $datepicker_js = <<<'JS'
-jQuery(function($){
-    var allocatorDateFormat = 'dd-mm-yy';
-
-    function ensureAllocatorOverlay(){
-        var $overlay = $('#lpr-allocator-datepicker-overlay');
-        if(!$overlay.length){
-            $overlay = $('<div id="lpr-allocator-datepicker-overlay" aria-hidden="true" role="presentation"><div class="lpr-datepicker-surface"></div></div>');
-            $('body').append($overlay);
-        }
-        return $overlay;
-    }
-
-    function openAllocatorOverlay(inst){
-        var $overlay = ensureAllocatorOverlay();
-        var $surface = $overlay.find('.lpr-datepicker-surface');
-
-        $surface.append(inst.dpDiv);
-        inst.dpDiv.addClass('lpr-datepicker-modal');
-        $overlay.attr('aria-hidden','false').addClass('is-active');
-    }
-
-    function closeAllocatorOverlay(){
-        var $overlay = $('#lpr-allocator-datepicker-overlay');
-        if(!$overlay.length){
-            return;
-        }
-
-        $overlay.attr('aria-hidden','true').removeClass('is-active');
-        $('#ui-datepicker-div').removeClass('lpr-datepicker-modal').appendTo(document.body);
-    }
-
-    function normalizeAllocatorDate($input){
-        var val = ($input.val() || '').trim();
-        var isoMatch = val.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-        if(isoMatch){
-            $input.val(isoMatch[3] + '-' + isoMatch[2] + '-' + isoMatch[1]);
-            return;
-        }
-
-        var longMatch = val.match(/^(\d{2})-(\d{2})-(\d{4})$/);
-        if(longMatch){
-            $input.val(longMatch[1] + '-' + longMatch[2] + '-' + longMatch[3]);
-            return;
-        }
-
-        var shortMatch = val.match(/^(\d{2})-(\d{2})-(\d{2})$/);
-        if(shortMatch){
-            var yr = parseInt(shortMatch[3], 10);
-            var fullYear = 2000 + yr;
-            var current = new Date().getFullYear();
-
-            if(fullYear > current + 50){
-                fullYear -= 100;
-            }
-
-            $input.val(shortMatch[1] + '-' + shortMatch[2] + '-' + fullYear);
-        }
-    }
-
-    function initAllocatorDatepickers(context){
-        var $ctx = context ? $(context) : $(document.body);
-
-        $ctx.find('.wc_input_date, .date-picker').each(function(){
-            var $input = $(this);
-
-            normalizeAllocatorDate($input);
-            if($input.hasClass('hasDatepicker')){
-                $input.datepicker('destroy');
-            }
-
-            $input.datepicker({
-                dateFormat: allocatorDateFormat,
-                beforeShow: function(input, inst){
-                    openAllocatorOverlay(inst);
-                },
-                onClose: function(){
-                    closeAllocatorOverlay();
-                }
-            });
-        });
-    }
-
-    initAllocatorDatepickers();
-    $(document.body).on('wc-init-datepickers', function(event, context){
-        initAllocatorDatepickers(context);
-    });
-});
-JS;
-
-        if ( function_exists( 'wc_enqueue_js' ) ) {
-                wc_enqueue_js( $datepicker_js );
-        } elseif ( function_exists( 'wp_add_inline_script' ) ) {
-                wp_add_inline_script( 'jquery-ui-datepicker', $datepicker_js );
-        }
-
-	$enqueued = true;
-}
 
 if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_date_to_timestamp' ) ) {
         /**
@@ -1905,13 +1708,11 @@ if ( ! class_exists( __NAMESPACE__ . '\Supplier_PO_CPT' ) ) {
                                                         'name'              => 'lpr_eta_date',
                                                         'type'              => 'text',
                                                         'label'             => __( 'Default ETA (dd-mm-yyyy)', 'lpr-backorder-allocator' ),
-                                                        'class'             => 'short wc_input_date lpr-date-picker date-picker',
-                                                        'data_type'         => 'date',
+                                                        'class'             => 'short',
                                                         'value'             => $eta,
                                                         'custom_attributes' => array(
-                                                                'data-date-format' => 'dd-mm-yy',
-                                                                'pattern'          => '\\d{2}-\\d{2}-\\d{4}',
-                                                                'placeholder'      => 'DD-MM-YYYY',
+                                                                'pattern'     => '\\d{2}-\\d{2}-\\d{4}',
+                                                                'placeholder' => 'DD-MM-YYYY',
                                                         ),
                                                 )
                                         );
@@ -1986,7 +1787,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Supplier_PO_CPT' ) ) {
 							<td><input type="number" min="0" step="1" name="lpr_po_lines[<?php echo esc_attr( $idx ); ?>][variation_id]" value="<?php echo esc_attr( $variation_id ); ?>" /></td>
 							<td><input type="number" min="0" step="1" name="lpr_po_lines[<?php echo esc_attr( $idx ); ?>][qty_ordered]" value="<?php echo esc_attr( $qty_ordered ); ?>" /></td>
 							<td><input type="number" min="0" step="1" name="lpr_po_lines[<?php echo esc_attr( $idx ); ?>][qty_allocated]" value="<?php echo esc_attr( $qty_alloc ); ?>" /></td>
-                                                        <td><input type="text" class="short wc_input_date lpr-date-picker date-picker" data-type="date" data-date-format="dd-mm-yy" name="lpr_po_lines[<?php echo esc_attr( $idx ); ?>][eta_override]" value="<?php echo esc_attr( $eta_override ); ?>" placeholder="DD-MM-YYYY" /></td>
+                                                        <td><input type="text" class="short" name="lpr_po_lines[<?php echo esc_attr( $idx ); ?>][eta_override]" value="<?php echo esc_attr( $eta_override ); ?>" placeholder="DD-MM-YYYY" pattern="\d{2}-\d{2}-\d{4}" /></td>
 							<td><input type="number" min="0" step="1" name="lpr_po_lines[<?php echo esc_attr( $idx ); ?>][qty_received]" value="<?php echo esc_attr( $qty_recv ); ?>" /></td>
 							<td><button type="button" class="button link-delete lpr-remove-line"><?php echo esc_html__( 'Remove', 'lpr-backorder-allocator' ); ?></button></td>
 						</tr>
@@ -2027,13 +1828,10 @@ tr.innerHTML =
 '<td><input type="number" min="0" step="1" name="lpr_po_lines['+i+'][variation_id]" value="" /></td>'+
 '<td><input type="number" min="0" step="1" name="lpr_po_lines['+i+'][qty_ordered]" value="0" /></td>'+
 '<td><input type="number" min="0" step="1" name="lpr_po_lines['+i+'][qty_allocated]" value="0" /></td>'+
-'<td><input type="text" class="short wc_input_date lpr-date-picker date-picker" data-type="date" data-date-format="dd-mm-yy" name="lpr_po_lines['+i+'][eta_override]" value="" placeholder="DD-MM-YYYY" /></td>'+
+'<td><input type="text" class="short" name="lpr_po_lines['+i+'][eta_override]" value="" placeholder="DD-MM-YYYY" pattern="\\d{2}-\\d{2}-\\d{4}" /></td>'+
 '<td><input type="number" min="0" step="1" name="lpr_po_lines['+i+'][qty_received]" value="0" /></td>'+
 '<td><button type="button" class="button link-delete lpr-remove-line"><?php echo esc_js( __( 'Remove', 'lpr-backorder-allocator' ) ); ?></button></td>';
 table.appendChild(tr);
-if ( window.jQuery ) {
-jQuery( document.body ).trigger( 'wc-init-datepickers' );
-}
                                         });
 					table.addEventListener('click', onRemoveClick);
 				})();
@@ -4035,22 +3833,20 @@ if ( ! class_exists( __NAMESPACE__ . '\Requested_Delivery_Date_Box' ) ) {
 
                         wp_nonce_field( 'lpr_requested_delivery', 'lpr_requested_delivery_nonce' );
 
-                        woocommerce_wp_text_input(
-                                array(
-                                        'id'                => 'lpr_requested_delivery',
-                                        'name'              => 'lpr_requested_delivery',
-                                        'type'              => 'text',
-                                        'label'             => __( 'Requested delivery date (dd-mm-yyyy)', 'lpr-backorder-allocator' ),
-                                        'class'             => 'short wc_input_date lpr-date-picker date-picker',
-                                        'data_type'         => 'date',
-                                        'value'             => lpr_allocator_sanitize_ymd( $value ),
-                                        'custom_attributes' => array(
-                                                'data-date-format' => 'dd-mm-yy',
-                                                'pattern'          => '\\d{2}-\\d{2}-\\d{4}',
-                                                'placeholder'      => 'DD-MM-YYYY',
-                                        ),
-                                )
-                        );
+                                        woocommerce_wp_text_input(
+                                                array(
+                                                        'id'                => 'lpr_requested_delivery',
+                                                        'name'              => 'lpr_requested_delivery',
+                                                        'type'              => 'text',
+                                                        'label'             => __( 'Requested delivery date (dd-mm-yyyy)', 'lpr-backorder-allocator' ),
+                                                        'class'             => 'short',
+                                                        'value'             => lpr_allocator_sanitize_ymd( $value ),
+                                                        'custom_attributes' => array(
+                                                                'pattern'     => '\\d{2}-\\d{2}-\\d{4}',
+                                                                'placeholder' => 'DD-MM-YYYY',
+                                                        ),
+                                                )
+                                        );
                         echo '<p class="description">' . esc_html__( 'We aim to have the order ready at least 14 days before this date. Leave blank for ASAP.', 'lpr-backorder-allocator' ) . '</p>';
                 }
 
@@ -4278,7 +4074,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Supplier_PO_Live_Product_UI' ) ) {
 							</td>
 							<td><input type="number" min="0" step="1" name="lpr_po_lines[<?php echo esc_attr( $idx ); ?>][qty_ordered]" value="<?php echo esc_attr( (string) $qty_ordered ); ?>" /></td>
 							<td><input type="number" min="0" step="1" name="lpr_po_lines[<?php echo esc_attr( $idx ); ?>][qty_allocated]" value="<?php echo esc_attr( (string) $qty_alloc ); ?>" /></td>
-                                                        <td><input type="text" class="short wc_input_date lpr-date-picker date-picker" data-type="date" data-date-format="dd-mm-yy" name="lpr_po_lines[<?php echo esc_attr( $idx ); ?>][eta_override]" value="<?php echo esc_attr( $eta_override ); ?>" placeholder="DD-MM-YYYY" /></td>
+                                                        <td><input type="text" class="short" name="lpr_po_lines[<?php echo esc_attr( $idx ); ?>][eta_override]" value="<?php echo esc_attr( $eta_override ); ?>" placeholder="DD-MM-YYYY" pattern="\d{2}-\d{2}-\d{4}" /></td>
 							<td><input type="number" min="0" step="1" name="lpr_po_lines[<?php echo esc_attr( $idx ); ?>][qty_received]" value="<?php echo esc_attr( (string) $qty_recv ); ?>" /></td>
 							<td><button type="button" class="button link-delete lpr-remove-line"><?php echo esc_html__( 'Remove', 'lpr-backorder-allocator' ); ?></button></td>
 						</tr>
@@ -4329,15 +4125,12 @@ if ( ! class_exists( __NAMESPACE__ . '\Supplier_PO_Live_Product_UI' ) ) {
 								'</td>' +
 								'<td><input type="number" min="0" step="1" name="lpr_po_lines['+i+'][qty_ordered]" value="0" /></td>' +
 								'<td><input type="number" min="0" step="1" name="lpr_po_lines['+i+'][qty_allocated]" value="0" /></td>' +
-'<td><input type="text" class="short wc_input_date lpr-date-picker date-picker" data-type="date" data-date-format="dd-mm-yy" name="lpr_po_lines['+i+'][eta_override]" value="" placeholder="DD-MM-YYYY" /></td>' +
+'<td><input type="text" class="short" name="lpr_po_lines['+i+'][eta_override]" value="" placeholder="DD-MM-YYYY" pattern="\\d{2}-\\d{2}-\\d{4}" /></td>' +
 								'<td><input type="number" min="0" step="1" name="lpr_po_lines['+i+'][qty_received]" value="0" /></td>' +
 								'<td><button type="button" class="button link-delete lpr-remove-line"><?php echo esc_js( __( 'Remove', 'lpr-backorder-allocator' ) ); ?></button></td>' +
                                                         '</tr>';
                                                 const $row = $(rowHtml).appendTo($tbody);
                                                 initEnhancedSelect($row);
-if ( window.jQuery ) {
-$( document.body ).trigger( 'wc-init-datepickers' );
-}
                                         });
 					$tbody.on('click', '.lpr-remove-line', function(e){
 						e.preventDefault();
@@ -9246,7 +9039,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Backordered_Products_Page' ) ) {
 											</label>
 											<label>
                                                                                                 <?php echo esc_html__( 'ETA (dd-mm-yyyy)', 'lpr-backorder-allocator' ); ?>
-                                                                                                <input type="text" class="short wc_input_date lpr-date-picker date-picker" data-type="date" data-date-format="dd-mm-yy" name="eta_ymd" placeholder="DD-MM-YYYY" pattern="\d{2}-\d{2}-\d{4}" />
+                                                                                                <input type="text" class="short" name="eta_ymd" placeholder="DD-MM-YYYY" pattern="\d{2}-\d{2}-\d{4}" />
                                                                                         </label>
 											<button type="submit" class="button button-secondary"><?php echo esc_html__( 'Add to PO Draft', 'lpr-backorder-allocator' ); ?></button>
 										</form>
