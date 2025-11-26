@@ -3097,6 +3097,9 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
 
                         if ( class_exists( __NAMESPACE__ . '\ETA' ) ) {
                                 ETA::update_line_eta( $order_id );
+
+                                // Refresh order data so recalculated line ETAs are reflected in the email rows.
+                                $order = wc_get_order( $order_id );
                         }
 
                         $rows = self::build_eta_email_rows( $order );
