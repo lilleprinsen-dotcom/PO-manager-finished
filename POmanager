@@ -8864,11 +8864,17 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Integrity_Checker' ) ) {
                                         continue;
                                 }
 
-                                $order_status = $order->get_status();
-                                $order_status = is_string( $order_status ) ? $order_status : '';
-                                $is_live      = in_array( $order_status, $allowed_statuses, true );
+                                $order_status       = $order->get_status();
+                                $order_status       = is_string( $order_status ) ? $order_status : '';
+                                $normalized_status  = preg_replace( '/^wc-/', '', sanitize_key( $order_status ) );
+                                $is_completed       = in_array( $normalized_status, array( 'completed', 'fullfort' ), true );
+                                $is_live            = in_array( $normalized_status, $allowed_statuses, true );
 
                                 $changed = false;
+
+                                if ( $is_completed ) {
+                                        continue;
+                                }
 
                                 if ( ! $is_live ) {
                                         foreach ( $allocs as &$alloc_row ) {
