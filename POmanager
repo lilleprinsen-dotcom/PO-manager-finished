@@ -11008,40 +11008,41 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
                                                     <th></th>
                                                 </tr>
                                             </thead>
-                                            <tbody id="lpr-po-lines-<?php echo esc_attr( $po_key ); ?>">
-                                                <?php foreach ( (array) $row['lines'] as $line ) : ?>
-                                                    <?php
-                                                    $line_product_id   = isset( $line['product_id'] ) ? absint( $line['product_id'] ) : 0;
-                                                    $line_variation_id = isset( $line['variation_id'] ) ? absint( $line['variation_id'] ) : 0;
-                                                    $line_chosen_id    = $line_variation_id > 0 ? $line_variation_id : $line_product_id;
-                                                    $line_label        = '';
-                                                    if ( $line_chosen_id ) {
+                                            <tbody id="lpr-po-lines-<?php echo esc_attr( $po_key ); ?>" data-next-index="<?php echo esc_attr( (string) count( (array) $row['lines'] ) ); ?>">
+                                                <?php foreach ( (array) $row['lines'] as $line_index => $line ) : ?>
+                                                <?php
+                                                $line_product_id   = isset( $line['product_id'] ) ? absint( $line['product_id'] ) : 0;
+                                                $line_variation_id = isset( $line['variation_id'] ) ? absint( $line['variation_id'] ) : 0;
+                                                $line_chosen_id    = $line_variation_id > 0 ? $line_variation_id : $line_product_id;
+                                                $line_label        = '';
+                                                if ( $line_chosen_id ) {
                                                         $line_label = ! empty( $line['product_label'] ) ? (string) $line['product_label'] : lpr_allocator_product_option_label( $line_chosen_id );
-                                                    }
-                                                    ?>
-                                                    <tr>
+                                                }
+                                                $base_name = sprintf( 'pos[%1$d][lines][%2$d]', $po_key, (int) $line_index );
+                                                ?>
+                                                <tr>
                                                         <td class="lpr-product-cell">
                                                                 <select
-                                                                    class="wc-product-search lpr-product-select"
-                                                                    name="pos[<?php echo esc_attr( $po_key ); ?>][lines][][select_ui]"
-                                                                    data-placeholder="<?php echo esc_attr__( 'Search for a product…', 'lpr-backorder-allocator' ); ?>"
-                                                                    data-action="woocommerce_json_search_products_and_variations"
-                                                                    data-minimum_input_length="1"
-                                                                    data-allow_clear="true"
-                                                                    style="width: 100%;"
+                                                                        class="wc-product-search lpr-product-select"
+                                                                        name="<?php echo esc_attr( $base_name ); ?>[select_ui]"
+                                                                        data-placeholder="<?php echo esc_attr__( 'Search for a product…', 'lpr-backorder-allocator' ); ?>"
+                                                                        data-action="woocommerce_json_search_products_and_variations"
+                                                                        data-minimum_input_length="1"
+                                                                        data-allow_clear="true"
+                                                                        style="width: 100%;"
                                                                 >
                                                                 <?php if ( $line_chosen_id ) : ?>
-                                                                    <option value="<?php echo esc_attr( (string) $line_chosen_id ); ?>" selected="selected"><?php echo esc_html( $line_label ); ?></option>
+                                                                        <option value="<?php echo esc_attr( (string) $line_chosen_id ); ?>" selected="selected"><?php echo esc_html( $line_label ); ?></option>
                                                                 <?php endif; ?>
-                                                            </select>
-                                                            <input type="hidden" class="lpr-select-id" name="pos[<?php echo esc_attr( $po_key ); ?>][lines][][select_id]" value="<?php echo esc_attr( (string) $line_chosen_id ); ?>" />
-                                                            <input type="hidden" class="lpr-product-id" name="pos[<?php echo esc_attr( $po_key ); ?>][lines][][product_id]" value="<?php echo esc_attr( (string) $line_product_id ); ?>" />
-                                                            <input type="hidden" class="lpr-variation-id" name="pos[<?php echo esc_attr( $po_key ); ?>][lines][][variation_id]" value="<?php echo esc_attr( (string) $line_variation_id ); ?>" />
+                                                        </select>
+                                                        <input type="hidden" class="lpr-select-id" name="<?php echo esc_attr( $base_name ); ?>[select_id]" value="<?php echo esc_attr( (string) $line_chosen_id ); ?>" />
+                                                        <input type="hidden" class="lpr-product-id" name="<?php echo esc_attr( $base_name ); ?>[product_id]" value="<?php echo esc_attr( (string) $line_product_id ); ?>" />
+                                                        <input type="hidden" class="lpr-variation-id" name="<?php echo esc_attr( $base_name ); ?>[variation_id]" value="<?php echo esc_attr( (string) $line_variation_id ); ?>" />
                                                         </td>
-                                                        <td><input type="number" min="0" step="1" name="pos[<?php echo esc_attr( $po_key ); ?>][lines][][qty_ordered]" value="<?php echo esc_attr( (string) ( $line['qty_ordered'] ?? 0 ) ); ?>" /></td>
-                                                        <td><input type="number" min="0" step="1" name="pos[<?php echo esc_attr( $po_key ); ?>][lines][][qty_allocated]" value="<?php echo esc_attr( (string) ( $line['qty_allocated'] ?? 0 ) ); ?>" /></td>
-                                                        <td><input type="number" min="0" step="1" name="pos[<?php echo esc_attr( $po_key ); ?>][lines][][qty_received]" value="<?php echo esc_attr( (string) ( $line['qty_received'] ?? 0 ) ); ?>" /></td>
-                                                        <td><input type="text" name="pos[<?php echo esc_attr( $po_key ); ?>][lines][][eta_override]" value="<?php echo esc_attr( (string) ( $line['eta_override'] ?? '' ) ); ?>" placeholder="DD-MM-YYYY" pattern="\d{2}-\d{2}-\d{4}" /></td>
+                                                        <td><input type="number" min="0" step="1" name="<?php echo esc_attr( $base_name ); ?>[qty_ordered]" value="<?php echo esc_attr( (string) ( $line['qty_ordered'] ?? 0 ) ); ?>" /></td>
+                                                        <td><input type="number" min="0" step="1" name="<?php echo esc_attr( $base_name ); ?>[qty_allocated]" value="<?php echo esc_attr( (string) ( $line['qty_allocated'] ?? 0 ) ); ?>" /></td>
+                                                        <td><input type="number" min="0" step="1" name="<?php echo esc_attr( $base_name ); ?>[qty_received]" value="<?php echo esc_attr( (string) ( $line['qty_received'] ?? 0 ) ); ?>" /></td>
+                                                        <td><input type="text" name="<?php echo esc_attr( $base_name ); ?>[eta_override]" value="<?php echo esc_attr( (string) ( $line['eta_override'] ?? '' ) ); ?>" placeholder="DD-MM-YYYY" pattern="\d{2}-\d{2}-\d{4}" /></td>
                                                         <td><button type="button" class="button-link-delete lpr-po-bulk-remove-line">&times;</button></td>
                                                     </tr>
                                                 <?php endforeach; ?>
@@ -11101,7 +11102,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
                                         <th></th>
                                     </tr>
                                 </thead>
-                                <tbody id="lpr-po-lines-new">
+                                <tbody id="lpr-po-lines-new" data-next-index="0">
                                 </tbody>
                             </table>
                             <p><button type="button" class="button lpr-po-bulk-add-line" data-target="lpr-po-lines-new" data-key="new" data-new="1"><?php esc_html_e( 'Add PO line', 'lpr-backorder-allocator' ); ?></button></p>
@@ -11144,6 +11145,15 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
                         return tr;
                     }
 
+                    function getNextIndex(tbody) {
+                        var current = parseInt(tbody.dataset.nextIndex || tbody.children.length || 0, 10);
+                        if ( isNaN(current) ) {
+                            current = 0;
+                        }
+                        tbody.dataset.nextIndex = String(current + 1);
+                        return current;
+                    }
+
                     function initProductSearch($context) {
                         $(document.body).trigger('wc-enhanced-select-init');
                         $context.find('select.lpr-product-select').off('change.lprBulk').on('change.lprBulk', function() {
@@ -11167,7 +11177,9 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
                         if ( ! tbody ) {
                             return;
                         }
-                        var baseName = isNew ? 'new_po[lines][]' : 'pos[' + key + '][lines][]';
+                        var basePrefix = isNew ? 'new_po[lines]' : 'pos[' + key + '][lines]';
+                        var nextIndex = getNextIndex(tbody);
+                        var baseName = basePrefix + '[' + nextIndex + ']';
                         var row = buildRow(baseName);
                         tbody.appendChild(row);
                         initProductSearch( $( row ) );
