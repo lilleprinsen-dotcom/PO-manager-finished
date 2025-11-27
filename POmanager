@@ -11702,6 +11702,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
                                 <style>
                                         :root { color-scheme: light dark; }
                                         body { margin:0; padding:0; font-family:-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif; background:#0b1120; color:#e2e8f0; }
+                                        body.lpr-modal-open { overflow:hidden; }
                                         .lpr-shell { padding:18px 14px 80px; max-width:1080px; margin:0 auto; }
                                         .lpr-top { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:14px; }
                                         .lpr-user { font-size:14px; color:#cbd5e1; }
@@ -11725,14 +11726,18 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
                                         .lpr-btn.primary { background:linear-gradient(120deg,#22d3ee,#6366f1); color:#0f172a; }
                                         .lpr-btn.secondary { background:rgba(255,255,255,0.08); color:#e2e8f0; border:1px solid rgba(255,255,255,0.08); }
                                         .lpr-empty { text-align:center; padding:60px 10px; color:#cbd5e1; }
-                                        .lpr-modal { position:fixed; inset:0; display:none; justify-content:center; align-items:flex-end; background:rgba(0,0,0,0.45); z-index:9999; }
+                                        .lpr-modal { position:fixed; inset:0; display:none; justify-content:center; align-items:flex-start; background:rgba(0,0,0,0.45); z-index:9999; overflow-y:auto; padding:20px 10px; }
                                         .lpr-modal.open { display:flex; }
-                                        .lpr-sheet { width:100%; max-width:700px; background:#0b1224; border-radius:18px 18px 0 0; padding:16px; box-shadow:0 -8px 30px rgba(0,0,0,0.35); animation:slideUp .2s ease; }
+                                        .lpr-sheet { width:100%; max-width:700px; background:#0b1224; border-radius:18px 18px 0 0; padding:16px; box-shadow:0 -8px 30px rgba(0,0,0,0.35); animation:slideUp .2s ease; max-height:calc(100vh - 40px); overflow-y:auto; margin:auto; }
                                         .lpr-sheet h2 { margin:0 0 8px; font-size:18px; }
                                         .lpr-sheet table { width:100%; border-collapse:collapse; }
                                         .lpr-sheet th, .lpr-sheet td { padding:10px 6px; text-align:left; font-size:13px; color:#e2e8f0; border-bottom:1px solid rgba(255,255,255,0.06); }
                                         .lpr-sheet th.num, .lpr-sheet td.num { text-align:right; white-space:nowrap; }
                                         .lpr-sheet input { width:80px; padding:8px 10px; border-radius:10px; border:1px solid rgba(255,255,255,0.12); background:#0f172a; color:#fff; }
+                                        .lpr-note { display:none; margin-top:10px; }
+                                        .lpr-note.show { display:block; }
+                                        .lpr-note label { display:block; margin-bottom:6px; color:#cbd5e1; font-size:13px; }
+                                        .lpr-note textarea { width:100%; border-radius:12px; border:1px solid rgba(255,255,255,0.12); background:#0f172a; color:#e2e8f0; padding:10px; font-family:inherit; }
                                         .lpr-sheet .status { margin-top:8px; color:#fbbf24; font-size:13px; min-height:20px; }
                                         @keyframes slideUp { from { transform:translateY(30px); opacity:0; } to { transform:translateY(0); opacity:1; } }
                                 </style>
@@ -11813,9 +11818,13 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
                                                         <tbody id="lpr-receive-rows"></tbody>
                                                 </table>
                                                 <div class="status" id="lpr-receive-status"></div>
+                                                <div class="lpr-note" id="lpr-receive-note">
+                                                        <label for="lpr-receive-note-input"><?php echo esc_html__( 'Optional note', 'lpr-backorder-allocator' ); ?></label>
+                                                        <textarea id="lpr-receive-note-input" rows="3" placeholder="<?php echo esc_attr__( 'Add context for this receipt (optional)', 'lpr-backorder-allocator' ); ?>"></textarea>
+                                                </div>
                                                 <div class="lpr-actions">
                                                         <button class="lpr-btn secondary" id="lpr-cancel-modal"><?php echo esc_html__( 'Cancel', 'lpr-backorder-allocator' ); ?></button>
-                                                        <button class="lpr-btn primary" id="lpr-submit-receive"><?php echo esc_html__( 'Apply receipt', 'lpr-backorder-allocator' ); ?></button>
+                                                        <button class="lpr-btn primary" id="lpr-submit-receive" data-label-apply="<?php echo esc_attr__( 'Apply receipt', 'lpr-backorder-allocator' ); ?>" data-label-confirm="<?php echo esc_attr__( 'Confirm and send', 'lpr-backorder-allocator' ); ?>"><?php echo esc_html__( 'Apply receipt', 'lpr-backorder-allocator' ); ?></button>
                                                 </div>
                                         </div>
                                 </div>
@@ -11830,14 +11839,25 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
                                         var rowsEl = document.getElementById('lpr-receive-rows');
                                         var statusEl = document.getElementById('lpr-receive-status');
                                         var titleEl = document.getElementById('lpr-receive-title');
+                                        var submitBtn = document.getElementById('lpr-submit-receive');
+                                        var noteWrap = document.getElementById('lpr-receive-note');
+                                        var noteInput = document.getElementById('lpr-receive-note-input');
                                         var activePo = null;
+                                        var confirmingSubmit = false;
 
                                         function openModal(poId, label){
                                                 activePo = poId;
                                                 titleEl.textContent = label;
                                                 statusEl.textContent = '';
+                                                confirmingSubmit = false;
+                                                if(noteWrap){ noteWrap.classList.remove('show'); }
+                                                if(noteInput){ noteInput.value = ''; }
+                                                if(submitBtn && submitBtn.getAttribute('data-label-apply')){
+                                                        submitBtn.textContent = submitBtn.getAttribute('data-label-apply');
+                                                }
                                                 rowsEl.innerHTML = '<tr><td colspan="4"><?php echo esc_js( __( 'Loading…', 'lpr-backorder-allocator' ) ); ?></td></tr>';
                                                 modal.classList.add('open');
+                                                document.body.classList.add('lpr-modal-open');
 
                                                 var body = new URLSearchParams();
                                                 body.append('action','lpr_po_receive_lines');
@@ -11870,7 +11890,13 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
 
                                         function closeModal(){
                                                 modal.classList.remove('open');
+                                                document.body.classList.remove('lpr-modal-open');
                                                 activePo = null;
+                                                confirmingSubmit = false;
+                                                if(noteWrap){ noteWrap.classList.remove('show'); }
+                                                if(submitBtn && submitBtn.getAttribute('data-label-apply')){
+                                                        submitBtn.textContent = submitBtn.getAttribute('data-label-apply');
+                                                }
                                         }
 
                                         document.querySelectorAll('[data-action="receive"]').forEach(function(btn){
@@ -11884,6 +11910,16 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
 
                                         document.getElementById('lpr-submit-receive').addEventListener('click', function(){
                                                 if(!activePo){ return; }
+                                                if(!confirmingSubmit){
+                                                        confirmingSubmit = true;
+                                                        if(noteWrap){ noteWrap.classList.add('show'); }
+                                                        if(submitBtn && submitBtn.getAttribute('data-label-confirm')){
+                                                                submitBtn.textContent = submitBtn.getAttribute('data-label-confirm');
+                                                        }
+                                                        statusEl.textContent = '<?php echo esc_js( __( 'Add an optional note, then confirm to queue the receipt.', 'lpr-backorder-allocator' ) ); ?>';
+                                                        if(noteInput){ noteInput.focus(); }
+                                                        return;
+                                                }
                                                 statusEl.textContent = '<?php echo esc_js( __( 'Saving…', 'lpr-backorder-allocator' ) ); ?>';
                                                 var payload = new URLSearchParams();
                                                 payload.append('action','lpr_po_receive_apply');
@@ -11895,6 +11931,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
                                                         if(isNaN(val) || val <= 0){ return; }
                                                         payload.append('lines['+input.getAttribute('data-idx')+']', val);
                                                 });
+
+                                                if(noteInput && noteInput.value){
+                                                        payload.append('note', noteInput.value);
+                                                }
 
                                                 fetch(ajaxUrl,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:payload.toString()})
                                                         .then(function(r){ return r.json(); })
@@ -11936,6 +11976,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
                                                 'customer'     => (string) ( $row['customer'] ?? '' ),
                                                 'status'       => (string) ( $row['status'] ?? '' ),
                                                 'lines'        => array(),
+                                                'ready_flags'  => array(),
                                         );
                                 }
 
@@ -11944,9 +11985,34 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
                                         'qty'     => (int) ( $row['qty'] ?? 0 ),
                                         'eta'     => (string) ( $row['eta'] ?? '' ),
                                 );
+
+                                $grouped[ $key ]['ready_flags'][] = $row['ready'] ?? null;
                         }
 
                         $rows    = array_values( $grouped );
+                        foreach ( $rows as &$row ) {
+                                $flags = (array) ( $row['ready_flags'] ?? array() );
+                                $ready = null;
+
+                                foreach ( $flags as $flag ) {
+                                        if ( false === $flag ) {
+                                                $ready = false;
+                                                break;
+                                        }
+
+                                        if ( true === $flag && null === $ready ) {
+                                                $ready = true;
+                                        }
+
+                                        if ( null === $flag && true === $ready ) {
+                                                $ready = null;
+                                        }
+                                }
+
+                                $row['ready'] = $ready;
+                                unset( $row['ready_flags'] );
+                        }
+                        unset( $row );
                         $po_label = sprintf( __( 'PO #%s', 'lpr-backorder-allocator' ), $po_id );
                         $eta      = lpr_allocator_sanitize_ymd( (string) get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_ETA_DATE' ) ? PO_META_ETA_DATE : '_lpr_eta_date', true ) );
                         $eta_lbl  = $eta ? self::format_eta_label( $eta ) : __( 'No ETA', 'lpr-backorder-allocator' );
@@ -11966,6 +12032,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
                                         .lpr-card { background:#0f172a; border:1px solid rgba(255,255,255,0.08); border-radius:14px; padding:14px; margin-bottom:12px; box-shadow:0 10px 26px rgba(0,0,0,0.24); }
                                         .lpr-card h3 { margin:0 0 6px; font-size:16px; }
                                         .lpr-card .meta { color:#cbd5e1; font-size:13px; margin-bottom:8px; }
+                                        .lpr-badge { display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:999px; font-size:12px; }
+                                        .lpr-badge.ready { background:rgba(74,222,128,0.16); color:#bbf7d0; border:1px solid rgba(74,222,128,0.28); }
+                                        .lpr-badge.not-ready { background:rgba(248,113,113,0.16); color:#fecdd3; border:1px solid rgba(248,113,113,0.28); }
+                                        .lpr-badge.unknown { background:rgba(148,163,184,0.16); color:#e2e8f0; border:1px solid rgba(148,163,184,0.28); }
                                         .lpr-card table { width:100%; border-collapse:collapse; }
                                         .lpr-card th, .lpr-card td { padding:8px 6px; text-align:left; border-bottom:1px solid rgba(255,255,255,0.06); font-size:13px; }
                                         .lpr-card th.num, .lpr-card td.num { text-align:right; white-space:nowrap; }
@@ -12002,10 +12072,20 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
 
                                                 $order_link = ! empty( $row['order_url'] ) ? '<a href="' . esc_url( (string) $row['order_url'] ) . '">' . esc_html( $order_label ) . '</a>' : esc_html( $order_label );
                                                 $status     = (string) ( $row['status'] ?? '' );
+                                                $ready      = $row['ready'] ?? null;
                                                 ?>
                                                 <div class="lpr-card">
                                                         <h3><?php echo wp_kses_post( $order_link ); ?></h3>
-                                                        <div class="meta"><?php echo esc_html( $status ); ?></div>
+                                                        <div class="meta">
+                                                                <span><?php echo esc_html( $status ); ?></span>
+                                                                <?php if ( true === $ready ) : ?>
+                                                                        <span class="lpr-badge ready">✅ <?php echo esc_html__( 'Ready on arrival', 'lpr-backorder-allocator' ); ?></span>
+                                                                <?php elseif ( false === $ready ) : ?>
+                                                                        <span class="lpr-badge not-ready">⚠️ <?php echo esc_html__( 'Not fully allocated by ETA', 'lpr-backorder-allocator' ); ?></span>
+                                                                <?php else : ?>
+                                                                        <span class="lpr-badge unknown">➖ <?php echo esc_html__( 'Readiness unknown', 'lpr-backorder-allocator' ); ?></span>
+                                                                <?php endif; ?>
+                                                        </div>
                                                         <table>
                                                                 <thead>
                                                                         <tr>
