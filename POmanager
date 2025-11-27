@@ -3629,6 +3629,9 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
                         $css .= '.lpr-badge.lpr-badge-vip{background:#c2274e;color:#fff;font-weight:600}';
                         $css .= '.lpr-unallocated{font-style:italic;opacity:0.8}';
                         $css .= '.lpr-force-row{margin-top:6px;font-size:12px;opacity:0.9}';
+                        $css .= '.lpr-force-row summary{cursor:pointer;user-select:none;display:flex;align-items:center;gap:6px;}';
+                        $css .= '.lpr-force-row[open]{padding-bottom:4px;}';
+                        $css .= '.lpr-force-controls{margin-top:6px;padding-left:18px;}';
                         $css .= '.lpr-force-row input[type=number]{width:70px;margin-left:6px}';
                         echo '<style type="text/css">' . esc_html( $css ) . '</style>';
 
@@ -3672,11 +3675,15 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
                                 }
 
                                 $prefill = $force_qty > 0 ? $force_qty : $qty;
-                                echo '<div class="lpr-force-row">';
-                                echo '<label><input type="checkbox" name="lpr_force_allocation[' . esc_attr( (string) $item->get_id() ) . ']" value="1" ' . checked( $force_qty > 0, true, false ) . ' /> ' . esc_html__( 'Force allocation', 'lpr-backorder-allocator' ) . '</label>';
+                                $force_open = $force_qty > 0 ? ' open' : '';
+                                echo '<details class="lpr-force-row"' . $force_open . '>';
+                                echo '<summary>' . esc_html__( 'Force allocation', 'lpr-backorder-allocator' ) . '</summary>';
+                                echo '<div class="lpr-force-controls">';
+                                echo '<label><input type="checkbox" name="lpr_force_allocation[' . esc_attr( (string) $item->get_id() ) . ']" value="1" ' . checked( $force_qty > 0, true, false ) . ' /> ' . esc_html__( 'Enable force allocation', 'lpr-backorder-allocator' ) . '</label>';
                                 echo '<input type="number" name="lpr_force_allocation_qty[' . esc_attr( (string) $item->get_id() ) . ']" min="1" max="' . esc_attr( (string) $qty ) . '" value="' . esc_attr( (string) $prefill ) . '" />';
                                 echo '<span style="margin-left:6px;">' . esc_html__( 'Treat as needing PO allocation even if in stock.', 'lpr-backorder-allocator' ) . '</span>';
                                 echo '</div>';
+                                echo '</details>';
                                 echo '</td>';
 
 				echo '<td>' . esc_html( (string) $qty ) . '</td>';
@@ -7947,6 +7954,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Overview' ) ) {
 
                                 $order_value = function_exists( 'wc_price' ) ? wc_price( $order->get_total(), array( 'currency' => $order->get_currency() ) ) : number_format_i18n( (float) $order->get_total(), 2 );
                                 $status_name = function_exists( 'wc_get_order_status_name' ) ? wc_get_order_status_name( $order->get_status() ) : $order->get_status();
+                                $ready       = self::order_ready_by_eta( $order, $eta_row ? $eta_row : $po_eta );
 
                                 $rows[] = array(
                                         'order_number' => $order_no,
@@ -7958,6 +7966,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Overview' ) ) {
                                         'status'       => $status_name,
                                         'vip'          => class_exists( __NAMESPACE__ . '\Order_VIP_Prioritizer' ) ? Order_VIP_Prioritizer::is_vip_order( $order ) : false,
                                         'eta'          => $eta_row ? $eta_row : $po_eta,
+                                        'ready'        => $ready,
                                 );
                         }
 
@@ -7975,6 +7984,65 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Overview' ) ) {
                         return lpr_allocator_compare_dates( $candidate, $current ) < 0 ? $candidate : $current;
                 }
 
+                /**
+                 * Determine if an order should be fully allocated by the time this PO arrives.
+                 */
+                protected static function order_ready_by_eta( \WC_Order $order, string $eta ): ?bool {
+                        $cutoff_eta = lpr_allocator_sanitize_ymd( $eta );
+                        if ( '' === $cutoff_eta ) {
+                                return null;
+                        }
+
+                        $force_key    = defined( __NAMESPACE__ . '\\ORDER_ITEM_META_FORCE_ALLOCATION' ) ? ORDER_ITEM_META_FORCE_ALLOCATION : '_lpr_force_allocation';
+                        $alloc_key    = defined( __NAMESPACE__ . '\\ORDER_ITEM_META_ALLOCATIONS' ) ? ORDER_ITEM_META_ALLOCATIONS : 'lpr_allocations';
+                        $has_relevant = false;
+
+                        foreach ( $order->get_items( 'line_item' ) as $item ) {
+                                if ( ! $item instanceof \WC_Order_Item_Product ) {
+                                        continue;
+                                }
+
+                                $force_qty = (int) $item->get_meta( $force_key, true );
+                                $desired   = function_exists( __NAMESPACE__ . '\\lpr_allocator_calc_backorder_desired' ) ? lpr_allocator_calc_backorder_desired( $item ) : max( 0, (int) $item->get_quantity() );
+                                $target    = max( $desired, $force_qty );
+
+                                if ( $target <= 0 ) {
+                                        continue;
+                                }
+
+                                $has_relevant = true;
+                                $on_time      = 0;
+                                $allocs       = $item->get_meta( $alloc_key, true );
+
+                                if ( is_array( $allocs ) ) {
+                                        foreach ( $allocs as $alloc ) {
+                                                $status = isset( $alloc['status'] ) ? sanitize_key( (string) $alloc['status'] ) : 'reserved';
+                                                if ( 'released' === $status ) {
+                                                        continue;
+                                                }
+
+                                                $eta_row = lpr_allocator_sanitize_ymd( (string) ( $alloc['eta'] ?? '' ) );
+                                                if ( '' === $eta_row && ! empty( $alloc['po_id'] ) ) {
+                                                        $eta_row = lpr_allocator_sanitize_ymd( (string) get_post_meta( (int) $alloc['po_id'], defined( __NAMESPACE__ . '\\PO_META_ETA_DATE' ) ? PO_META_ETA_DATE : '_lpr_eta_date', true ) );
+                                                }
+                                                if ( '' === $eta_row ) {
+                                                        continue;
+                                                }
+
+                                                if ( lpr_allocator_compare_dates( $eta_row, $cutoff_eta ) <= 0 ) {
+                                                        $on_time += isset( $alloc['qty_allocated'] ) ? max( 0, (int) $alloc['qty_allocated'] ) : 0;
+                                                }
+                                        }
+                                }
+
+                                if ( $on_time < $target ) {
+                                        return false;
+                                }
+                        }
+
+                        return $has_relevant ? true : null;
+                }
+
                 public static function render_box( \WP_Post $post ): void {
                         if ( ! current_user_can( 'manage_woocommerce' ) ) {
                                 return;
@@ -7982,7 +8050,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Overview' ) ) {
 
                         $rows = self::collect_rows( (int) $post->ID );
 
-                        echo '<style>.lpr-po-alloc-overview{width:100%;border-collapse:collapse}.lpr-po-alloc-overview th,.lpr-po-alloc-overview td{border-bottom:1px solid #ddd;padding:6px;text-align:left;vertical-align:top}.lpr-po-alloc-overview th{white-space:nowrap}.lpr-badge{display:inline-block;padding:2px 6px;border-radius:3px;background:#f0ad4e;color:#111;font-size:11px;margin-left:6px}.lpr-badge.lpr-badge-vip{background:#c2274e;color:#fff;font-weight:600}</style>';
+                        echo '<style>.lpr-po-alloc-overview{width:100%;border-collapse:collapse}.lpr-po-alloc-overview th,.lpr-po-alloc-overview td{border-bottom:1px solid #ddd;padding:6px;text-align:left;vertical-align:top}.lpr-po-alloc-overview th{white-space:nowrap}.lpr-badge{display:inline-block;padding:2px 6px;border-radius:3px;background:#f0ad4e;color:#111;font-size:11px;margin-left:6px}.lpr-badge.lpr-badge-vip{background:#c2274e;color:#fff;font-weight:600}.lpr-badge.lpr-badge-ready{background:#3aa35c;color:#fff;font-weight:600}.lpr-badge.lpr-badge-muted{background:#e5e7eb;color:#111;font-weight:600}</style>';
 
                         if ( empty( $rows ) ) {
                                 echo '<p>' . esc_html__( 'No allocations found for this PO.', 'lpr-backorder-allocator' ) . '</p>';
@@ -7996,6 +8064,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Overview' ) ) {
                         echo '<th>' . esc_html__( 'Product / Qty', 'lpr-backorder-allocator' ) . '</th>';
                         echo '<th>' . esc_html__( 'Order Value', 'lpr-backorder-allocator' ) . '</th>';
                         echo '<th>' . esc_html__( 'Status', 'lpr-backorder-allocator' ) . '</th>';
+                        echo '<th>' . esc_html__( 'Ready on arrival', 'lpr-backorder-allocator' ) . '</th>';
                         echo '<th>' . esc_html__( 'ETA', 'lpr-backorder-allocator' ) . '</th>';
                         echo '</tr></thead><tbody>';
 
@@ -8008,6 +8077,14 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Overview' ) ) {
                                 $qty        = esc_html( (string) $row['qty'] );
                                 $eta_val    = $row['eta'] ? lpr_allocator_format_store_date( $row['eta'] ) : '';
                                 $eta        = $eta_val ? esc_html( $eta_val ) : '&#8211;';
+                                $ready_cell = '&#8211;';
+                                if ( true === $row['ready'] ) {
+                                        $ready_cell = '<span class="lpr-badge lpr-badge-ready">' . esc_html__( 'Yes', 'lpr-backorder-allocator' ) . '</span>';
+                                } elseif ( false === $row['ready'] ) {
+                                        $ready_cell = '<span class="lpr-badge">' . esc_html__( 'No', 'lpr-backorder-allocator' ) . '</span>';
+                                } elseif ( null === $row['ready'] ) {
+                                        $ready_cell = '<span class="lpr-badge lpr-badge-muted">' . esc_html__( 'Unknown', 'lpr-backorder-allocator' ) . '</span>';
+                                }
 
                                 echo '<tr>';
                                 echo '<td>' . $order_link . '</td>';
@@ -8015,6 +8092,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Overview' ) ) {
                                 echo '<td>' . $product . ' &times; ' . $qty . '</td>';
                                 echo '<td>' . wp_kses_post( $row['order_value'] ) . '</td>';
                                 echo '<td>' . esc_html( $row['status'] ) . '</td>';
+                                echo '<td>' . wp_kses_post( $ready_cell ) . '</td>';
                                 echo '<td>' . $eta . '</td>';
                                 echo '</tr>';
                         }
