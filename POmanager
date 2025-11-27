@@ -10264,6 +10264,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
 
         public static function init(): void {
             add_action( 'admin_menu', array( __CLASS__, 'register_page' ) );
+            add_action( 'admin_enqueue_scripts', array( __CLASS__, 'enqueue_assets' ) );
         }
 
         public static function register_page(): void {
@@ -10276,6 +10277,19 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
                 array( __CLASS__, 'render' ),
                 4
             );
+        }
+
+        /**
+         * Load WooCommerce enhanced select assets on the bulk editor page so product search works.
+         */
+        public static function enqueue_assets( $hook ): void {
+            $page = isset( $_GET['page'] ) ? sanitize_key( wp_unslash( $_GET['page'] ) ) : '';
+            if ( 'lpr-po-bulk-edit' !== $page ) {
+                return;
+            }
+
+            wp_enqueue_style( 'woocommerce_admin_styles' );
+            wp_enqueue_script( 'wc-enhanced-select' );
         }
 
         protected static function allowed_statuses(): array {
@@ -10299,6 +10313,40 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
                 'status'    => $status,
                 'title'     => $title,
             );
+        }
+
+        /**
+         * Normalize posted select fields back into product/variation IDs.
+         */
+        protected static function normalize_select_rows( array $rows ): array {
+            if ( empty( $rows ) || ! function_exists( 'wc_get_product' ) ) {
+                return $rows;
+            }
+
+            foreach ( $rows as &$row ) {
+                if ( ! is_array( $row ) ) {
+                    continue;
+                }
+                $sel_id = isset( $row['select_id'] ) ? absint( $row['select_id'] ) : 0;
+                $pid    = isset( $row['product_id'] ) ? absint( $row['product_id'] ) : 0;
+                $vid    = isset( $row['variation_id'] ) ? absint( $row['variation_id'] ) : 0;
+
+                if ( $sel_id && 0 === $pid && 0 === $vid ) {
+                    $product = wc_get_product( $sel_id );
+                    if ( $product instanceof \WC_Product ) {
+                        if ( $product->is_type( 'variation' ) ) {
+                            $row['variation_id'] = (string) $sel_id;
+                            $row['product_id']   = '';
+                        } else {
+                            $row['product_id']   = (string) $sel_id;
+                            $row['variation_id'] = '';
+                        }
+                    }
+                }
+            }
+            unset( $row );
+
+            return $rows;
         }
 
         protected static function has_new_payload( array $data ): bool {
@@ -10417,6 +10465,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
                     }
 
                     $lines_raw = isset( $payload['lines'] ) ? (array) $payload['lines'] : array();
+                    $lines_raw = self::normalize_select_rows( $lines_raw );
                     $lines     = lpr_allocator_sanitize_po_lines_input( $lines_raw );
                     $lines     = lpr_allocator_recalculate_po_lines_from_allocations( $po_id, $lines );
                     update_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', $lines );
@@ -10445,6 +10494,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
                     $errors[] = $post_id->get_error_message();
                 } else {
                     $lines = isset( $new_payload['lines'] ) ? (array) $new_payload['lines'] : array();
+                    $lines = self::normalize_select_rows( $lines );
                     $lines = lpr_allocator_sanitize_po_lines_input( $lines );
                     $lines = lpr_allocator_recalculate_po_lines_from_allocations( (int) $post_id, $lines );
 
@@ -10553,8 +10603,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
                                         <table class="widefat fixed striped">
                                             <thead>
                                                 <tr>
-                                                    <th><?php esc_html_e( 'Product ID', 'lpr-backorder-allocator' ); ?></th>
-                                                    <th><?php esc_html_e( 'Variation ID', 'lpr-backorder-allocator' ); ?></th>
+                                                    <th><?php esc_html_e( 'Product / Variation', 'lpr-backorder-allocator' ); ?></th>
                                                     <th><?php esc_html_e( 'Ordered', 'lpr-backorder-allocator' ); ?></th>
                                                     <th><?php esc_html_e( 'Allocated', 'lpr-backorder-allocator' ); ?></th>
                                                     <th><?php esc_html_e( 'Received', 'lpr-backorder-allocator' ); ?></th>
@@ -10564,9 +10613,34 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
                                             </thead>
                                             <tbody id="lpr-po-lines-<?php echo esc_attr( $po_key ); ?>">
                                                 <?php foreach ( (array) $row['lines'] as $line ) : ?>
+                                                    <?php
+                                                    $line_product_id   = isset( $line['product_id'] ) ? absint( $line['product_id'] ) : 0;
+                                                    $line_variation_id = isset( $line['variation_id'] ) ? absint( $line['variation_id'] ) : 0;
+                                                    $line_chosen_id    = $line_variation_id > 0 ? $line_variation_id : $line_product_id;
+                                                    $line_label        = '';
+                                                    if ( $line_chosen_id ) {
+                                                        $line_label = ! empty( $line['product_label'] ) ? (string) $line['product_label'] : lpr_allocator_product_option_label( $line_chosen_id );
+                                                    }
+                                                    ?>
                                                     <tr>
-                                                        <td><input type="number" name="pos[<?php echo esc_attr( $po_key ); ?>][lines][][product_id]" value="<?php echo esc_attr( (string) ( $line['product_id'] ?? '' ) ); ?>" /></td>
-                                                        <td><input type="number" name="pos[<?php echo esc_attr( $po_key ); ?>][lines][][variation_id]" value="<?php echo esc_attr( (string) ( $line['variation_id'] ?? '' ) ); ?>" /></td>
+                                                        <td class="lpr-product-cell">
+                                                            <select
+                                                                class="wc-product-search lpr-product-select"
+                                                                name="pos[<?php echo esc_attr( $po_key ); ?>][lines][][select_ui]"
+                                                                data-placeholder="<?php echo esc_attr__( 'Search for a product…', 'lpr-backorder-allocator' ); ?>"
+                                                                data-action="woocommerce_json_search_products_and_variations"
+                                                                data-minimum_input_length="1"
+                                                                data-allow_clear="true"
+                                                                style="min-width: 320px;"
+                                                            >
+                                                                <?php if ( $line_chosen_id ) : ?>
+                                                                    <option value="<?php echo esc_attr( (string) $line_chosen_id ); ?>" selected="selected"><?php echo esc_html( $line_label ); ?></option>
+                                                                <?php endif; ?>
+                                                            </select>
+                                                            <input type="hidden" class="lpr-select-id" name="pos[<?php echo esc_attr( $po_key ); ?>][lines][][select_id]" value="<?php echo esc_attr( (string) $line_chosen_id ); ?>" />
+                                                            <input type="hidden" class="lpr-product-id" name="pos[<?php echo esc_attr( $po_key ); ?>][lines][][product_id]" value="<?php echo esc_attr( (string) $line_product_id ); ?>" />
+                                                            <input type="hidden" class="lpr-variation-id" name="pos[<?php echo esc_attr( $po_key ); ?>][lines][][variation_id]" value="<?php echo esc_attr( (string) $line_variation_id ); ?>" />
+                                                        </td>
                                                         <td><input type="number" min="0" step="1" name="pos[<?php echo esc_attr( $po_key ); ?>][lines][][qty_ordered]" value="<?php echo esc_attr( (string) ( $line['qty_ordered'] ?? 0 ) ); ?>" /></td>
                                                         <td><input type="number" min="0" step="1" name="pos[<?php echo esc_attr( $po_key ); ?>][lines][][qty_allocated]" value="<?php echo esc_attr( (string) ( $line['qty_allocated'] ?? 0 ) ); ?>" /></td>
                                                         <td><input type="number" min="0" step="1" name="pos[<?php echo esc_attr( $po_key ); ?>][lines][][qty_received]" value="<?php echo esc_attr( (string) ( $line['qty_received'] ?? 0 ) ); ?>" /></td>
@@ -10622,8 +10696,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
                             <table class="widefat fixed striped">
                                 <thead>
                                     <tr>
-                                        <th><?php esc_html_e( 'Product ID', 'lpr-backorder-allocator' ); ?></th>
-                                        <th><?php esc_html_e( 'Variation ID', 'lpr-backorder-allocator' ); ?></th>
+                                        <th><?php esc_html_e( 'Product / Variation', 'lpr-backorder-allocator' ); ?></th>
                                         <th><?php esc_html_e( 'Ordered', 'lpr-backorder-allocator' ); ?></th>
                                         <th><?php esc_html_e( 'Allocated', 'lpr-backorder-allocator' ); ?></th>
                                         <th><?php esc_html_e( 'Received', 'lpr-backorder-allocator' ); ?></th>
@@ -10642,8 +10715,8 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
                 </form>
 
                 <style>
-                    .lpr-po-bulk-grid { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
-                    .lpr-po-bulk-card { background: #fff; border: 1px solid #c3c4c7; border-radius: 6px; padding: 16px; box-shadow: 0 1px 1px rgba(0,0,0,.04); }
+                    .lpr-po-bulk-grid { display: flex; flex-direction: column; gap: 16px; }
+                    .lpr-po-bulk-card { background: #fff; border: 1px solid #c3c4c7; border-radius: 6px; padding: 16px; box-shadow: 0 1px 1px rgba(0,0,0,.04); width: 100%; }
                     .lpr-po-bulk-card__header { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; }
                     .lpr-po-bulk-card__meta { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 12px; color: #50575e; }
                     .lpr-po-bulk-chip { display: inline-flex; align-items: center; padding: 2px 8px; border-radius: 12px; background: #e2e8f0; font-size: 12px; }
@@ -10652,46 +10725,79 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
                     .lpr-po-bulk-fields input, .lpr-po-bulk-fields select { width: 100%; }
                     .lpr-po-bulk-table-wrapper { margin-top: 12px; }
                     .lpr-po-bulk-card--new { border-style: dashed; }
+                    .lpr-po-bulk-card .lpr-product-cell .select2-container { min-width: 320px; max-width: 100%; }
                 </style>
 
                 <script>
-                (function() {
+                (function($) {
                     function buildRow(baseName) {
                         var tr = document.createElement('tr');
-                        tr.innerHTML = '<td><input type="number" name="' + baseName + '[product_id]" /></td>' +
-                            '<td><input type="number" name="' + baseName + '[variation_id]" /></td>' +
+                        tr.innerHTML = '<td class="lpr-product-cell">' +
+                            '<select class="wc-product-search lpr-product-select" name="' + baseName + '[select_ui]" data-placeholder="<?php echo esc_js( __( 'Search for a product…', 'lpr-backorder-allocator' ) ); ?>" data-action="woocommerce_json_search_products_and_variations" data-minimum_input_length="1" data-allow_clear="true" style="min-width:320px;"></select>' +
+                            '<input type="hidden" class="lpr-select-id" name="' + baseName + '[select_id]" value="" />' +
+                            '<input type="hidden" class="lpr-product-id" name="' + baseName + '[product_id]" value="" />' +
+                            '<input type="hidden" class="lpr-variation-id" name="' + baseName + '[variation_id]" value="" />' +
+                            '</td>' +
                             '<td><input type="number" min="0" step="1" name="' + baseName + '[qty_ordered]" value="0" /></td>' +
                             '<td><input type="number" min="0" step="1" name="' + baseName + '[qty_allocated]" value="0" /></td>' +
                             '<td><input type="number" min="0" step="1" name="' + baseName + '[qty_received]" value="0" /></td>' +
-                            '<td><input type="text" name="' + baseName + '[eta_override]" placeholder="DD-MM-YYYY" pattern="\d{2}-\d{2}-\d{4}" /></td>' +
+                            '<td><input type="text" name="' + baseName + '[eta_override]" placeholder="DD-MM-YYYY" pattern="\\d{2}-\\d{2}-\\d{4}" /></td>' +
                             '<td><button type="button" class="button-link-delete lpr-po-bulk-remove-line">&times;</button></td>';
                         return tr;
                     }
 
-                    document.querySelectorAll('.lpr-po-bulk-add-line').forEach(function(btn) {
-                        btn.addEventListener('click', function() {
-                            var targetId = btn.getAttribute('data-target');
-                            var key = btn.getAttribute('data-key');
-                            var isNew = btn.getAttribute('data-new') === '1';
-                            var tbody = document.getElementById(targetId);
-                            if (!tbody) {
+                    function initProductSearch($context) {
+                        $(document.body).trigger('wc-enhanced-select-init');
+                        $context.find('select.lpr-product-select').off('change.lprBulk').on('change.lprBulk', function() {
+                            var $sel = $(this);
+                            var val = $sel.val() || '';
+                            var $row = $sel.closest('tr');
+                            $row.find('.lpr-select-id').val(val);
+                            if ( ! val ) {
+                                $row.find('.lpr-product-id, .lpr-variation-id').val('');
                                 return;
                             }
-                            var baseName = isNew ? 'new_po[lines][]' : 'pos[' + key + '][lines][]';
-                            tbody.appendChild(buildRow(baseName));
+                            $row.find('.lpr-product-id, .lpr-variation-id').val('');
                         });
+                    }
+
+                    $('.lpr-po-bulk-add-line').on('click', function() {
+                        var targetId = $(this).data('target');
+                        var key = $(this).data('key');
+                        var isNew = String( $(this).data('new') ) === '1';
+                        var tbody = document.getElementById(targetId);
+                        if ( ! tbody ) {
+                            return;
+                        }
+                        var baseName = isNew ? 'new_po[lines][]' : 'pos[' + key + '][lines][]';
+                        var row = buildRow(baseName);
+                        tbody.appendChild(row);
+                        initProductSearch( $( row ) );
                     });
 
-                    document.addEventListener('click', function(e) {
-                        if ( e.target.classList.contains('lpr-po-bulk-remove-line') ) {
-                            var row = e.target.closest('tr');
-                            if ( row && row.parentNode ) {
-                                row.parentNode.removeChild(row);
-                            }
+                    $(document).on('click', '.lpr-po-bulk-remove-line', function() {
+                        var $row = $(this).closest('tr');
+                        if ( $row.length ) {
+                            $row.remove();
                         }
                     });
-                })();
+
+                    initProductSearch( $('.lpr-po-bulk-wrap') );
+
+                    $('form').on('submit', function() {
+                        $(this).find('select.lpr-product-select').each(function() {
+                            var $sel = $(this);
+                            var val = $sel.val() || '';
+                            var $row = $sel.closest('tr');
+                            $row.find('.lpr-select-id').val(val);
+                            if ( ! val ) {
+                                $row.find('.lpr-product-id, .lpr-variation-id').val('');
+                            }
+                        });
+                    });
+                })(jQuery);
                 </script>
+
             </div>
             <?php
         }
