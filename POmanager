@@ -10414,11 +10414,13 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
             );
 
             $rows = array();
-            foreach ( $query->posts as $po_id ) {
-                $post = get_post( $po_id );
-                if ( ! ( $post instanceof \WP_Post ) ) {
+            foreach ( $query->posts as $post_obj ) {
+                if ( ! ( $post_obj instanceof \WP_Post ) ) {
                     continue;
                 }
+
+                $po_id = (int) $post_obj->ID;
+                $post  = $post_obj;
 
                 $lines = get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', true );
                 $lines = self::normalize_po_lines_meta( $lines );
@@ -10665,15 +10667,15 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
                                                     ?>
                                                     <tr>
                                                         <td class="lpr-product-cell">
-                                                            <select
-                                                                class="wc-product-search lpr-product-select"
-                                                                name="pos[<?php echo esc_attr( $po_key ); ?>][lines][][select_ui]"
-                                                                data-placeholder="<?php echo esc_attr__( 'Search for a product…', 'lpr-backorder-allocator' ); ?>"
-                                                                data-action="woocommerce_json_search_products_and_variations"
-                                                                data-minimum_input_length="1"
-                                                                data-allow_clear="true"
-                                                                style="min-width: 320px;"
-                                                            >
+                                                                <select
+                                                                    class="wc-product-search lpr-product-select"
+                                                                    name="pos[<?php echo esc_attr( $po_key ); ?>][lines][][select_ui]"
+                                                                    data-placeholder="<?php echo esc_attr__( 'Search for a product…', 'lpr-backorder-allocator' ); ?>"
+                                                                    data-action="woocommerce_json_search_products_and_variations"
+                                                                    data-minimum_input_length="1"
+                                                                    data-allow_clear="true"
+                                                                    style="width: 100%;"
+                                                                >
                                                                 <?php if ( $line_chosen_id ) : ?>
                                                                     <option value="<?php echo esc_attr( (string) $line_chosen_id ); ?>" selected="selected"><?php echo esc_html( $line_label ); ?></option>
                                                                 <?php endif; ?>
@@ -10764,9 +10766,10 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
                     .lpr-po-bulk-fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px; margin-bottom: 12px; }
                     .lpr-po-bulk-fields label { display: flex; flex-direction: column; gap: 4px; font-weight: 600; }
                     .lpr-po-bulk-fields input, .lpr-po-bulk-fields select { width: 100%; }
-                    .lpr-po-bulk-table-wrapper { margin-top: 12px; }
+                    .lpr-po-bulk-table-wrapper { margin-top: 12px; overflow-x: auto; }
                     .lpr-po-bulk-card--new { border-style: dashed; }
-                    .lpr-po-bulk-card .lpr-product-cell .select2-container { min-width: 320px; max-width: 100%; }
+                    .lpr-po-bulk-card .lpr-product-cell { width: 45%; min-width: 260px; }
+                    .lpr-po-bulk-card .lpr-product-cell .select2-container { width: 100% !important; min-width: 0; }
                 </style>
 
                 <script>
@@ -10774,7 +10777,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
                     function buildRow(baseName) {
                         var tr = document.createElement('tr');
                         tr.innerHTML = '<td class="lpr-product-cell">' +
-                            '<select class="wc-product-search lpr-product-select" name="' + baseName + '[select_ui]" data-placeholder="<?php echo esc_js( __( 'Search for a product…', 'lpr-backorder-allocator' ) ); ?>" data-action="woocommerce_json_search_products_and_variations" data-minimum_input_length="1" data-allow_clear="true" style="min-width:320px;"></select>' +
+                            '<select class="wc-product-search lpr-product-select" name="' + baseName + '[select_ui]" data-placeholder="<?php echo esc_js( __( 'Search for a product…', 'lpr-backorder-allocator' ) ); ?>" data-action="woocommerce_json_search_products_and_variations" data-minimum_input_length="1" data-allow_clear="true" style="width:100%;"></select>' +
                             '<input type="hidden" class="lpr-select-id" name="' + baseName + '[select_id]" value="" />' +
                             '<input type="hidden" class="lpr-product-id" name="' + baseName + '[product_id]" value="" />' +
                             '<input type="hidden" class="lpr-variation-id" name="' + baseName + '[variation_id]" value="" />' +
