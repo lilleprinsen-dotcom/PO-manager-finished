@@ -2721,23 +2721,36 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder' ) ) {
 				return false;
 			}
 
+			$product = $item->get_product();
+                        if ( ! $product instanceof \WC_Product ) {
+                                return false;
+                        }
+
                         $force_qty = (int) $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_FORCE_ALLOCATION' ) ? ORDER_ITEM_META_FORCE_ALLOCATION : '_lpr_force_allocation', true );
                         if ( $force_qty > 0 ) {
                                 return true;
                         }
 
-                        // Detect backordered amount from item meta if present.
-                        $meta_backordered = 0;
-                        foreach ( array( 'Backordered', '_backordered', 'backordered' ) as $k ) {
-                                $v = $item->get_meta( $k, true );
-                                if ( '' !== $v && null !== $v ) {
-                                        $meta_backordered = max( $meta_backordered, (int) $v );
-                                }
+                        if ( ! method_exists( $product, 'backorders_allowed' ) || ! $product->backorders_allowed() ) {
+                                return false;
                         }
 
-                        return ( $meta_backordered > 0 );
-                }
-        }
+			$qty = max( 0, (int) $item->get_quantity() );
+
+			// Detect backordered amount from item meta if present.
+			$meta_backordered = 0;
+			foreach ( array( 'Backordered', '_backordered', 'backordered' ) as $k ) {
+				$v = $item->get_meta( $k, true );
+				if ( '' !== $v && null !== $v ) {
+					$meta_backordered = max( $meta_backordered, (int) $v );
+				}
+			}
+
+			$is_on_backorder = method_exists( $product, 'is_on_backorder' ) ? (bool) $product->is_on_backorder( $qty ) : ( $meta_backordered > 0 );
+
+			return ( $meta_backordered > 0 || $is_on_backorder );
+		}
+	}
 }
 
 if ( ! class_exists( __NAMESPACE__ . '\ETA' ) ) {
@@ -5577,6 +5590,10 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_calc_backorder_need' ) )
                         return 0;
                 }
                 $qty = max( 0, (int) $item->get_quantity() );
+                $product = $item->get_product();
+                if ( ! ( $product instanceof \WC_Product ) ) {
+                        return 0;
+                }
 
                 // Desired backorder amount from item meta if present.
                 $desired = 0;
@@ -5590,7 +5607,11 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_calc_backorder_need' ) )
                                 $desired = max( $desired, (int) $v );
                         }
 		}
-                // Subtract existing active allocations (non-released).
+		if ( 0 === $desired && method_exists( $product, 'is_on_backorder' ) && $product->is_on_backorder( $qty ) ) {
+			$desired = $qty; // fallback when exact backordered count unknown
+		}
+
+		// Subtract existing active allocations (non-released).
 		$allocs = $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_ALLOCATIONS' ) ? ORDER_ITEM_META_ALLOCATIONS : 'lpr_allocations', true );
 		$allocated_active = 0;
 		if ( is_array( $allocs ) ) {
@@ -6643,184 +6664,6 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_FIFO_Allocator' ) ) {
                 }
         }
         PO_FIFO_Allocator::init();
-}
-
-if ( ! class_exists( __NAMESPACE__ . '\Allocation_Audit' ) ) {
-        /**
-         * Recurring job to release allocations that should never have been applied.
-         */
-        class Allocation_Audit {
-
-                const ACTION_HOOK = 'lpr_allocator_cleanup_false_allocations';
-
-                public static function init(): void {
-                        add_action( 'init', array( __CLASS__, 'maybe_schedule' ) );
-                        add_action( self::ACTION_HOOK, array( __CLASS__, 'run' ) );
-                }
-
-                protected static function get_interval(): int {
-                        $default  = defined( 'DAY_IN_SECONDS' ) ? (int) DAY_IN_SECONDS : 86400;
-                        $interval = (int) apply_filters( 'lpr_allocator_allocation_audit_interval', $default );
-
-                        return max( 0, $interval );
-                }
-
-                public static function maybe_schedule( bool $force = false ): void {
-                        $interval = self::get_interval();
-
-                        if ( $interval <= 0 ) {
-                                if ( $force && function_exists( 'as_unschedule_all_actions' ) ) {
-                                        as_unschedule_all_actions( self::ACTION_HOOK, array(), 'lpr-allocator' );
-                                } elseif ( $force ) {
-                                        wp_clear_scheduled_hook( self::ACTION_HOOK );
-                                }
-                                return;
-                        }
-
-                        if ( function_exists( 'as_schedule_recurring_action' ) && function_exists( 'as_next_scheduled_action' ) ) {
-                                if ( $force && function_exists( 'as_unschedule_all_actions' ) ) {
-                                        as_unschedule_all_actions( self::ACTION_HOOK, array(), 'lpr-allocator' );
-                                }
-                                $next = as_next_scheduled_action( self::ACTION_HOOK, array(), 'lpr-allocator' );
-                                if ( ! $next ) {
-                                        as_schedule_recurring_action( time() + 300, $interval, self::ACTION_HOOK, array(), 'lpr-allocator', true );
-                                }
-                        } else {
-                                if ( $force ) {
-                                        wp_clear_scheduled_hook( self::ACTION_HOOK );
-                                }
-                                if ( ! wp_next_scheduled( self::ACTION_HOOK ) ) {
-                                        wp_schedule_single_event( time() + $interval, self::ACTION_HOOK );
-                                }
-                        }
-                }
-
-                public static function run(): void {
-                        self::cleanup();
-
-                        $interval = self::get_interval();
-                        if ( $interval <= 0 ) {
-                                return;
-                        }
-
-                        if ( ! function_exists( 'as_schedule_recurring_action' ) && ! wp_next_scheduled( self::ACTION_HOOK ) ) {
-                                wp_schedule_single_event( time() + $interval, self::ACTION_HOOK );
-                        }
-                }
-
-                protected static function cleanup(): void {
-                        if ( ! function_exists( 'wc_get_order' ) ) {
-                                return;
-                        }
-
-                        $processed = array();
-                        $page      = 1;
-                        $per_page  = 25;
-
-                        do {
-                                $query = new \WP_Query(
-                                        array(
-                                                'post_type'      => defined( __NAMESPACE__ . '\\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po',
-                                                'post_status'    => lpr_allocator_live_po_statuses(),
-                                                'posts_per_page' => $per_page,
-                                                'paged'          => $page,
-                                                'fields'         => 'ids',
-                                                'no_found_rows'  => true,
-                                        ),
-                                );
-
-                                if ( empty( $query->posts ) ) {
-                                        break;
-                                }
-
-                                foreach ( $query->posts as $po_id ) {
-                                        $index = lpr_allocator_get_po_allocation_index( (int) $po_id );
-                                        if ( empty( $index ) ) {
-                                                continue;
-                                        }
-
-                                        foreach ( $index as $entry ) {
-                                                $order_id = isset( $entry['order_id'] ) ? (int) $entry['order_id'] : 0;
-                                                $item_id  = isset( $entry['item_id'] ) ? (int) $entry['item_id'] : 0;
-                                                $key      = $order_id . ':' . $item_id;
-
-                                                if ( $order_id <= 0 || $item_id <= 0 || isset( $processed[ $key ] ) ) {
-                                                        continue;
-                                                }
-
-                                                self::release_if_not_backordered( $order_id, $item_id );
-                                                $processed[ $key ] = true;
-                                        }
-                                }
-
-                                $page++;
-                        } while ( count( $query->posts ) === $per_page );
-                }
-
-                protected static function release_if_not_backordered( int $order_id, int $item_id ): void {
-                        $order = wc_get_order( $order_id );
-                        if ( ! ( $order instanceof \WC_Order ) ) {
-                                return;
-                        }
-
-                        $item = $order->get_item( $item_id );
-                        if ( ! ( $item instanceof \WC_Order_Item_Product ) ) {
-                                return;
-                        }
-
-                        if ( method_exists( $item, 'read_meta_data' ) ) {
-                                $item->read_meta_data( true );
-                        }
-
-                        $force_key = defined( __NAMESPACE__ . '\\ORDER_ITEM_META_FORCE_ALLOCATION' ) ? ORDER_ITEM_META_FORCE_ALLOCATION : '_lpr_force_allocation';
-                        $force_qty = (int) $item->get_meta( $force_key, true );
-                        if ( $force_qty > 0 ) {
-                                return; // Respect manual overrides.
-                        }
-
-                        $needs_allocation = class_exists( __NAMESPACE__ . '\\Backorder' ) ? Backorder::needs_allocation( $item ) : false;
-                        if ( $needs_allocation ) {
-                                return;
-                        }
-
-                        $alloc_key = defined( __NAMESPACE__ . '\\ORDER_ITEM_META_ALLOCATIONS' ) ? ORDER_ITEM_META_ALLOCATIONS : 'lpr_allocations';
-                        $allocs    = $item->get_meta( $alloc_key, true );
-                        if ( ! is_array( $allocs ) || empty( $allocs ) ) {
-                                return;
-                        }
-
-                        $changed = false;
-                        foreach ( $allocs as &$row ) {
-                                $status = isset( $row['status'] ) ? sanitize_key( (string) $row['status'] ) : 'reserved';
-                                $qty    = isset( $row['qty_allocated'] ) ? max( 0, (int) $row['qty_allocated'] ) : 0;
-
-                                if ( 'released' === $status || $qty <= 0 ) {
-                                        continue;
-                                }
-
-                                lpr_allocator_touch_allocation_status( $row, 'released' );
-                                $changed = true;
-                        }
-                        unset( $row );
-
-                        if ( ! $changed ) {
-                                return;
-                        }
-
-                        $item->update_meta_data( $alloc_key, $allocs );
-                        $item->save();
-
-                        if ( function_exists( __NAMESPACE__ . '\\lpr_allocator_reapply_po_allocations_for_order' ) ) {
-                                lpr_allocator_reapply_po_allocations_for_order( $order_id );
-                        }
-
-                        if ( class_exists( __NAMESPACE__ . '\\ETA' ) ) {
-                                ETA::update_line_eta( $order_id );
-                        }
-                }
-        }
-
-        Allocation_Audit::init();
 }
 
 if ( ! class_exists( __NAMESPACE__ . '\Auto_PO_Allocator' ) ) {
@@ -8324,19 +8167,26 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_calc_backorder_desired' 
 		if ( ! $item instanceof \WC_Order_Item_Product ) {
 			return 0;
 		}
-                $qty = max( 0, (int) $item->get_quantity() );
+		$qty     = max( 0, (int) $item->get_quantity() );
+		$product = $item->get_product();
+		if ( ! ( $product instanceof \WC_Product ) ) {
+			return 0;
+		}
 
-                $desired = 0;
-                foreach ( array( 'Backordered', '_backordered', 'backordered' ) as $k ) {
-                        $v = $item->get_meta( $k, true );
-                        if ( '' !== $v && null !== $v ) {
-                                $desired = max( $desired, (int) $v );
-                        }
-                }
+		$desired = 0;
+		foreach ( array( 'Backordered', '_backordered', 'backordered' ) as $k ) {
+			$v = $item->get_meta( $k, true );
+			if ( '' !== $v && null !== $v ) {
+				$desired = max( $desired, (int) $v );
+			}
+		}
+		if ( 0 === $desired && method_exists( $product, 'is_on_backorder' ) && $product->is_on_backorder( $qty ) ) {
+			$desired = $qty; // fallback when Woo says the line is on backorder
+		}
 
-                // Safety clamp to the line quantity.
-                return min( $desired, $qty );
-        }
+		// Safety clamp to the line quantity.
+		return min( $desired, $qty );
+	}
 }
 
 /**
