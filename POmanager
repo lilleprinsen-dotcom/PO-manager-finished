@@ -7981,6 +7981,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Overview' ) ) {
                                 $ready       = self::order_ready_by_eta( $order, $eta_row ? $eta_row : $po_eta );
 
                                 $rows[] = array(
+                                        'order_id'     => $order_id,
                                         'order_number' => $order_no,
                                         'order_url'    => $order_url,
                                         'customer'     => $full_name,
@@ -8034,9 +8035,10 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Overview' ) ) {
                                         continue;
                                 }
 
-                                $has_relevant = true;
-                                $on_time      = 0;
-                                $allocs       = $item->get_meta( $alloc_key, true );
+                                $has_relevant    = true;
+                                $allocs          = $item->get_meta( $alloc_key, true );
+                                $total_allocated = 0;
+                                $latest_eta      = '';
 
                                 if ( is_array( $allocs ) ) {
                                         foreach ( $allocs as $alloc ) {
@@ -8053,13 +8055,24 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Overview' ) ) {
                                                         continue;
                                                 }
 
-                                                if ( lpr_allocator_compare_dates( $eta_row, $cutoff_eta ) <= 0 ) {
-                                                        $on_time += isset( $alloc['qty_allocated'] ) ? max( 0, (int) $alloc['qty_allocated'] ) : 0;
+                                                $qty_row = isset( $alloc['qty_allocated'] ) ? max( 0, (int) $alloc['qty_allocated'] ) : 0;
+                                                if ( $qty_row <= 0 ) {
+                                                        continue;
+                                                }
+
+                                                $total_allocated += $qty_row;
+
+                                                if ( '' === $latest_eta || lpr_allocator_compare_dates( $eta_row, $latest_eta ) > 0 ) {
+                                                        $latest_eta = $eta_row;
                                                 }
                                         }
                                 }
 
-                                if ( $on_time < $target ) {
+                                if ( $total_allocated < $target ) {
+                                        return false;
+                                }
+
+                                if ( '' !== $latest_eta && lpr_allocator_compare_dates( $latest_eta, $cutoff_eta ) > 0 ) {
                                         return false;
                                 }
                         }
@@ -11451,8 +11464,14 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
                 /**
                  * Build the allocations view URL for a PO.
                  */
-                public static function allocation_url( int $po_id ): string {
-                        return home_url( '/incoming?view=allocations&po=' . absint( $po_id ) );
+                public static function allocation_url( int $po_id, string $token = '' ): string {
+                        $url = home_url( '/incoming?view=allocations&po=' . absint( $po_id ) );
+
+                        if ( $token ) {
+                                $url = add_query_arg( array( 'incoming_token' => rawurlencode( $token ) ), $url );
+                        }
+
+                        return $url;
                 }
 
                 /**
@@ -11525,6 +11544,18 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
                         $users = self::allowed_users();
                         $error = '';
                         $token = '';
+
+                        if ( isset( $_GET['incoming_token'] ) && self::validate_token( (string) wp_unslash( $_GET['incoming_token'] ) ) ) {
+                                $token = (string) wp_unslash( $_GET['incoming_token'] );
+                                setcookie( self::COOKIE_KEY, $token, time() + self::TOKEN_TTL, '/', '', is_ssl(), true );
+
+                                return array(
+                                        'authorized' => true,
+                                        'user'       => self::$active_user,
+                                        'token'      => $token,
+                                        'error'      => '',
+                                );
+                        }
 
                         if ( isset( $_COOKIE[ self::COOKIE_KEY ] ) && self::validate_token( (string) wp_unslash( $_COOKIE[ self::COOKIE_KEY ] ) ) ) {
                                 $token = (string) wp_unslash( $_COOKIE[ self::COOKIE_KEY ] );
@@ -11761,7 +11792,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
                                                         </ul>
                                                         <div class="lpr-actions">
                                                                 <button class="lpr-btn primary" data-action="receive" data-po="<?php echo esc_attr( (string) $po_id ); ?>" data-label="<?php echo esc_attr( sprintf( __( 'PO #%s', 'lpr-backorder-allocator' ), $po_num ) ); ?>"><?php echo esc_html__( 'Receive', 'lpr-backorder-allocator' ); ?></button>
-                                                                <a class="lpr-btn secondary" href="<?php echo esc_url( self::allocation_url( $po_id ) ); ?>"><?php echo esc_html__( 'Allocations', 'lpr-backorder-allocator' ); ?></a>
+                                                                <a class="lpr-btn secondary" href="<?php echo esc_url( self::allocation_url( $po_id, $token ) ); ?>"><?php echo esc_html__( 'Allocations', 'lpr-backorder-allocator' ); ?></a>
                                                         </div>
                                                 </div>
                                         <?php endforeach; ?>
@@ -11889,7 +11920,33 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
                 }
 
                 protected static function render_allocations_page( string $user, string $token, int $po_id ): void {
-                        $rows     = class_exists( __NAMESPACE__ . '\PO_Allocation_Overview' ) ? PO_Allocation_Overview::collect_rows( $po_id ) : array();
+                        $raw_rows = class_exists( __NAMESPACE__ . '\PO_Allocation_Overview' ) ? PO_Allocation_Overview::collect_rows( $po_id ) : array();
+
+                        $grouped = array();
+
+                        foreach ( $raw_rows as $row ) {
+                                $order_id = isset( $row['order_id'] ) ? absint( $row['order_id'] ) : 0;
+                                $key      = $order_id ? 'order-' . $order_id : md5( maybe_serialize( $row ) );
+
+                                if ( ! isset( $grouped[ $key ] ) ) {
+                                        $grouped[ $key ] = array(
+                                                'order_id'     => $order_id,
+                                                'order_number' => (string) ( $row['order_number'] ?? '' ),
+                                                'order_url'    => (string) ( $row['order_url'] ?? '' ),
+                                                'customer'     => (string) ( $row['customer'] ?? '' ),
+                                                'status'       => (string) ( $row['status'] ?? '' ),
+                                                'lines'        => array(),
+                                        );
+                                }
+
+                                $grouped[ $key ]['lines'][] = array(
+                                        'product' => (string) ( $row['product'] ?? '' ),
+                                        'qty'     => (int) ( $row['qty'] ?? 0 ),
+                                        'eta'     => (string) ( $row['eta'] ?? '' ),
+                                );
+                        }
+
+                        $rows    = array_values( $grouped );
                         $po_label = sprintf( __( 'PO #%s', 'lpr-backorder-allocator' ), $po_id );
                         $eta      = lpr_allocator_sanitize_ymd( (string) get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_ETA_DATE' ) ? PO_META_ETA_DATE : '_lpr_eta_date', true ) );
                         $eta_lbl  = $eta ? self::format_eta_label( $eta ) : __( 'No ETA', 'lpr-backorder-allocator' );
@@ -11935,12 +11992,20 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
                                                 <div class="lpr-card"><?php echo esc_html__( 'No allocations found for this PO yet.', 'lpr-backorder-allocator' ); ?></div>
                                         <?php endif; ?>
 
-                                        <?php foreach ( $rows as $row ) : ?>
-                                                $order_link = ! empty( $row['order_url'] ) ? '<a href="' . esc_url( (string) $row['order_url'] ) . '">' . esc_html( (string) $row['order_label'] ) . '</a>' : esc_html( (string) $row['order_label'] );
+                                        <?php foreach ( $rows as $row ) :
+                                                $order_number = (string) ( $row['order_number'] ?? '' );
+                                                $customer     = (string) ( $row['customer'] ?? '' );
+                                                $order_label  = $order_number ? sprintf( __( 'Order #%s', 'lpr-backorder-allocator' ), $order_number ) : __( 'Order', 'lpr-backorder-allocator' );
+                                                if ( $customer ) {
+                                                        $order_label .= ' — ' . $customer;
+                                                }
+
+                                                $order_link = ! empty( $row['order_url'] ) ? '<a href="' . esc_url( (string) $row['order_url'] ) . '">' . esc_html( $order_label ) . '</a>' : esc_html( $order_label );
+                                                $status     = (string) ( $row['status'] ?? '' );
                                                 ?>
                                                 <div class="lpr-card">
                                                         <h3><?php echo wp_kses_post( $order_link ); ?></h3>
-                                                        <div class="meta"><?php echo esc_html( (string) ( $row['status_label'] ?? '' ) ); ?></div>
+                                                        <div class="meta"><?php echo esc_html( $status ); ?></div>
                                                         <table>
                                                                 <thead>
                                                                         <tr>
