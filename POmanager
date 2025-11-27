@@ -78,6 +78,10 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_is_incoming_request' ) )
                         $path = trim( substr( $path, strlen( $home_path ) ), '/' );
                 }
 
+                if ( 0 === strpos( $path, 'index.php/' ) ) {
+                        $path = trim( substr( $path, strlen( 'index.php/' ) ), '/' );
+                }
+
                 return 'incoming' === $path;
         }
 }
