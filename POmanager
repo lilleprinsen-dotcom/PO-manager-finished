@@ -6706,6 +6706,29 @@ if ( ! class_exists( __NAMESPACE__ . '\Auto_PO_Allocator' ) ) {
                         return $interval;
                 }
 
+                /**
+                 * Queue a single allocation pass in the background (prefers Action Scheduler).
+                 */
+                protected static function queue_allocation_pass(): void {
+                        // Use Action Scheduler when available for async execution.
+                        if ( function_exists( 'as_enqueue_async_action' ) ) {
+                                as_enqueue_async_action( self::ACTION_HOOK, array(), 'lpr-allocator', true );
+                                return;
+                        }
+                        if ( function_exists( 'as_schedule_single_action' ) ) {
+                                if ( function_exists( 'as_next_scheduled_action' ) && as_next_scheduled_action( self::ACTION_HOOK, array(), 'lpr-allocator' ) ) {
+                                        return;
+                                }
+                                as_schedule_single_action( time() + 5, self::ACTION_HOOK, array(), 'lpr-allocator' );
+                                return;
+                        }
+
+                        // Fallback to WP-Cron single event if Action Scheduler is unavailable.
+                        if ( ! wp_next_scheduled( self::ACTION_HOOK ) ) {
+                                wp_schedule_single_event( time() + 5, self::ACTION_HOOK );
+                        }
+                }
+
                 public static function maybe_schedule( bool $force = false ): void {
                         $interval = self::get_interval();
 
@@ -6940,7 +6963,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Auto_PO_Allocator' ) ) {
                                 return;
                         }
 
-                        self::allocate_all();
+                        self::queue_allocation_pass();
                         self::maybe_schedule( true );
                 }
 
@@ -6960,7 +6983,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Auto_PO_Allocator' ) ) {
                                 lpr_allocator_remove_po_allocations_from_orders( (int) $post_id );
                         }
 
-                        self::allocate_all();
+                        self::queue_allocation_pass();
                         self::maybe_schedule( true );
                 }
         }
