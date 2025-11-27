@@ -10593,7 +10593,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Backordered_Products_Page' ) ) {
  * Admin-post handler: quick add a product to the current user's PO draft.
  */
 if ( ! class_exists( __NAMESPACE__ . '\Quick_PO_Add_Handler' ) ) {
-	class Quick_PO_Add_Handler {
+class Quick_PO_Add_Handler {
 
 		public static function init(): void {
 			add_action( 'admin_post_lpr_quick_add_to_po', array( __CLASS__, 'handle' ) );
@@ -10689,8 +10689,286 @@ if ( ! class_exists( __NAMESPACE__ . '\Quick_PO_Add_Handler' ) ) {
 			wp_safe_redirect( add_query_arg( array( 'lpr_added' => '1', 'po_id' => (int) $po_id ), $redirect ) );
 			exit;
 		}
+}
+Quick_PO_Add_Handler::init();
+}
+
+/**
+ * Lightweight customer portal for approving alternative products.
+ * - Shows product images with safe fallbacks and outgoing links.
+ * - Hides payer labels when there is no extra amount to pay.
+ * - Redirects to a confirmation view after successful approval.
+ */
+if ( ! class_exists( __NAMESPACE__ . '\Customer_Alternative_Portal' ) ) {
+	class Customer_Alternative_Portal {
+
+		public static function init(): void {
+			if ( is_admin() ) {
+				return;
+			}
+
+			add_shortcode( 'lpr_alt_portal', array( __CLASS__, 'render_portal' ) );
+			add_action( 'template_redirect', array( __CLASS__, 'handle_actions' ) );
+		}
+
+		/**
+		 * Handle approval POST requests.
+		 */
+		public static function handle_actions(): void {
+			if ( empty( $_POST['lpr_alt_action'] ) || 'approve' !== $_POST['lpr_alt_action'] ) { // phpcs:ignore WordPress.Security.NonceVerification.Missing
+				return;
+			}
+
+			$nonce = isset( $_POST['lpr_alt_nonce'] ) ? (string) $_POST['lpr_alt_nonce'] : ''; // phpcs:ignore WordPress.Security.NonceVerification.Missing
+			if ( ! wp_verify_nonce( $nonce, 'lpr_alt_portal' ) ) {
+				wp_die( esc_html__( 'Invalid request.', 'lpr-backorder-allocator' ) );
+			}
+
+			$order = self::get_order_from_request( $_POST );
+			if ( ! $order instanceof \WC_Order ) {
+				wp_die( esc_html__( 'Order not found.', 'lpr-backorder-allocator' ) );
+			}
+
+			$choice       = isset( $_POST['lpr_alt_choice'] ) ? sanitize_key( wp_unslash( $_POST['lpr_alt_choice'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Missing
+			$alternatives = self::get_alternative_options( $order );
+
+			if ( '' === $choice || ! isset( $alternatives[ $choice ] ) ) {
+				wp_die( esc_html__( 'Alternative unavailable.', 'lpr-backorder-allocator' ) );
+			}
+
+			$alt        = $alternatives[ $choice ];
+			$line_id    = isset( $alt['line_item_id'] ) ? (int) $alt['line_item_id'] : 0;
+			$product_id = isset( $alt['product_id'] ) ? (int) $alt['product_id'] : 0;
+			$qty        = isset( $alt['qty'] ) ? max( 1, (int) $alt['qty'] ) : 0;
+
+			if ( $line_id <= 0 || $product_id <= 0 ) {
+				wp_die( esc_html__( 'Invalid alternative payload.', 'lpr-backorder-allocator' ) );
+			}
+
+			$item = $order->get_item( $line_id );
+			if ( ! ( $item instanceof \WC_Order_Item_Product ) ) {
+				wp_die( esc_html__( 'Original item missing.', 'lpr-backorder-allocator' ) );
+			}
+
+			if ( $qty <= 0 ) {
+				$qty = max( 1, (int) $item->get_quantity() );
+			}
+
+			$product = function_exists( 'wc_get_product' ) ? wc_get_product( $product_id ) : null;
+			if ( ! $product instanceof \WC_Product ) {
+				wp_die( esc_html__( 'Alternative product missing.', 'lpr-backorder-allocator' ) );
+			}
+
+			$original_total   = (float) $item->get_total() + (float) $item->get_total_tax();
+			$original_qty     = max( 1, (int) $item->get_quantity() );
+			$original_unit    = $original_qty > 0 ? $original_total / $original_qty : 0.0;
+			$alternative_cost = (float) wc_get_price_including_tax( $product, array( 'qty' => $qty ) );
+			$delta            = $alternative_cost - ( $original_unit * $qty );
+
+			// Only allow approval when the alternative is the same price or cheaper.
+			if ( $delta > 0 ) {
+				wp_die( esc_html__( 'This alternative is more expensive and cannot be auto-approved.', 'lpr-backorder-allocator' ) );
+			}
+
+			// Update the order: remove the original line and add the alternative product.
+			$order->remove_item( $line_id );
+			$order->add_product( $product, $qty );
+			$order->calculate_totals( true );
+			$order->save();
+
+			// Mark alternative as accepted so it no longer shows up.
+			$alternatives[ $choice ]['status'] = 'accepted';
+			update_post_meta( $order->get_id(), '_lpr_alternative_options', $alternatives );
+
+			$redirect = add_query_arg(
+				array(
+					'lpr_alt_summary' => 1,
+					'order_id'        => $order->get_id(),
+					'key'             => $order->get_order_key(),
+				),
+				self::current_url()
+			);
+
+			wp_safe_redirect( $redirect );
+			exit;
+		}
+
+		/**
+		 * Render the portal or summary view.
+		 *
+		 * @param array $atts Shortcode attributes.
+		 */
+		public static function render_portal( array $atts = array() ): string {
+			$order = self::get_order_from_request( $_GET ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+			if ( ! $order instanceof \WC_Order ) {
+				return '<p>' . esc_html__( 'Order could not be found.', 'lpr-backorder-allocator' ) . '</p>';
+			}
+
+			if ( isset( $_GET['lpr_alt_summary'] ) && '1' === (string) $_GET['lpr_alt_summary'] ) { // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+				return self::render_summary( $order );
+			}
+
+			$alternatives = self::get_alternative_options( $order );
+			if ( empty( $alternatives ) ) {
+				return '<p>' . esc_html__( 'No alternatives are available for this order.', 'lpr-backorder-allocator' ) . '</p>';
+			}
+
+			ob_start();
+			?>
+			<style>
+				.lpr-alt-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:16px; }
+				.lpr-alt-card { border:1px solid #dcdcde; border-radius:6px; background:#fff; padding:14px; display:flex; flex-direction:column; gap:10px; box-shadow:0 1px 2px rgba(0,0,0,.06); }
+				.lpr-alt-product { display:flex; gap:12px; align-items:flex-start; }
+				.lpr-alt-thumb { width:72px; height:72px; border-radius:4px; overflow:hidden; background:#f6f7f7; display:flex; align-items:center; justify-content:center; }
+				.lpr-alt-thumb img { width:100%; height:100%; object-fit:cover; display:block; }
+				.lpr-alt-meta { font-size:13px; color:#50575e; }
+				.lpr-alt-price { font-weight:600; }
+				.lpr-alt-link { text-decoration:none; color:#2271b1; font-weight:600; }
+				.lpr-alt-link span { margin-left:4px; }
+			</style>
+			<div class="lpr-alt-grid">
+				<?php foreach ( $alternatives as $key => $alt ) :
+					if ( isset( $alt['status'] ) && 'accepted' === $alt['status'] ) {
+						continue;
+					}
+
+					$product_id = isset( $alt['product_id'] ) ? (int) $alt['product_id'] : 0;
+					$product    = $product_id > 0 && function_exists( 'wc_get_product' ) ? wc_get_product( $product_id ) : null;
+					if ( ! $product instanceof \WC_Product ) {
+						continue;
+					}
+
+					$qty           = isset( $alt['qty'] ) ? max( 1, (int) $alt['qty'] ) : 1;
+					$image_id      = $product->get_image_id();
+					$image_url     = $image_id ? wp_get_attachment_image_url( $image_id, 'medium' ) : '';
+					if ( ! $image_url ) {
+						$image_url = function_exists( 'wc_placeholder_img_src' ) ? wc_placeholder_img_src() : '';
+					}
+					$product_link  = $product->is_visible() ? get_permalink( $product_id ) : '';
+					$alt_price     = wc_price( wc_get_price_including_tax( $product, array( 'qty' => $qty ) ) );
+					$payer_amount  = isset( $alt['payer_amount'] ) ? (float) $alt['payer_amount'] : 0.0;
+					$payer_label   = '';
+
+					if ( $payer_amount > 0 ) {
+						$payer_label = isset( $alt['payer'] ) && 'store' === $alt['payer'] ? __( 'Butikk betaler', 'lpr-backorder-allocator' ) : __( 'Kunde betaler', 'lpr-backorder-allocator' );
+					}
+					?>
+					<form class="lpr-alt-card" method="post">
+						<div class="lpr-alt-product">
+							<div class="lpr-alt-thumb">
+								<?php if ( $image_url ) : ?>
+									<img src="<?php echo esc_url( $image_url ); ?>" alt="" loading="lazy" />
+								<?php endif; ?>
+							</div>
+							<div>
+								<h3 style="margin:0; font-size:16px;"> <?php echo esc_html( $product->get_name() ); ?> </h3>
+								<div class="lpr-alt-meta">
+									<span class="lpr-alt-price"><?php echo wp_kses_post( $alt_price ); ?></span>
+									<?php if ( $payer_label ) : ?>
+										<span style="display:block; margin-top:4px;"><?php echo esc_html( $payer_label ); ?></span>
+									<?php endif; ?>
+									<span style="display:block;"><?php echo esc_html( sprintf( _n( '%d unit', '%d units', $qty, 'lpr-backorder-allocator' ), $qty ) ); ?></span>
+								</div>
+								<?php if ( $product_link ) : ?>
+									<a class="lpr-alt-link" href="<?php echo esc_url( $product_link ); ?>" target="_blank" rel="noopener noreferrer">
+										<?php esc_html_e( 'View product', 'lpr-backorder-allocator' ); ?><span aria-hidden="true">↗</span>
+									</a>
+								<?php endif; ?>
+							</div>
+						</div>
+						<input type="hidden" name="lpr_alt_action" value="approve" />
+						<input type="hidden" name="lpr_alt_choice" value="<?php echo esc_attr( $key ); ?>" />
+						<input type="hidden" name="lpr_order_id" value="<?php echo esc_attr( (string) $order->get_id() ); ?>" />
+						<input type="hidden" name="lpr_order_key" value="<?php echo esc_attr( (string) $order->get_order_key() ); ?>" />
+						<?php wp_nonce_field( 'lpr_alt_portal', 'lpr_alt_nonce' ); ?>
+						<button type="submit" class="button button-primary"><?php esc_html_e( 'Approve alternative', 'lpr-backorder-allocator' ); ?></button>
+					</form>
+				<?php endforeach; ?>
+			</div>
+			<?php
+			return (string) ob_get_clean();
+		}
+
+		protected static function render_summary( \WC_Order $order ): string {
+			ob_start();
+			?>
+			<div class="lpr-alt-card" style="max-width:620px; margin:0 auto;">
+				<h2 style="margin-top:0;"><?php esc_html_e( 'Order updated', 'lpr-backorder-allocator' ); ?></h2>
+				<p><?php esc_html_e( 'Your order has been updated with the approved alternative. Here is the new total:', 'lpr-backorder-allocator' ); ?></p>
+				<p><strong><?php esc_html_e( 'New order total', 'lpr-backorder-allocator' ); ?>:</strong> <?php echo wp_kses_post( $order->get_formatted_order_total() ); ?></p>
+				<ul style="margin:0; padding-left:18px;">
+					<?php foreach ( $order->get_items() as $item ) : ?>
+						<li><?php echo esc_html( sprintf( '%s × %d', $item->get_name(), (int) $item->get_quantity() ) ); ?></li>
+					<?php endforeach; ?>
+				</ul>
+			</div>
+			<?php
+			return (string) ob_get_clean();
+		}
+
+		/**
+		 * Resolve the order based on id + key from request data.
+		 *
+		 * @param array $source Request source.
+		 */
+		protected static function get_order_from_request( $source ) {
+			$order_id = isset( $source['order_id'] ) ? absint( $source['order_id'] ) : ( isset( $source['lpr_order_id'] ) ? absint( $source['lpr_order_id'] ) : 0 );
+			$key      = isset( $source['key'] ) ? (string) $source['key'] : ( isset( $source['lpr_order_key'] ) ? (string) $source['lpr_order_key'] : '' );
+
+			if ( $order_id <= 0 || '' === $key ) {
+				return null;
+			}
+
+			$order = function_exists( 'wc_get_order' ) ? wc_get_order( $order_id ) : null;
+			if ( ! $order instanceof \WC_Order ) {
+				return null;
+			}
+
+			if ( $order->get_order_key() !== $key ) {
+				return null;
+			}
+
+			return $order;
+		}
+
+		/**
+		 * Fetch alternative options from order meta with strong defaults.
+		 */
+		protected static function get_alternative_options( \WC_Order $order ): array {
+			$raw = get_post_meta( $order->get_id(), '_lpr_alternative_options', true );
+			if ( ! is_array( $raw ) ) {
+				return array();
+			}
+
+			$clean = array();
+			foreach ( $raw as $key => $entry ) {
+				if ( ! is_array( $entry ) ) {
+					continue;
+				}
+
+				$cid           = sanitize_key( (string) $key );
+				$clean[ $cid ] = array(
+					'product_id'   => isset( $entry['product_id'] ) ? (int) $entry['product_id'] : 0,
+					'line_item_id'  => isset( $entry['line_item_id'] ) ? (int) $entry['line_item_id'] : 0,
+					'qty'           => isset( $entry['qty'] ) ? max( 1, (int) $entry['qty'] ) : 1,
+					'payer'         => isset( $entry['payer'] ) && 'store' === $entry['payer'] ? 'store' : 'customer',
+					'payer_amount'  => isset( $entry['payer_amount'] ) ? max( 0, (float) $entry['payer_amount'] ) : 0.0,
+					'status'        => isset( $entry['status'] ) ? sanitize_key( (string) $entry['status'] ) : '',
+				);
+			}
+
+			return $clean;
+		}
+
+		protected static function current_url(): string {
+			$scheme = ( ! empty( $_SERVER['HTTPS'] ) && 'off' !== $_SERVER['HTTPS'] ) ? 'https' : 'http';
+			$host   = isset( $_SERVER['HTTP_HOST'] ) ? (string) $_SERVER['HTTP_HOST'] : '';
+			$uri    = isset( $_SERVER['REQUEST_URI'] ) ? (string) $_SERVER['REQUEST_URI'] : '';
+
+			return esc_url_raw( $scheme . '://' . $host . $uri );
+		}
 	}
-	Quick_PO_Add_Handler::init();
+	Customer_Alternative_Portal::init();
 }
 
 /* SELF-CHECK:
