@@ -66,6 +66,22 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_frontend_incoming_enable
         }
 }
 
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_is_incoming_request' ) ) {
+        /**
+         * Detect the public /incoming path while avoiding other pages.
+         */
+        function lpr_allocator_is_incoming_request(): bool {
+                $requested_path = isset( $_SERVER['REQUEST_URI'] ) ? (string) $_SERVER['REQUEST_URI'] : '';
+                $path           = trim( (string) wp_parse_url( $requested_path, PHP_URL_PATH ), '/' );
+                $home_path      = trim( (string) wp_parse_url( home_url( '/' ), PHP_URL_PATH ), '/' );
+                if ( '' !== $home_path && 0 === strpos( $path, $home_path ) ) {
+                        $path = trim( substr( $path, strlen( $home_path ) ), '/' );
+                }
+
+                return 'incoming' === $path;
+        }
+}
+
 if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
 	/**
 	 * Settings storage & helpers.
@@ -443,7 +459,11 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                 array(
                                         'title' => __( 'Incoming PIN access', 'lpr-backorder-allocator' ),
                                         'type'  => 'title',
-                                        'desc'  => __( 'Secure the /incoming mobile dashboard with per-user 4-digit PINs.', 'lpr-backorder-allocator' ),
+                                        'desc'  => sprintf(
+                                                /* translators: %s: link to the /incoming mobile dashboard */
+                                                __( 'Secure the /incoming mobile dashboard with per-user 4-digit PINs. Launch: %s', 'lpr-backorder-allocator' ),
+                                                sprintf( '<a href="%1$s" target="_blank" rel="noopener">%1$s</a>', esc_url( home_url( '/incoming' ) ) )
+                                        ),
                                         'id'    => 'lpr_allocator_section_incoming_mobile',
                                 ),
 
@@ -1485,7 +1505,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Cart' ) ) {
         Incoming_Stock_Cart::init();
 }
 
-if ( ! is_admin() && ! wp_doing_cron() ) {
+if ( ! is_admin() && ! wp_doing_cron() && ! lpr_allocator_is_incoming_request() ) {
         return;
 }
 
@@ -2656,8 +2676,8 @@ table.appendChild(tr);
 */
 namespace LPR\Allocator;
 
-if ( ! is_admin() && ! wp_doing_cron() ) {
-	return;
+if ( ! is_admin() && ! wp_doing_cron() && ! lpr_allocator_is_incoming_request() ) {
+        return;
 }
 
 if ( ! class_exists( __NAMESPACE__ . '\Backorder' ) ) {
@@ -5261,8 +5281,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Requested_Delivery_Date_Box' ) ) {
 */
 namespace LPR\Allocator;
 
-if ( ! is_admin() && ! wp_doing_cron() ) {
-	return;
+if ( ! is_admin() && ! wp_doing_cron() && ! lpr_allocator_is_incoming_request() ) {
+        return;
 }
 
 if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_product_option_label' ) ) {
@@ -5549,8 +5569,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Supplier_PO_Live_Product_UI' ) ) {
 */
 namespace LPR\Allocator;
 
-if ( ! is_admin() && ! wp_doing_cron() ) {
-	return;
+if ( ! is_admin() && ! wp_doing_cron() && ! lpr_allocator_is_incoming_request() ) {
+        return;
 }
 
 if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_calc_backorder_need' ) ) {
@@ -8117,8 +8137,8 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Overview' ) ) {
 */
 namespace LPR\Allocator;
 
-if ( ! is_admin() && ! wp_doing_cron() ) {
-	return;
+if ( ! is_admin() && ! wp_doing_cron() && ! lpr_allocator_is_incoming_request() ) {
+        return;
 }
 
 /**
@@ -11435,14 +11455,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
                  * Detect the /incoming path while avoiding other pages.
                  */
                 protected static function is_incoming_request(): bool {
-                        $requested_path = isset( $_SERVER['REQUEST_URI'] ) ? (string) $_SERVER['REQUEST_URI'] : '';
-                        $path           = trim( (string) wp_parse_url( $requested_path, PHP_URL_PATH ), '/' );
-                        $home_path      = trim( (string) wp_parse_url( home_url( '/' ), PHP_URL_PATH ), '/' );
-                        if ( '' !== $home_path && 0 === strpos( $path, $home_path ) ) {
-                                $path = trim( substr( $path, strlen( $home_path ) ), '/' );
-                        }
-
-                        return 'incoming' === $path;
+                        return function_exists( __NAMESPACE__ . '\\lpr_allocator_is_incoming_request' ) ? lpr_allocator_is_incoming_request() : false;
                 }
 
                 protected static function allowed_users(): array {
