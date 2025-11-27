@@ -2684,10 +2684,32 @@ if ( ! is_admin() && ! wp_doing_cron() && ! lpr_allocator_is_incoming_request() 
         return;
 }
 
+/**
+ * Common list of order item meta keys WooCommerce may use to store backordered qty.
+ * Includes localized versions of the "Backordered" label because WC stores the translated
+ * string as the meta key on non-English stores.
+ */
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_get_backordered_meta_keys' ) ) {
+        function lpr_allocator_get_backordered_meta_keys(): array {
+                $keys       = array( 'Backordered', '_backordered', 'backordered' );
+                $translated = __( 'Backordered', 'woocommerce' );
+                $translator = function_exists( 'wc_strtolower' ) ? 'wc_strtolower' : 'strtolower';
+                $translated2 = $translator( $translated );
+
+                foreach ( array( $translated, $translated2 ) as $maybe_key ) {
+                        if ( is_string( $maybe_key ) && '' !== $maybe_key ) {
+                                $keys[] = $maybe_key;
+                        }
+                }
+
+                return array_values( array_unique( array_filter( array_map( 'strval', $keys ) ) ) );
+        }
+}
+
 if ( ! class_exists( __NAMESPACE__ . '\Backorder' ) ) {
-	/**
-	 * Backorder detection utilities.
-	 */
+        /**
+         * Backorder detection utilities.
+         */
 	class Backorder {
 
 		/**
@@ -2735,16 +2757,21 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder' ) ) {
                                 return false;
                         }
 
-			$qty = max( 0, (int) $item->get_quantity() );
+                        $qty = max( 0, (int) $item->get_quantity() );
 
-			// Detect backordered amount from item meta if present.
-			$meta_backordered = 0;
-			foreach ( array( 'Backordered', '_backordered', 'backordered' ) as $k ) {
-				$v = $item->get_meta( $k, true );
-				if ( '' !== $v && null !== $v ) {
-					$meta_backordered = max( $meta_backordered, (int) $v );
-				}
-			}
+                        // Detect backordered amount from item meta if present.
+                        $meta_backordered = 0;
+                        foreach ( lpr_allocator_get_backordered_meta_keys() as $k ) {
+                                $v = $item->get_meta( $k, true );
+                                if ( '' !== $v && null !== $v ) {
+                                        $meta_backordered = max( $meta_backordered, (int) $v );
+                                }
+                        }
+
+                        // Fallback: if WC recorded the line as on backorder but localized the meta key differently.
+                        if ( 0 === $meta_backordered && method_exists( $product, 'is_on_backorder' ) && $product->is_on_backorder( $qty ) ) {
+                                $meta_backordered = $qty;
+                        }
 
                         return ( $meta_backordered > 0 );
                 }
@@ -5599,12 +5626,15 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_calc_backorder_need' ) )
                 if ( $force_qty > 0 ) {
                         $desired = min( $qty, $force_qty );
                 }
-                foreach ( array( 'Backordered', '_backordered', 'backordered' ) as $k ) {
+                foreach ( lpr_allocator_get_backordered_meta_keys() as $k ) {
                         $v = $item->get_meta( $k, true );
                         if ( '' !== $v && null !== $v ) {
                                 $desired = max( $desired, (int) $v );
                         }
-		}
+                }
+                if ( 0 === $desired && method_exists( $product, 'is_on_backorder' ) && $product->is_on_backorder( $qty ) ) {
+                        $desired = $qty;
+                }
                 // Subtract existing active allocations (non-released).
                 $allocs = $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_ALLOCATIONS' ) ? ORDER_ITEM_META_ALLOCATIONS : 'lpr_allocations', true );
 		$allocated_active = 0;
@@ -8282,12 +8312,15 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_calc_backorder_desired' 
 		}
 
 		$desired = 0;
-		foreach ( array( 'Backordered', '_backordered', 'backordered' ) as $k ) {
-			$v = $item->get_meta( $k, true );
-			if ( '' !== $v && null !== $v ) {
-				$desired = max( $desired, (int) $v );
-			}
-		}
+                foreach ( lpr_allocator_get_backordered_meta_keys() as $k ) {
+                        $v = $item->get_meta( $k, true );
+                        if ( '' !== $v && null !== $v ) {
+                                $desired = max( $desired, (int) $v );
+                        }
+                }
+                if ( 0 === $desired && method_exists( $product, 'is_on_backorder' ) && $product->is_on_backorder( $qty ) ) {
+                        $desired = $qty;
+                }
                 // Safety clamp to the line quantity.
                 return min( $desired, $qty );
         }
