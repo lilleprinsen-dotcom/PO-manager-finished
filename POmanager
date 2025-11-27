@@ -5591,14 +5591,15 @@ if ( ! is_admin() && ! wp_doing_cron() && ! lpr_allocator_is_incoming_request() 
 }
 
 if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_calc_backorder_need' ) ) {
-	/**
-	 * Calculate remaining backordered qty for an order item (ledger-aware).
-	 * Uses item meta "Backordered" when present; otherwise assumes full line qty if product reports on-backorder.
-	 *
-	 * @param \WC_Order_Item_Product $item
-	 * @return int Remaining units needing allocation (>=0).
-	 */
-	function lpr_allocator_calc_backorder_need( \WC_Order_Item_Product $item ): int {
+/**
+ * Calculate remaining backordered qty for an order item (ledger-aware).
+ * Uses forced-allocation meta or recorded Backordered quantity from order time;
+ * ignores live product stock state.
+ *
+ * @param \WC_Order_Item_Product $item
+ * @return int Remaining units needing allocation (>=0).
+ */
+        function lpr_allocator_calc_backorder_need( \WC_Order_Item_Product $item ): int {
                 if ( ! $item instanceof \WC_Order_Item_Product ) {
                         return 0;
                 }
@@ -8263,7 +8264,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Overview' ) ) {
   - Adds private order notes and batches ETA recompute via ETA::update_line_eta() for affected orders.
   - Uses wc_get_orders with pagination and returns IDs (no wildcard meta_query). Per-SKU transient lock to avoid contention.
 - Added PO_Allocate_Button_UI (new class) to render "Allocate" button on PO edit and show admin notices.
-- New helper function lpr_allocator_calc_backorder_need() (guarded) to compute remaining needed qty per item using Backordered meta or on_backorder fallback minus active allocations.
+- New helper function lpr_allocator_calc_backorder_need() (guarded) to compute remaining needed qty per item using Backordered meta/forced allocations minus active allocations.
 - All declarations are new & guarded; used Woo CRUD only; respects admin/cron-only early return; frontend remains untouched.
 */
 namespace LPR\Allocator;
@@ -8275,6 +8276,10 @@ if ( ! is_admin() && ! wp_doing_cron() && ! lpr_allocator_is_incoming_request() 
 /**
  * Helper: compute the "desired" backordered quantity for a line item.
  * Mirrors the logic used by lpr_allocator_calc_backorder_need(), but without subtracting allocations.
+ *
+ * Only uses order-time backorder indicators (forced allocation meta or the
+ * recorded Backordered quantity). Live product stock state is deliberately
+ * ignored so we don't misclassify lines placed while inventory was available.
  */
 if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_calc_backorder_desired' ) ) {
         function lpr_allocator_calc_backorder_desired( \WC_Order_Item_Product $item ): int {
@@ -8291,11 +8296,6 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_calc_backorder_desired' 
                 $force_qty  = (int) $item->get_meta( defined( __NAMESPACE__ . '\\ORDER_ITEM_META_FORCE_ALLOCATION' ) ? ORDER_ITEM_META_FORCE_ALLOCATION : '_lpr_force_allocation', true );
                 $meta_back  = class_exists( __NAMESPACE__ . '\\Backorder' ) ? Backorder::get_backordered_qty( $item ) : 0;
                 $desired    = max( $force_qty, $meta_back );
-
-                // Fallback: if the product still reports on-backorder, assume the full line qty.
-                if ( $desired <= 0 && method_exists( $product, 'is_on_backorder' ) && $product->is_on_backorder( $qty ) ) {
-                        $desired = $qty;
-                }
 
                 // Safety clamp to the line quantity.
                 return min( $desired, $qty );
