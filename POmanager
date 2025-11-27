@@ -4078,9 +4078,13 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_VIP_Prioritizer' ) ) {
                                         continue;
                                 }
 
-                                $order_qty      = max( 0, (int) $item->get_quantity() );
+                                $desired_total  = function_exists( __NAMESPACE__ . '\lpr_allocator_calc_backorder_desired' ) ? lpr_allocator_calc_backorder_desired( $item ) : max( 0, (int) $item->get_quantity() );
+                                if ( $desired_total <= 0 ) {
+                                        continue;
+                                }
+
                                 $allocated      = function_exists( __NAMESPACE__ . '\lpr_allocator_get_item_allocated_active' ) ? lpr_allocator_get_item_allocated_active( $item ) : 0;
-                                $missing        = max( 0, $order_qty - $allocated );
+                                $missing        = function_exists( __NAMESPACE__ . '\lpr_allocator_calc_backorder_need' ) ? lpr_allocator_calc_backorder_need( $item ) : max( 0, $desired_total - $allocated );
                                 $earliest_in    = lpr_allocator_sanitize_ymd( (string) ( $incoming[0]['eta'] ?? '' ) );
                                 $current_earlie = self::item_earliest_eta( $item );
 
@@ -4318,9 +4322,13 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_VIP_Prioritizer' ) ) {
 
                                 $available_sources = self::list_borrowable_sources( $normalized );
 
-                                $order_qty = max( 0, (int) $item->get_quantity() );
-                                $current   = function_exists( __NAMESPACE__ . '\lpr_allocator_get_item_allocated_active' ) ? lpr_allocator_get_item_allocated_active( $item ) : 0;
-                                $missing   = max( 0, $order_qty - $current );
+                                $desired_total = function_exists( __NAMESPACE__ . '\lpr_allocator_calc_backorder_desired' ) ? lpr_allocator_calc_backorder_desired( $item ) : max( 0, (int) $item->get_quantity() );
+                                if ( $desired_total <= 0 ) {
+                                        continue;
+                                }
+
+                                $current = function_exists( __NAMESPACE__ . '\lpr_allocator_get_item_allocated_active' ) ? lpr_allocator_get_item_allocated_active( $item ) : 0;
+                                $missing = function_exists( __NAMESPACE__ . '\lpr_allocator_calc_backorder_need' ) ? lpr_allocator_calc_backorder_need( $item ) : max( 0, $desired_total - $current );
 
                                 // Aim to fill earliest PO first.
                                 $first      = $normalized[0];
@@ -4330,7 +4338,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_VIP_Prioritizer' ) ) {
                                 foreach ( $first['borrowable'] as $row ) {
                                         $first_supply += $row['qty'];
                                 }
-                                $desired_first = max( 0, min( $order_qty, $vip_on_first + $first_supply ) - $vip_on_first );
+                                $desired_first = max( 0, min( $desired_total, $vip_on_first + $first_supply ) - $vip_on_first );
                                 $needed        = max( $missing, $desired_first );
 
                                 $displaced      = array();
@@ -4361,7 +4369,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_VIP_Prioritizer' ) ) {
                                         continue;
                                 }
 
-                                $release_qty = max( 0, ( $current + $new_qty ) - $order_qty );
+                                $release_qty = max( 0, ( $current + $new_qty ) - $desired_total );
 
                                 // Reassign displaced orders to later POs/backorder using remaining free stock.
                                 $reassignments = self::reassign_displaced( $displaced, $normalized );
