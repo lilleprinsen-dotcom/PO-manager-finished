@@ -8865,12 +8865,13 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Integrity_Checker' ) ) {
                                 }
 
                                 $order_status = $order->get_status();
-                                $order_status = is_string( $order_status ) ? $order_status : '';
+                                $order_status = is_string( $order_status ) ? sanitize_key( $order_status ) : '';
                                 $is_live      = in_array( $order_status, $allowed_statuses, true );
+                                $is_completed = ( 'completed' === $order_status );
 
                                 $changed = false;
 
-                                if ( ! $is_live ) {
+                                if ( ! $is_live && ! $is_completed ) {
                                         foreach ( $allocs as &$alloc_row ) {
                                                 $status = isset( $alloc_row['status'] ) ? sanitize_key( (string) $alloc_row['status'] ) : 'reserved';
                                                 $qty    = isset( $alloc_row['qty_allocated'] ) ? max( 0, (int) $alloc_row['qty_allocated'] ) : 0;
@@ -8881,7 +8882,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Integrity_Checker' ) ) {
                                                 $changed = true;
                                         }
                                         unset( $alloc_row );
-                                } else {
+                                } elseif ( $is_live ) {
                                         $desired = function_exists( __NAMESPACE__ . '\lpr_allocator_calc_backorder_desired' ) ? lpr_allocator_calc_backorder_desired( $item ) : max( 0, (int) $item->get_quantity() );
                                         $cap     = min( max( 0, (int) $item->get_quantity() ), max( 0, (int) $desired ) );
 
@@ -8946,10 +8947,11 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Integrity_Checker' ) ) {
                                                                 $allocs[ $idx ]['qty_allocated'] = $current_qty - $release_qty;
                                                         }
 
-                                                        $over    -= $release_qty;
-                                                        $changed = true;
-                                                }
+                                                $over    -= $release_qty;
+                                                $changed = true;
                                         }
+                                } elseif ( $is_completed ) {
+                                        // Preserve existing allocations on completed orders without seeking new ones.
                                 }
 
                                 if ( ! $changed ) {
