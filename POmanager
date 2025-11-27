@@ -9536,6 +9536,14 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Order_Indexer' ) ) {
                 }
 
                 public static function queue_rebuild( ...$args ): void {
+                        // Avoid flooding Action Scheduler with duplicate async jobs.
+                        if (
+                                function_exists( 'as_has_scheduled_action' )
+                                && as_has_scheduled_action( self::ACTION_BUILD, array(), 'lpr-allocator' )
+                        ) {
+                                return;
+                        }
+
                         if ( function_exists( 'as_enqueue_async_action' ) ) {
                                 as_enqueue_async_action( self::ACTION_BUILD, array(), 'lpr-allocator' );
                         } elseif ( function_exists( 'as_schedule_single_action' ) ) {
