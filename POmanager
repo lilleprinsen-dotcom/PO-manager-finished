@@ -2693,10 +2693,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder' ) ) {
 		/**
 		 * Determine if an order item needs allocation.
 		 *
-		 * True when:
+                 * True when:
                  * - Order status ∈ settings order_statuses, and
-                 * - Product allows backorders, and
-                 * - Order item meta "Backordered" > 0 (force allocation meta bypasses this)
+                 * - Order item meta "Backordered" (or its translated/raw variants) > 0
+                 *   (force allocation meta bypasses this)
 		 *
 		 * @param \WC_Order_Item_Product $item
 		 * @return bool
@@ -2721,32 +2721,47 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder' ) ) {
 				return false;
 			}
 
-			$product = $item->get_product();
-                        if ( ! $product instanceof \WC_Product ) {
-                                return false;
-                        }
-
                         $force_qty = (int) $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_FORCE_ALLOCATION' ) ? ORDER_ITEM_META_FORCE_ALLOCATION : '_lpr_force_allocation', true );
                         if ( $force_qty > 0 ) {
                                 return true;
                         }
 
-                        if ( ! method_exists( $product, 'backorders_allowed' ) || ! $product->backorders_allowed() ) {
-                                return false;
-                        }
-
-			$qty = max( 0, (int) $item->get_quantity() );
-
-			// Detect backordered amount from item meta if present.
-			$meta_backordered = 0;
-			foreach ( array( 'Backordered', '_backordered', 'backordered' ) as $k ) {
-				$v = $item->get_meta( $k, true );
-				if ( '' !== $v && null !== $v ) {
-					$meta_backordered = max( $meta_backordered, (int) $v );
-				}
-			}
+                        // Detect backordered amount from order-time meta, not current product stock state.
+                        $meta_backordered = self::get_backordered_qty( $item );
 
                         return ( $meta_backordered > 0 );
+                }
+
+                /**
+                 * Determine the backordered quantity recorded on the line item.
+                 *
+                 * Uses both the raw meta keys and the localized WooCommerce label
+                 * to catch translated stores (e.g., Norwegian "Restbestilt").
+                 *
+                 * @param \WC_Order_Item_Product $item
+                 * @return int
+                 */
+                protected static function get_backordered_qty( \WC_Order_Item_Product $item ): int {
+                        if ( ! $item instanceof \WC_Order_Item_Product ) {
+                                return 0;
+                        }
+
+                        $localized = __( 'Backordered', 'woocommerce' );
+                        $keys      = array( 'Backordered', '_backordered', 'backordered' );
+
+                        if ( is_string( $localized ) && '' !== $localized && ! in_array( $localized, $keys, true ) ) {
+                                $keys[] = $localized;
+                        }
+
+                        $meta_backordered = 0;
+                        foreach ( array_unique( $keys ) as $k ) {
+                                $v = $item->get_meta( $k, true );
+                                if ( '' !== $v && null !== $v ) {
+                                        $meta_backordered = max( $meta_backordered, (int) $v );
+                                }
+                        }
+
+                        return max( 0, $meta_backordered );
                 }
         }
 }
