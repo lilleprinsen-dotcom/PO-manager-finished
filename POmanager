@@ -1398,10 +1398,13 @@ if ( ! defined( __NAMESPACE__ . '\PO_META_SUPPLIER_NAME' ) ) {
 	define( __NAMESPACE__ . '\PO_META_SUPPLIER_NAME', '_lpr_supplier_name' );
 }
 if ( ! defined( __NAMESPACE__ . '\PO_META_PO_NUMBER' ) ) {
-	define( __NAMESPACE__ . '\PO_META_PO_NUMBER', '_lpr_po_number' );
+        define( __NAMESPACE__ . '\PO_META_PO_NUMBER', '_lpr_po_number' );
 }
 if ( ! defined( __NAMESPACE__ . '\PO_META_ETA_DATE' ) ) {
         define( __NAMESPACE__ . '\PO_META_ETA_DATE', '_lpr_eta_date' ); // d-m-Y
+}
+if ( ! defined( __NAMESPACE__ . '\PO_META_NOTE' ) ) {
+        define( __NAMESPACE__ . '\PO_META_NOTE', '_lpr_po_note' );
 }
 if ( ! defined( __NAMESPACE__ . '\PO_META_LINES' ) ) {
         define( __NAMESPACE__ . '\PO_META_LINES', '_lpr_po_lines' );
@@ -2232,20 +2235,22 @@ if ( ! class_exists( __NAMESPACE__ . '\Supplier_PO_CPT' ) ) {
                         $supplier  = get_post_meta( $post->ID, PO_META_SUPPLIER_NAME, true );
                         $po_number = get_post_meta( $post->ID, PO_META_PO_NUMBER, true );
                         $eta       = lpr_allocator_sanitize_ymd( (string) get_post_meta( $post->ID, PO_META_ETA_DATE, true ) );
-			$status    = in_array( $post->post_status, array( PO_STATUS_OPEN, PO_STATUS_PARTIAL, PO_STATUS_CLOSED ), true ) ? $post->post_status : PO_STATUS_OPEN;
+                        $note      = (string) get_post_meta( $post->ID, PO_META_NOTE, true );
+                        $status    = in_array( $post->post_status, array( PO_STATUS_OPEN, PO_STATUS_PARTIAL, PO_STATUS_CLOSED ), true ) ? $post->post_status : PO_STATUS_OPEN;
 
-			?>
+                        ?>
                         <style>
                                 #lpr_po_header .lpr-grid { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
                                 #lpr_po_header .lpr-grid .field { display:flex; flex-direction:column; }
                                 #lpr_po_header input[type="text"], #lpr_po_header select { max-width: 420px; }
                                 #lpr_po_header .lpr-grid .form-field { display:flex; flex-direction:column; margin:0; }
                                 #lpr_po_header .lpr-grid .form-field .short { max-width: 420px; }
+                                #lpr_po_header .lpr-grid .field-note { grid-column: 1 / -1; }
                         </style>
-			<div class="lpr-grid">
-				<div class="field">
-					<label for="lpr_supplier_name"><strong><?php echo esc_html__( 'Supplier Name', 'lpr-backorder-allocator' ); ?></strong></label>
-					<input type="text" id="lpr_supplier_name" name="lpr_supplier_name" value="<?php echo esc_attr( (string) $supplier ); ?>" />
+                        <div class="lpr-grid">
+                                <div class="field">
+                                        <label for="lpr_supplier_name"><strong><?php echo esc_html__( 'Supplier Name', 'lpr-backorder-allocator' ); ?></strong></label>
+                                        <input type="text" id="lpr_supplier_name" name="lpr_supplier_name" value="<?php echo esc_attr( (string) $supplier ); ?>" />
 				</div>
 				<div class="field">
 					<label for="lpr_po_number"><strong><?php echo esc_html__( 'PO Number', 'lpr-backorder-allocator' ); ?></strong></label>
@@ -2285,13 +2290,18 @@ if ( ! class_exists( __NAMESPACE__ . '\Supplier_PO_CPT' ) ) {
 								selected( $status, $val, false ),
 								esc_html( $label )
 							);
-						}
-						?>
-					</select>
-				</div>
-			</div>
-			<?php
-		}
+                                                }
+                                                ?>
+                                        </select>
+                                </div>
+                                <div class="field field-note">
+                                        <label for="lpr_po_note"><strong><?php echo esc_html__( 'PO Note', 'lpr-backorder-allocator' ); ?></strong></label>
+                                        <textarea id="lpr_po_note" name="lpr_po_note" rows="3" style="max-width:700px; width:100%;"><?php echo esc_textarea( $note ); ?></textarea>
+                                        <p class="description"><?php echo esc_html__( 'Add internal notes about this purchase order (kept in the admin only).', 'lpr-backorder-allocator' ); ?></p>
+                                </div>
+                        </div>
+                        <?php
+                }
 
 		public static function render_lines_metabox( \WP_Post $post ): void {
 			if ( ! current_user_can( 'manage_woocommerce' ) ) {
@@ -2413,14 +2423,16 @@ table.appendChild(tr);
 
 			// Header save.
 			if ( isset( $_POST['lpr_po_header_nonce'] ) && wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['lpr_po_header_nonce'] ) ), 'lpr_po_header_action' ) ) {
-				$supplier  = isset( $_POST['lpr_supplier_name'] ) ? sanitize_text_field( wp_unslash( $_POST['lpr_supplier_name'] ) ) : '';
-				$po_number = isset( $_POST['lpr_po_number'] ) ? sanitize_text_field( wp_unslash( $_POST['lpr_po_number'] ) ) : '';
-				$eta       = isset( $_POST['lpr_eta_date'] ) ? lpr_allocator_sanitize_ymd( wp_unslash( $_POST['lpr_eta_date'] ) ) : '';
-				$status    = isset( $_POST['lpr_po_status'] ) ? sanitize_key( wp_unslash( $_POST['lpr_po_status'] ) ) : PO_STATUS_OPEN;
+                                $supplier  = isset( $_POST['lpr_supplier_name'] ) ? sanitize_text_field( wp_unslash( $_POST['lpr_supplier_name'] ) ) : '';
+                                $po_number = isset( $_POST['lpr_po_number'] ) ? sanitize_text_field( wp_unslash( $_POST['lpr_po_number'] ) ) : '';
+                                $eta       = isset( $_POST['lpr_eta_date'] ) ? lpr_allocator_sanitize_ymd( wp_unslash( $_POST['lpr_eta_date'] ) ) : '';
+                                $note      = isset( $_POST['lpr_po_note'] ) ? sanitize_textarea_field( wp_unslash( $_POST['lpr_po_note'] ) ) : '';
+                                $status    = isset( $_POST['lpr_po_status'] ) ? sanitize_key( wp_unslash( $_POST['lpr_po_status'] ) ) : PO_STATUS_OPEN;
 
-				update_post_meta( $post_id, PO_META_SUPPLIER_NAME, $supplier );
-				update_post_meta( $post_id, PO_META_PO_NUMBER, $po_number );
-				update_post_meta( $post_id, PO_META_ETA_DATE, $eta );
+                                update_post_meta( $post_id, PO_META_SUPPLIER_NAME, $supplier );
+                                update_post_meta( $post_id, PO_META_PO_NUMBER, $po_number );
+                                update_post_meta( $post_id, PO_META_ETA_DATE, $eta );
+                                update_post_meta( $post_id, PO_META_NOTE, $note );
 
 				$allowed_status = array( PO_STATUS_OPEN, PO_STATUS_PARTIAL, PO_STATUS_CLOSED );
 				if ( in_array( $status, $allowed_status, true ) && $post->post_status !== $status ) {
@@ -10349,6 +10361,31 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
             return $rows;
         }
 
+        /**
+         * Normalize PO lines meta so the bulk editor can render any stored format.
+         *
+         * @param mixed $raw Raw meta value from get_post_meta.
+         * @return array
+         */
+        protected static function normalize_po_lines_meta( $raw ): array {
+            if ( is_array( $raw ) ) {
+                return $raw;
+            }
+
+            if ( is_string( $raw ) ) {
+                $decoded = json_decode( $raw, true );
+                if ( is_array( $decoded ) ) {
+                    return $decoded;
+                }
+            }
+
+            if ( is_object( $raw ) && isset( $raw->lines ) && is_array( $raw->lines ) ) {
+                return $raw->lines;
+            }
+
+            return array();
+        }
+
         protected static function has_new_payload( array $data ): bool {
             if ( ! empty( $data['title'] ) || ! empty( $data['supplier'] ) || ! empty( $data['po_number'] ) || ! empty( $data['eta'] ) ) {
                 return true;
@@ -10384,9 +10421,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
                 }
 
                 $lines = get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', true );
-                if ( ! is_array( $lines ) ) {
-                    $lines = array();
-                }
+                $lines = self::normalize_po_lines_meta( $lines );
 
                 foreach ( $lines as &$line ) {
                     $target = isset( $line['variation_id'] ) && (int) $line['variation_id'] > 0 ? (int) $line['variation_id'] : (int) ( $line['product_id'] ?? 0 );
@@ -10557,7 +10592,13 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
                                 <div class="lpr-po-bulk-card">
                                     <div class="lpr-po-bulk-card__header">
                                         <div>
-                                            <strong><?php echo esc_html( sprintf( __( 'PO #%1$s', 'lpr-backorder-allocator' ), $row['po_number'] ? $row['po_number'] : $po_key ) ); ?></strong>
+                                            <?php
+                                            $po_title = $row['post'] instanceof \WP_Post ? (string) $row['post']->post_title : '';
+                                            if ( '' === $po_title ) {
+                                                $po_title = sprintf( __( 'PO #%1$s', 'lpr-backorder-allocator' ), $row['po_number'] ? $row['po_number'] : $po_key );
+                                            }
+                                            ?>
+                                            <strong><?php echo esc_html( $po_title ); ?></strong>
                                             <span class="lpr-po-bulk-chip"><?php echo esc_html( sprintf( __( 'Status: %s', 'lpr-backorder-allocator' ), $row['current_label'] ) ); ?></span>
                                         </div>
                                         <div class="lpr-po-bulk-card__meta">
