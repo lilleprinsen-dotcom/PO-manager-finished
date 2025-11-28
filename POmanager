@@ -5962,7 +5962,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_FIFO_Allocator' ) ) {
                         // but is later than their current allocation. Only move stock when it frees earlier supply that can serve
                         // unallocated orders or improve later ETAs.
                         if ( $remaining_for_line > 0 && '' !== $eta_for_line ) {
-                                $realloc_candidates = self::collect_reallocation_candidates( $target_product_or_variation_id, $eta_for_line );
+                                $realloc_candidates = self::collect_reallocation_candidates( $target_product_or_variation_id, $eta_for_line, $remaining_for_line );
 
                                 foreach ( $realloc_candidates as $candidate ) {
                                         if ( $remaining_for_line <= 0 ) {
@@ -6271,9 +6271,10 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_FIFO_Allocator' ) ) {
                  *
                  * @param int    $target_id
                  * @param string $po_eta_for_line
+                 * @param int    $max_qty Optional quantity cap for early exit once enough stock is found.
                  * @return array[]
                  */
-                protected static function collect_reallocation_candidates( int $target_id, string $po_eta_for_line ): array {
+                protected static function collect_reallocation_candidates( int $target_id, string $po_eta_for_line, int $max_qty = 0 ): array {
                         if ( '' === $po_eta_for_line ) {
                                 return array();
                         }
@@ -6284,9 +6285,12 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_FIFO_Allocator' ) ) {
                                 $statuses[] = 'wc-' . preg_replace( '/^wc-/', '', sanitize_key( $st ) );
                         }
 
-                        $candidates = array();
-                        $page       = 1;
-                        $limit      = 50;
+                        $candidates      = array();
+                        $page            = 1;
+                        $limit           = 50;
+                        $collected_qty   = 0;
+                        $should_cap_qty  = $max_qty > 0;
+                        $should_continue = true;
 
                         do {
                                 $args = array(
@@ -6348,18 +6352,29 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_FIFO_Allocator' ) ) {
                                                         continue;
                                                 }
 
+                                                $qty_for_item = (int) $summary['total_qty'];
+
                                                 $candidates[] = array(
                                                         'order_id'        => (int) $oid,
                                                         'item_id'         => (int) $item->get_id(),
-                                                        'qty'             => (int) $summary['total_qty'],
+                                                        'qty'             => $qty_for_item,
                                                         'earliest_eta'    => $summary['earliest_eta'],
                                                         'backorder_lines' => $backorder_lines,
                                                 );
-                                        }
-                                }
 
-                                $page++;
-                        } while ( count( $order_ids ) === $limit );
+                                                if ( $should_cap_qty ) {
+                                                        $collected_qty += $qty_for_item;
+
+                                                        if ( $collected_qty >= $max_qty ) {
+                                                                $should_continue = false;
+                                                                break 2;
+                                                        }
+                                                }
+                                          }
+                                  }
+
+                                  $page++;
+                        } while ( $should_continue && count( $order_ids ) === $limit );
 
                         return $candidates;
                 }
