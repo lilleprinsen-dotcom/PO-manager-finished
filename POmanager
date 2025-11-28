@@ -11455,27 +11455,28 @@ if ( ! class_exists( __NAMESPACE__ . '\Backordered_Products_Page' ) ) {
                         );
                 }
 
-		protected static function filter_rows( array $rows, string $view ): array {
-			$out = array();
-			foreach ( $rows as $pid => $agg ) {
-				$desired = isset( $agg['desired_total'] ) ? (int) $agg['desired_total'] : 0;
-				$need    = isset( $agg['need_total'] ) ? (int) $agg['need_total'] : 0;
-				if ( 'unallocated' === $view ) {
-					if ( $need > 0 ) {
-						$out[ $pid ] = $agg;
-					}
-				} elseif ( 'allocated' === $view ) {
-					if ( $desired > 0 && 0 === $need ) {
-						$out[ $pid ] = $agg;
-					}
-				} else { // 'all'
-					if ( $desired > 0 ) {
-						$out[ $pid ] = $agg;
-					}
-				}
-			}
-			return $out;
-		}
+                protected static function filter_rows( array $rows, string $view ): array {
+                        $out = array();
+                        foreach ( $rows as $pid => $agg ) {
+                                $desired = isset( $agg['desired_total'] ) ? (int) $agg['desired_total'] : 0;
+                                if ( $desired <= 0 ) {
+                                        continue;
+                                }
+
+                                $need = isset( $agg['need_total'] ) ? (int) $agg['need_total'] : 0;
+
+                                if ( 'unallocated' === $view && $need <= 0 ) {
+                                        continue;
+                                }
+
+                                if ( 'allocated' === $view && $need > 0 ) {
+                                        continue;
+                                }
+
+                                $out[ $pid ] = $agg;
+                        }
+                        return $out;
+                }
 
 		public static function render(): void {
 			if ( ! current_user_can( 'manage_woocommerce' ) ) {
@@ -11487,17 +11488,24 @@ if ( ! class_exists( __NAMESPACE__ . '\Backordered_Products_Page' ) ) {
 				$view = 'unallocated';
 			}
 
-			$idx       = class_exists( __NAMESPACE__ . '\Backorder_Indexer' ) ? Backorder_Indexer::get_index( false ) : array( 'built_at' => 0, 'rows' => array() );
-			$built_ts  = isset( $idx['built_at'] ) ? (int) $idx['built_at'] : 0;
+                        $idx       = class_exists( __NAMESPACE__ . '\Backorder_Indexer' ) ? Backorder_Indexer::get_index( false ) : array( 'built_at' => 0, 'rows' => array() );
+                        $built_ts  = isset( $idx['built_at'] ) ? (int) $idx['built_at'] : 0;
                         $rows_all  = isset( $idx['rows'] ) && is_array( $idx['rows'] ) ? $idx['rows'] : array();
                         $rows_view = self::filter_rows( $rows_all, $view );
+
+                        $visible_ids = array();
+                        foreach ( $rows_view as $pid => $agg ) {
+                                $need = isset( $agg['need_total'] ) ? (int) $agg['need_total'] : 0;
+                                if ( $need > 0 ) {
+                                        $visible_ids[] = (int) $pid;
+                                }
+                        }
 
                         // Preload the order index for the displayed products to show linked orders per product row.
                         $orders_by_product = array();
                         if ( class_exists( __NAMESPACE__ . '\Backorder_Order_Indexer' ) ) {
                                 $order_idx   = Backorder_Order_Indexer::get_index( false );
                                 $order_rows  = isset( $order_idx['rows'] ) && is_array( $order_idx['rows'] ) ? $order_idx['rows'] : array();
-                                $visible_ids = array_map( 'intval', array_keys( $rows_view ) );
                                 $visible_map = array_fill_keys( $visible_ids, true );
 
                                 foreach ( $order_rows as $row ) {
