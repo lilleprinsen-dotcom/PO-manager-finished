@@ -6709,9 +6709,32 @@ if ( ! class_exists( __NAMESPACE__ . '\Auto_PO_Allocator' ) ) {
                         if ( function_exists( 'as_unschedule_all_actions' ) ) {
                                 as_unschedule_all_actions( self::ACTION_HOOK, null, 'lpr-allocator' );
                         } else {
-                                wp_clear_scheduled_hook( self::ACTION_HOOK );
+                                self::clear_wp_cron_events();
                         }
                         self::maybe_schedule( true );
+                }
+
+                protected static function clear_wp_cron_events(): void {
+                        if ( ! function_exists( '_get_cron_array' ) ) {
+                                wp_clear_scheduled_hook( self::ACTION_HOOK );
+                                return;
+                        }
+
+                        $crons = _get_cron_array();
+                        if ( empty( $crons ) ) {
+                                return;
+                        }
+
+                        foreach ( $crons as $timestamp => $cron ) {
+                                if ( empty( $cron[ self::ACTION_HOOK ] ) ) {
+                                        continue;
+                                }
+
+                                foreach ( $cron[ self::ACTION_HOOK ] as $event ) {
+                                        $args = isset( $event['args'] ) ? $event['args'] : array();
+                                        wp_unschedule_event( $timestamp, self::ACTION_HOOK, $args );
+                                }
+                        }
                 }
 
                 protected static function get_interval(): int {
@@ -6752,7 +6775,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Auto_PO_Allocator' ) ) {
                                 if ( $force && function_exists( 'as_unschedule_all_actions' ) ) {
                                         as_unschedule_all_actions( self::ACTION_HOOK, null, 'lpr-allocator' );
                                 } elseif ( $force ) {
-                                        wp_clear_scheduled_hook( self::ACTION_HOOK );
+                                        self::clear_wp_cron_events();
                                 }
                                 return;
                         }
@@ -6767,7 +6790,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Auto_PO_Allocator' ) ) {
                                 }
                         } else {
                                 if ( $force ) {
-                                        wp_clear_scheduled_hook( self::ACTION_HOOK );
+                                        self::clear_wp_cron_events();
                                 }
                                 if ( ! wp_next_scheduled( self::ACTION_HOOK ) ) {
                                         wp_schedule_single_event( time() + $interval, self::ACTION_HOOK );
