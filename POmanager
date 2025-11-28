@@ -6707,7 +6707,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Auto_PO_Allocator' ) ) {
 
                 public static function reset_schedule(): void {
                         if ( function_exists( 'as_unschedule_all_actions' ) ) {
-                                as_unschedule_all_actions( self::ACTION_HOOK, array(), 'lpr-allocator' );
+                                as_unschedule_all_actions( self::ACTION_HOOK, null, 'lpr-allocator' );
                         } else {
                                 wp_clear_scheduled_hook( self::ACTION_HOOK );
                         }
@@ -6724,23 +6724,24 @@ if ( ! class_exists( __NAMESPACE__ . '\Auto_PO_Allocator' ) ) {
                 /**
                  * Queue a single allocation pass in the background (prefers Action Scheduler).
                  */
-                protected static function queue_allocation_pass(): void {
+                protected static function queue_allocation_pass( int $page = 1 ): void {
                         // Use Action Scheduler when available for async execution.
                         if ( function_exists( 'as_enqueue_async_action' ) ) {
-                                as_enqueue_async_action( self::ACTION_HOOK, array(), 'lpr-allocator', true );
+                                as_enqueue_async_action( self::ACTION_HOOK, array( 'page' => max( 1, $page ) ), 'lpr-allocator', true );
                                 return;
                         }
                         if ( function_exists( 'as_schedule_single_action' ) ) {
-                                if ( function_exists( 'as_next_scheduled_action' ) && as_next_scheduled_action( self::ACTION_HOOK, array(), 'lpr-allocator' ) ) {
+                                $args = array( 'page' => max( 1, $page ) );
+                                if ( function_exists( 'as_next_scheduled_action' ) && as_next_scheduled_action( self::ACTION_HOOK, $args, 'lpr-allocator' ) ) {
                                         return;
                                 }
-                                as_schedule_single_action( time() + 5, self::ACTION_HOOK, array(), 'lpr-allocator' );
+                                as_schedule_single_action( time() + 5, self::ACTION_HOOK, $args, 'lpr-allocator' );
                                 return;
                         }
 
                         // Fallback to WP-Cron single event if Action Scheduler is unavailable.
-                        if ( ! wp_next_scheduled( self::ACTION_HOOK ) ) {
-                                wp_schedule_single_event( time() + 5, self::ACTION_HOOK );
+                        if ( ! wp_next_scheduled( self::ACTION_HOOK, array( 'page' => max( 1, $page ) ) ) ) {
+                                wp_schedule_single_event( time() + 5, self::ACTION_HOOK, array( 'page' => max( 1, $page ) ) );
                         }
                 }
 
@@ -6749,7 +6750,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Auto_PO_Allocator' ) ) {
 
                         if ( $interval <= 0 ) {
                                 if ( $force && function_exists( 'as_unschedule_all_actions' ) ) {
-                                        as_unschedule_all_actions( self::ACTION_HOOK, array(), 'lpr-allocator' );
+                                        as_unschedule_all_actions( self::ACTION_HOOK, null, 'lpr-allocator' );
                                 } elseif ( $force ) {
                                         wp_clear_scheduled_hook( self::ACTION_HOOK );
                                 }
@@ -6758,7 +6759,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Auto_PO_Allocator' ) ) {
 
                         if ( function_exists( 'as_schedule_recurring_action' ) && function_exists( 'as_next_scheduled_action' ) ) {
                                 if ( $force && function_exists( 'as_unschedule_all_actions' ) ) {
-                                        as_unschedule_all_actions( self::ACTION_HOOK, array(), 'lpr-allocator' );
+                                        as_unschedule_all_actions( self::ACTION_HOOK, null, 'lpr-allocator' );
                                 }
                                 $next = as_next_scheduled_action( self::ACTION_HOOK, array(), 'lpr-allocator' );
                                 if ( ! $next ) {
@@ -6774,8 +6775,12 @@ if ( ! class_exists( __NAMESPACE__ . '\Auto_PO_Allocator' ) ) {
                         }
                 }
 
-                public static function run(): void {
-                        self::allocate_all();
+                public static function run( int $page = 1 ): void {
+                        $has_more = self::allocate_page( max( 1, $page ) );
+
+                        if ( $has_more ) {
+                                self::queue_allocation_pass( $page + 1 );
+                        }
 
                         $interval = self::get_interval();
                         if ( $interval <= 0 ) {
@@ -6787,9 +6792,12 @@ if ( ! class_exists( __NAMESPACE__ . '\Auto_PO_Allocator' ) ) {
                         }
                 }
 
-                protected static function allocate_all(): void {
+                /**
+                 * Run allocation for a single page of POs. Returns true when more pages are available.
+                 */
+                protected static function allocate_page( int $page ): bool {
                         if ( ! class_exists( __NAMESPACE__ . '\PO_FIFO_Allocator' ) ) {
-                                return;
+                                return false;
                         }
 
                         $statuses = array( defined( __NAMESPACE__ . '\PO_STATUS_OPEN' ) ? PO_STATUS_OPEN : 'open' );
@@ -6797,55 +6805,52 @@ if ( ! class_exists( __NAMESPACE__ . '\Auto_PO_Allocator' ) ) {
                                 $statuses[] = PO_STATUS_PARTIAL;
                         }
 
-                        $page     = 1;
                         $per_page = 20;
 
-                        do {
-                                $orderby_filter = static function ( $orderby, $query_obj ) {
-                                        global $wpdb;
+                        $orderby_filter = static function ( $orderby, $query_obj ) {
+                                global $wpdb;
 
-                                        if ( ! $query_obj instanceof \WP_Query || ! $query_obj->get( 'lpr_eta_sort' ) ) {
-                                                return $orderby;
-                                        }
-
-                                        $meta_order = "STR_TO_DATE({$wpdb->postmeta}.meta_value, '%d-%m-%Y') ASC";
-
-                                        return implode( ', ', array( $meta_order, "{$wpdb->posts}.post_date ASC", "{$wpdb->posts}.ID ASC" ) );
-                                };
-
-                                add_filter( 'posts_orderby', $orderby_filter, 10, 2 );
-
-                                $query = new \WP_Query(
-                                        array(
-                                                'post_type'      => defined( __NAMESPACE__ . '\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po',
-                                                'post_status'    => $statuses,
-                                                'posts_per_page' => $per_page,
-                                                'paged'          => $page,
-                                                'fields'         => 'ids',
-                                                'no_found_rows'  => true,
-                                                'meta_key'       => defined( __NAMESPACE__ . '\PO_META_ETA_DATE' ) ? PO_META_ETA_DATE : '_lpr_eta_date',
-                                                'orderby'        => array(
-                                                        'meta_value' => 'ASC',
-                                                        'date'       => 'ASC',
-                                                        'ID'         => 'ASC',
-                                                ),
-                                                'order'          => 'ASC',
-                                                'lpr_eta_sort'   => true,
-                                        )
-                                );
-
-                                remove_filter( 'posts_orderby', $orderby_filter, 10 );
-
-                                if ( empty( $query->posts ) ) {
-                                        break;
+                                if ( ! $query_obj instanceof \WP_Query || ! $query_obj->get( 'lpr_eta_sort' ) ) {
+                                        return $orderby;
                                 }
 
-                                foreach ( $query->posts as $po_id ) {
-                                        PO_FIFO_Allocator::allocate_po( (int) $po_id );
-                                }
+                                $meta_order = "STR_TO_DATE({$wpdb->postmeta}.meta_value, '%d-%m-%Y') ASC";
 
-                                $page++;
-                        } while ( count( $query->posts ) === $per_page );
+                                return implode( ', ', array( $meta_order, "{$wpdb->posts}.post_date ASC", "{$wpdb->posts}.ID ASC" ) );
+                        };
+
+                        add_filter( 'posts_orderby', $orderby_filter, 10, 2 );
+
+                        $query = new \WP_Query(
+                                array(
+                                        'post_type'      => defined( __NAMESPACE__ . '\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po',
+                                        'post_status'    => $statuses,
+                                        'posts_per_page' => $per_page,
+                                        'paged'          => $page,
+                                        'fields'         => 'ids',
+                                        'no_found_rows'  => true,
+                                        'meta_key'       => defined( __NAMESPACE__ . '\PO_META_ETA_DATE' ) ? PO_META_ETA_DATE : '_lpr_eta_date',
+                                        'orderby'        => array(
+                                                'meta_value' => 'ASC',
+                                                'date'       => 'ASC',
+                                                'ID'         => 'ASC',
+                                        ),
+                                        'order'          => 'ASC',
+                                        'lpr_eta_sort'   => true,
+                                )
+                        );
+
+                        remove_filter( 'posts_orderby', $orderby_filter, 10 );
+
+                        if ( empty( $query->posts ) ) {
+                                return false;
+                        }
+
+                        foreach ( $query->posts as $po_id ) {
+                                PO_FIFO_Allocator::allocate_po( (int) $po_id );
+                        }
+
+                        return count( $query->posts ) === $per_page;
                 }
 
                 /**
