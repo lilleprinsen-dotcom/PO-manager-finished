@@ -11568,10 +11568,70 @@ if ( ! class_exists( __NAMESPACE__ . '\Backordered_Products_Page' ) ) {
                         return $out;
                 }
 
-		public static function render(): void {
-			if ( ! current_user_can( 'manage_woocommerce' ) ) {
-				return;
-			}
+                /**
+                 * Aggregate totals for the backorder snapshot and open POs.
+                 */
+                protected static function get_totals( array $rows_all ): array {
+                        $need_total = 0;
+                        foreach ( $rows_all as $agg ) {
+                                $need_total += max( 0, (int) ( $agg['need_total'] ?? 0 ) );
+                        }
+
+                        $incoming_total = 0;
+
+                        // Prefer the helper for live statuses; fall back to constants to avoid fatal errors.
+                        $statuses = function_exists( __NAMESPACE__ . '\lpr_allocator_live_po_statuses' )
+                                ? lpr_allocator_live_po_statuses()
+                                : array();
+
+                        if ( empty( $statuses ) ) {
+                                if ( defined( __NAMESPACE__ . '\PO_STATUS_OPEN' ) ) {
+                                        $statuses[] = PO_STATUS_OPEN;
+                                }
+                                if ( defined( __NAMESPACE__ . '\PO_STATUS_PARTIAL' ) ) {
+                                        $statuses[] = PO_STATUS_PARTIAL;
+                                }
+                        }
+
+                        if ( ! empty( $statuses ) ) {
+                                $query = new \WP_Query(
+                                        array(
+                                                'post_type'      => defined( __NAMESPACE__ . '\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po',
+                                                'post_status'    => $statuses,
+                                                'posts_per_page' => -1,
+                                                'fields'         => 'ids',
+                                                'no_found_rows'  => true,
+                                        )
+                                );
+
+                                foreach ( $query->posts as $po_id ) {
+                                        $lines = get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', true );
+                                        if ( ! is_array( $lines ) || empty( $lines ) ) {
+                                                continue;
+                                        }
+
+                                        foreach ( $lines as $line ) {
+                                                $qty_ordered  = isset( $line['qty_ordered'] ) ? max( 0, (int) $line['qty_ordered'] ) : 0;
+                                                $qty_received = isset( $line['qty_received'] ) ? max( 0, (int) $line['qty_received'] ) : 0;
+                                                $incoming     = max( 0, $qty_ordered - $qty_received );
+
+                                                if ( $incoming > 0 ) {
+                                                        $incoming_total += $incoming;
+                                                }
+                                        }
+                                }
+                        }
+
+                        return array(
+                                'incoming_total'       => (int) $incoming_total,
+                                'backorder_need_total' => (int) $need_total,
+                        );
+                }
+
+                public static function render(): void {
+                        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                                return;
+                        }
 
 			$view = isset( $_GET['view'] ) ? sanitize_key( wp_unslash( $_GET['view'] ) ) : 'unallocated'; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
 			if ( ! in_array( $view, array( 'unallocated', 'all', 'allocated' ), true ) ) {
@@ -11581,6 +11641,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Backordered_Products_Page' ) ) {
                         $idx       = class_exists( __NAMESPACE__ . '\Backorder_Indexer' ) ? Backorder_Indexer::get_index( false ) : array( 'built_at' => 0, 'rows' => array() );
                         $built_ts  = isset( $idx['built_at'] ) ? (int) $idx['built_at'] : 0;
                         $rows_all  = isset( $idx['rows'] ) && is_array( $idx['rows'] ) ? $idx['rows'] : array();
+                        $totals    = self::get_totals( $rows_all );
                         $rows_view = self::filter_rows( $rows_all, $view );
 
                         $visible_ids = array();
@@ -11705,23 +11766,34 @@ if ( ! class_exists( __NAMESPACE__ . '\Backordered_Products_Page' ) ) {
 						<?php echo esc_html__( 'Rebuild Snapshot', 'lpr-backorder-allocator' ); ?>
 					</a>
 
-					<span style="opacity:.8;">
-						<?php
-						echo esc_html(
-							sprintf(
+                                        <span style="opacity:.8;">
+                                                <?php
+                                                echo esc_html(
+                                                        sprintf(
 								/* translators: %s: datetime */
 								__( 'Last built: %s', 'lpr-backorder-allocator' ),
 								$built_ts ? wp_date( 'd-m-Y H:i:s', $built_ts ) : __( 'never', 'lpr-backorder-allocator' )
 							)
-						);
-						?>
-					</span>
-				</div>
+                                                );
+                                                ?>
+                                        </span>
+                                </div>
 
-				<style>
-					.lpr-backorders-table { width:100%; border-collapse: collapse; }
-					.lpr-backorders-table th, .lpr-backorders-table td { padding:8px; border-bottom:1px solid #e5e5e5; text-align:left; vertical-align:top; }
-					.lpr-backorders-table th.num, .lpr-backorders-table td.num { text-align:right; white-space:nowrap; }
+                                <div class="lpr-backorders-stats">
+                                        <div class="lpr-backorders-stat">
+                                                <span class="label"><?php echo esc_html__( 'Amount incoming (open POs)', 'lpr-backorder-allocator' ); ?></span>
+                                                <span class="value"><?php echo esc_html( number_format_i18n( (int) ( $totals['incoming_total'] ?? 0 ) ) ); ?></span>
+                                        </div>
+                                        <div class="lpr-backorders-stat">
+                                                <span class="label"><?php echo esc_html__( 'Required to cover backorders', 'lpr-backorder-allocator' ); ?></span>
+                                                <span class="value"><?php echo esc_html( number_format_i18n( (int) ( $totals['backorder_need_total'] ?? 0 ) ) ); ?></span>
+                                        </div>
+                                </div>
+
+                                <style>
+                                        .lpr-backorders-table { width:100%; border-collapse: collapse; }
+                                        .lpr-backorders-table th, .lpr-backorders-table td { padding:8px; border-bottom:1px solid #e5e5e5; text-align:left; vertical-align:top; }
+                                        .lpr-backorders-table th.num, .lpr-backorders-table td.num { text-align:right; white-space:nowrap; }
                                         .lpr-quick-form { display:flex; gap:6px; flex-wrap:wrap; align-items:center; }
                                         .lpr-quick-form input[type="number"] { width:90px; }
                                         .lpr-quick-form input[type="text"] { width:140px; }
@@ -11730,6 +11802,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Backordered_Products_Page' ) ) {
                                         .lpr-orders-dropdown li { margin:4px 0; line-height:1.4; }
                                         .lpr-orders-dropdown .order-meta { display:block; color:#6c6c6c; font-size:12px; }
                                         .tablenav-pages { margin-top: 12px; }
+                                        .lpr-backorders-stats { display:flex; flex-wrap:wrap; gap:12px; margin:8px 0 14px; }
+                                        .lpr-backorders-stat { padding:10px 12px; border:1px solid #dcdcde; background:#fff; border-radius:6px; min-width:220px; box-shadow:0 2px 6px rgba(0,0,0,0.04); }
+                                        .lpr-backorders-stat .label { display:block; font-size:12px; letter-spacing:.02em; text-transform:uppercase; color:#555; margin-bottom:4px; }
+                                        .lpr-backorders-stat .value { display:block; font-size:20px; font-weight:600; color:#1d2327; }
                                 </style>
 
                                 <table class="widefat striped lpr-backorders-table">
