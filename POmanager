@@ -1755,6 +1755,32 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_touch_allocation_status'
                 }
         }
 }
+
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_add_release_note' ) ) {
+        /**
+         * Add a standardized order note explaining why allocations were released.
+         */
+        function lpr_allocator_add_release_note( \WC_Order $order, \WC_Order_Item_Product $item, int $qty, string $reason ): void {
+                if ( $qty <= 0 ) {
+                        return;
+                }
+
+                $product   = $item->get_product();
+                $sku       = $product instanceof \WC_Product ? $product->get_sku() : '';
+                $line_name = $item->get_name();
+
+                $note = sprintf(
+                        /* translators: 1: qty, 2: item name, 3: SKU (optional), 4: reason */
+                        __( 'Released %1$dx %2$s%3$s: %4$s.', 'lpr-backorder-allocator' ),
+                        (int) $qty,
+                        $line_name,
+                        $sku ? ' [' . $sku . ']' : '',
+                        $reason
+                );
+
+                $order->add_order_note( $note, false, true );
+        }
+}
 if ( ! class_exists( __NAMESPACE__ . '\Admin_Menu' ) ) {
         /**
          * Top-level admin menu wrapper for all plugin pages.
@@ -4490,7 +4516,15 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_VIP_Prioritizer' ) ) {
                                         $qty_taken = isset( $disp['qty_taken'] ) ? max( 0, (int) $disp['qty_taken'] ) : 0;
                                         $from_po   = isset( $disp['from_po'] ) ? (int) $disp['from_po'] : 0;
                                         if ( $qty_taken > 0 && $from_po > 0 ) {
-                                                self::release_from_po( $lost_item, $from_po, $qty_taken );
+                                                $released = self::release_from_po( $lost_item, $from_po, $qty_taken );
+                                                if ( $released > 0 ) {
+                                                        lpr_allocator_add_release_note(
+                                                                $lost_order,
+                                                                $lost_item,
+                                                                (int) $released,
+                                                                __( 'Allocation moved to higher-priority VIP order.', 'lpr-backorder-allocator' )
+                                                        );
+                                                }
                                         }
 
                                         if ( ! empty( $disp['new_allocs'] ) ) {
@@ -4573,7 +4607,22 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_VIP_Prioritizer' ) ) {
                         // Release from latest allocations to keep totals aligned with order quantity.
                         $release_qty = isset( $plan['vip_release'] ) ? max( 0, (int) $plan['vip_release'] ) : 0;
                         if ( $release_qty > 0 ) {
-                                $allocs = self::release_from_latest( $allocs, $release_qty );
+                        $released = array(
+                                'allocs'   => $allocs,
+                                'released' => 0,
+                        );
+
+                        $released = self::release_from_latest( $allocs, $release_qty );
+                        $allocs   = $released['allocs'];
+
+                        if ( $released['released'] > 0 ) {
+                                lpr_allocator_add_release_note(
+                                        $order,
+                                        $item,
+                                        (int) $released['released'],
+                                        __( 'VIP prioritization freed later allocation rows to avoid over-allocation.', 'lpr-backorder-allocator' )
+                                );
+                        }
                         }
 
                         $item->update_meta_data( $meta_key, $allocs );
@@ -4599,7 +4648,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_VIP_Prioritizer' ) ) {
                  */
                 protected static function release_from_latest( array $allocs, int $qty ): array {
                         if ( $qty <= 0 ) {
-                                return $allocs;
+                                return array(
+                                        'allocs'   => $allocs,
+                                        'released' => 0,
+                                );
                         }
 
                         usort(
@@ -4620,6 +4672,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_VIP_Prioritizer' ) ) {
                                 }
                         );
 
+                        $released = 0;
+
                         foreach ( $allocs as &$row ) {
                                 if ( $qty <= 0 ) {
                                         break;
@@ -4634,7 +4688,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_VIP_Prioritizer' ) ) {
                                 }
                                 if ( $qty >= $row_qty ) {
                                         lpr_allocator_touch_allocation_status( $row, 'released' );
-                                        $qty -= $row_qty;
+                                        $qty      -= $row_qty;
+                                        $released += $row_qty;
                                 } else {
                                         $row['qty_allocated'] = $row_qty - $qty;
                                         $qty                  = 0;
@@ -4642,21 +4697,26 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_VIP_Prioritizer' ) ) {
                         }
                         unset( $row );
 
-                        return $allocs;
+                        return array(
+                                'allocs'   => $allocs,
+                                'released' => $released,
+                        );
                 }
 
                 /**
                  * Release a specific quantity tied to a PO from an item.
                  */
-                protected static function release_from_po( \WC_Order_Item_Product $item, int $po_id, int $qty ): void {
+                protected static function release_from_po( \WC_Order_Item_Product $item, int $po_id, int $qty ): int {
                         if ( $po_id <= 0 || $qty <= 0 ) {
-                                return;
+                                return 0;
                         }
                         $meta_key = defined( __NAMESPACE__ . '\ORDER_ITEM_META_ALLOCATIONS' ) ? ORDER_ITEM_META_ALLOCATIONS : 'lpr_allocations';
                         $allocs   = $item->get_meta( $meta_key, true );
                         if ( ! is_array( $allocs ) ) {
-                                return;
+                                return 0;
                         }
+
+                        $released = 0;
 
                         foreach ( $allocs as &$row ) {
                                 if ( $qty <= 0 ) {
@@ -4673,7 +4733,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_VIP_Prioritizer' ) ) {
                                 }
                                 if ( $qty >= $row_qty ) {
                                         lpr_allocator_touch_allocation_status( $row, 'released' );
-                                        $qty -= $row_qty;
+                                        $qty      -= $row_qty;
+                                        $released += $row_qty;
                                 } else {
                                         $row['qty_allocated'] = $row_qty - $qty;
                                         $qty                  = 0;
@@ -4683,6 +4744,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_VIP_Prioritizer' ) ) {
 
                         $item->update_meta_data( $meta_key, $allocs );
                         $item->save();
+
+                        return $released;
                 }
 
                 /**
@@ -6627,9 +6690,9 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_FIFO_Allocator' ) ) {
                         $product   = $item->get_product();
                         $sku       = $product instanceof \WC_Product ? $product->get_sku() : '';
                         $line_name = $item->get_name();
-                        $note      = sprintf(
+                        $note = sprintf(
                                 /* translators: 1: qty, 2: item name, 3: SKU, 4: PO number, 5: ETA */
-                                __( 'Reallocated %1$dx %2$s%3$s to PO #%4$s (ETA %5$s) to honor requested delivery.', 'lpr-backorder-allocator' ),
+                                __( 'Released and reallocated %1$dx %2$s%3$s to PO #%4$s (ETA %5$s) to honor requested delivery.', 'lpr-backorder-allocator' ),
                                 (int) $moved_qty,
                                 $line_name,
                                 $sku ? ' [' . $sku . ']' : '',
@@ -6714,9 +6777,9 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_FIFO_Allocator' ) ) {
                         $product   = $item->get_product();
                         $sku       = $product instanceof \WC_Product ? $product->get_sku() : '';
                         $line_name = $item->get_name();
-                        $note      = sprintf(
+                        $note = sprintf(
                                 /* translators: 1: qty, 2: item name, 3: SKU, 4: PO number, 5: ETA */
-                                __( 'Reallocated %1$dx %2$s%3$s to earlier PO #%4$s (ETA %5$s) to improve delivery.', 'lpr-backorder-allocator' ),
+                                __( 'Released and reallocated %1$dx %2$s%3$s to earlier PO #%4$s (ETA %5$s) to improve delivery.', 'lpr-backorder-allocator' ),
                                 (int) $moved_qty,
                                 $line_name,
                                 $sku ? ' [' . $sku . ']' : '',
@@ -8768,9 +8831,10 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Overage_Checker' ) ) {
                                 $map_key = $order_id . ':' . $item_id;
                                 if ( ! isset( $items[ $map_key ] ) ) {
                                         $items[ $map_key ] = array(
-                                                'item'    => $item,
-                                                'allocs'  => $allocs,
-                                                'changed' => false,
+                                                'item'     => $item,
+                                                'allocs'   => $allocs,
+                                                'changed'  => false,
+                                                'released' => 0,
                                         );
                                 }
 
@@ -8858,6 +8922,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Overage_Checker' ) ) {
                                         $release = min( $row_qty, $over );
                                         if ( $release >= $row_qty ) {
                                                 lpr_allocator_touch_allocation_status( $items[ $key ]['allocs'][ $idx ], 'released' );
+                                                $items[ $key ]['released'] += $row_qty;
                                         } else {
                                                 $items[ $key ]['allocs'][ $idx ]['qty_allocated'] = $row_qty - $release;
                                         }
@@ -8866,12 +8931,26 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Overage_Checker' ) ) {
                                 }
                         }
 
+                        $po_number = (string) get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_PO_NUMBER' ) ? PO_META_PO_NUMBER : '_lpr_po_number', true );
+                        $po_label  = $po_number ? sprintf( __( 'PO #%s', 'lpr-backorder-allocator' ), $po_number ) : sprintf( __( 'PO #%d', 'lpr-backorder-allocator' ), $po_id );
+
                         foreach ( $items as $payload ) {
                                 if ( empty( $payload['changed'] ) ) {
                                         continue;
                                 }
                                 $payload['item']->update_meta_data( $meta_key, array_values( $payload['allocs'] ) );
                                 $payload['item']->save();
+                                if ( ! empty( $payload['released'] ) ) {
+                                        $order = wc_get_order( $payload['item']->get_order_id() );
+                                        if ( $order instanceof \WC_Order ) {
+                                                lpr_allocator_add_release_note(
+                                                        $order,
+                                                        $payload['item'],
+                                                        (int) $payload['released'],
+                                                        sprintf( __( 'Adjusted because %s has less available quantity than previously allocated.', 'lpr-backorder-allocator' ), $po_label )
+                                                );
+                                        }
+                                }
                                 $affected_orders[ (int) $payload['item']->get_order_id() ] = true;
                         }
 
@@ -9051,7 +9130,8 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Integrity_Checker' ) ) {
                                 $is_completed       = in_array( $normalized_status, array( 'completed', 'fullfort' ), true );
                                 $is_live            = in_array( $normalized_status, $allowed_statuses, true );
 
-                                $changed = false;
+                                $changed       = false;
+                                $released_qty  = 0;
 
                                 if ( $is_completed ) {
                                         continue;
@@ -9065,6 +9145,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Integrity_Checker' ) ) {
                                                         continue;
                                                 }
                                                 lpr_allocator_touch_allocation_status( $alloc_row, 'released' );
+                                                $released_qty += $qty;
                                                 $changed = true;
                                         }
                                         unset( $alloc_row );
@@ -9129,6 +9210,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Integrity_Checker' ) ) {
                                                         $release_qty = min( $current_qty, $over );
                                                         if ( $release_qty >= $current_qty ) {
                                                                 lpr_allocator_touch_allocation_status( $allocs[ $idx ], 'released' );
+                                                                $released_qty += $release_qty;
                                                         } else {
                                                                 $allocs[ $idx ]['qty_allocated'] = $current_qty - $release_qty;
                                                         }
@@ -9141,6 +9223,14 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Integrity_Checker' ) ) {
 
                                 if ( ! $changed ) {
                                         continue;
+                                }
+
+                                if ( $released_qty > 0 ) {
+                                        $reason = $is_live
+                                                ? __( 'Released lines to match the edited order quantity.', 'lpr-backorder-allocator' )
+                                                : sprintf( __( 'Order status changed to %s; releasing PO allocation.', 'lpr-backorder-allocator' ), $normalized_status );
+
+                                        lpr_allocator_add_release_note( $order, $item, (int) $released_qty, $reason );
                                 }
 
                                 $item->update_meta_data( $meta_key, array_values( $allocs ) );
