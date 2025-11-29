@@ -10522,6 +10522,9 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Order_Indexer' ) ) {
                 const OPT_KEY      = 'lpr_allocator_backorder_order_index';
                 const MAX_AGE      = 600; // seconds
                 const ACTION_BUILD = 'lpr_allocator_build_order_backorder_index';
+                const ACTION_BUILD_CHUNK = 'lpr_allocator_build_order_backorder_index_chunk';
+                const OPT_PROGRESS = 'lpr_allocator_backorder_order_index_progress';
+                const PAGE_LIMIT   = 25;
 
                 public static function init(): void {
                         add_action( 'admin_init', array( __CLASS__, 'ensure_index_option' ) );
@@ -10529,6 +10532,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Order_Indexer' ) ) {
 
                         // Async worker.
                         add_action( self::ACTION_BUILD, array( __CLASS__, 'build_and_store' ) );
+                        add_action( self::ACTION_BUILD_CHUNK, array( __CLASS__, 'build_chunk' ), 10, 1 );
 
                         // Triggers: order lifecycle.
                         add_action( 'woocommerce_new_order', array( __CLASS__, 'queue_rebuild' ) );
@@ -10592,15 +10596,17 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Order_Indexer' ) ) {
                         // Avoid flooding Action Scheduler with duplicate async jobs.
                         if (
                                 function_exists( 'as_has_scheduled_action' )
-                                && as_has_scheduled_action( self::ACTION_BUILD, array(), 'lpr-allocator' )
+                                && ( as_has_scheduled_action( self::ACTION_BUILD_CHUNK, array(), 'lpr-allocator' ) || as_has_scheduled_action( self::ACTION_BUILD, array(), 'lpr-allocator' ) )
                         ) {
                                 return;
                         }
 
+                        self::reset_progress();
+
                         if ( function_exists( 'as_enqueue_async_action' ) ) {
-                                as_enqueue_async_action( self::ACTION_BUILD, array(), 'lpr-allocator' );
+                                as_enqueue_async_action( self::ACTION_BUILD_CHUNK, array( 'page' => 1 ), 'lpr-allocator' );
                         } elseif ( function_exists( 'as_schedule_single_action' ) ) {
-                                as_schedule_single_action( time(), self::ACTION_BUILD, array(), 'lpr-allocator' );
+                                as_schedule_single_action( time(), self::ACTION_BUILD_CHUNK, array( 'page' => 1 ), 'lpr-allocator' );
                         } else {
                                 self::build_and_store();
                         }
@@ -10649,127 +10655,197 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Order_Indexer' ) ) {
                         }
                 }
 
-                protected static function build_snapshot(): array {
-                        $settings = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array( 'order_statuses' => array( 'processing', 'on-hold' ) );
-                        $statuses = array();
-                        foreach ( (array) $settings['order_statuses'] as $st ) {
-                                $statuses[] = 'wc-' . preg_replace( '/^wc-/', '', sanitize_key( $st ) );
+                /**
+                 * Incremental builder used by Action Scheduler to avoid timeouts.
+                 *
+                 * @param int $page Page number to process (1-based).
+                 */
+                public static function build_chunk( int $page = 1 ): void {
+                        $page       = max( 1, $page );
+                        $progress   = self::get_progress_state();
+                        $accum_rows = isset( $progress['rows'] ) && is_array( $progress['rows'] ) ? $progress['rows'] : array();
+
+                        $result = self::build_snapshot_page( $page, self::PAGE_LIMIT );
+
+                        if ( ! empty( $result['rows'] ) ) {
+                                $accum_rows = array_merge( $accum_rows, $result['rows'] );
                         }
 
-                        $rows  = array();
-                        $page  = 1;
-                        $limit = 50;
+                        if ( ! empty( $result['has_more'] ) ) {
+                                $next_page = $page + 1;
+                                self::persist_progress_state( $accum_rows, $next_page );
 
-                        do {
-                                $args      = array(
-                                        'status'  => $statuses,
-                                        'limit'   => $limit,
-                                        'page'    => $page,
-                                        'orderby' => 'date',
-                                        'order'   => 'ASC',
-                                        'return'  => 'ids',
-                                        'type'    => 'shop_order',
-                                );
-                                $order_ids = function_exists( 'wc_get_orders' ) ? wc_get_orders( $args ) : array();
-                                if ( empty( $order_ids ) ) {
-                                        break;
+                                if ( function_exists( 'as_enqueue_async_action' ) ) {
+                                        as_enqueue_async_action( self::ACTION_BUILD_CHUNK, array( 'page' => $next_page ), 'lpr-allocator' );
+                                } elseif ( function_exists( 'as_schedule_single_action' ) ) {
+                                        as_schedule_single_action( time(), self::ACTION_BUILD_CHUNK, array( 'page' => $next_page ), 'lpr-allocator' );
                                 }
 
-                                foreach ( $order_ids as $oid ) {
-                                        $order = wc_get_order( $oid );
-                                        if ( ! ( $order instanceof \WC_Order ) ) {
-                                                continue;
-                                        }
+                                return;
+                        }
 
-                                        $order_date = $order->get_date_created();
-                                        $order_ts   = $order_date ? (int) $order_date->getTimestamp() : (int) $order->get_id();
-                                        $status     = $order->get_status();
-                                        $status_h   = function_exists( 'wc_get_order_status_name' ) ? wc_get_order_status_name( $status ) : $status;
-                                        $number     = method_exists( $order, 'get_order_number' ) ? $order->get_order_number() : (string) $order->get_id();
-                                        $customer   = trim( $order->get_formatted_billing_full_name() ?: '' );
-                                        if ( '' === $customer ) {
-                                                $customer = trim( $order->get_formatted_shipping_full_name() ?: '' );
-                                        }
-                                        if ( '' === $customer ) {
-                                                $customer = (string) $order->get_billing_email();
-                                        }
-                                        $order_url = function_exists( 'get_edit_post_link' ) ? get_edit_post_link( $order->get_id(), '' ) : '';
+                        $snapshot = self::finalize_rows( $accum_rows );
+                        update_option( self::OPT_KEY, $snapshot, false );
+                        delete_option( self::OPT_PROGRESS );
+                }
 
-                                        $order_rows           = array();
-                                        $has_backorder_line   = false;
-                                        $total_backordered    = 0;
+                protected static function build_snapshot(): array {
+                        $statuses = self::get_statuses();
 
-                                        foreach ( $order->get_items( 'line_item' ) as $item ) {
-                                                if ( ! ( $item instanceof \WC_Order_Item_Product ) ) {
-                                                        continue;
-                                                }
+                        $rows = array();
+                        $page = 1;
 
-                                                $target_id = (int) $item->get_variation_id();
-                                                if ( $target_id <= 0 ) {
-                                                        $target_id = (int) $item->get_product_id();
-                                                }
-                                                if ( $target_id <= 0 || ! lpr_allocator_product_exists( $target_id ) ) {
-                                                        continue;
-                                                }
+                        do {
+                                $result = self::build_snapshot_page( $page, self::PAGE_LIMIT, $statuses );
+                                if ( ! empty( $result['rows'] ) ) {
+                                        $rows = array_merge( $rows, $result['rows'] );
+                                }
 
-                                                $desired = lpr_allocator_calc_backorder_desired( $item );
-
-                                                $allocated          = lpr_allocator_get_item_allocated_active( $item );
-                                                $backordered        = max( 0, $desired - $allocated );
-                                                $qty_ordered        = max( 0, (int) $item->get_quantity() );
-                                                $line_total         = (float) $item->get_total() + (float) $item->get_total_tax();
-                                                $eta_meta_key       = defined( __NAMESPACE__ . '\ORDER_ITEM_META_LINE_ETA' ) ? ORDER_ITEM_META_LINE_ETA : '_lpr_line_eta';
-                                                $line_eta           = (string) $item->get_meta( $eta_meta_key, true );
-                                                $alloc_source       = self::summarize_allocation_source( $item );
-                                                $alloc_text         = isset( $alloc_source['text'] ) ? (string) $alloc_source['text'] : '';
-                                                $alloc_url          = isset( $alloc_source['url'] ) ? (string) $alloc_source['url'] : '';
-                                                $alloc_status       = ( $allocated >= $desired ) ? __( 'Fully allocated', 'lpr-backorder-allocator' ) : ( $allocated > 0 ? __( 'Partially allocated', 'lpr-backorder-allocator' ) : __( 'Not allocated', 'lpr-backorder-allocator' ) );
-                                                $product_label      = $item->get_name();
-                                                $is_backorder_line  = ( $desired > 0 );
-
-                                                if ( $is_backorder_line ) {
-                                                        $has_backorder_line = true;
-                                                        $total_backordered += (int) $backordered;
-                                                }
-
-                                                $order_rows[] = array(
-                                                        'order_id'                  => (int) $order->get_id(),
-                                                        'order_number'              => (string) $number,
-                                                        'order_url'                 => (string) $order_url,
-                                                        'order_date_ts'             => $order_ts,
-                                                        'order_date'                => $order_date ? $order_date->date_i18n( 'd-m-Y' ) : '',
-                                                        'status'                    => (string) $status_h,
-                                                        'customer'                  => $customer,
-                                                        'customer_email'            => (string) $order->get_billing_email(),
-                                                        'currency'                  => (string) $order->get_currency(),
-                                                        'item_id'                   => (int) $item->get_id(),
-                                                        'product_id'                => $target_id,
-                                                        'product'                   => $product_label,
-                                                        'qty_ordered'               => $qty_ordered,
-                                                        'qty_allocated'             => (int) $allocated,
-                                                        'qty_backordered'           => (int) $backordered,
-                                                        'qty_backorder_desired'     => (int) $desired,
-                                                        'is_backorder_line'         => $is_backorder_line,
-                                                        'line_value'                => $line_total,
-                                                        'eta'                       => $line_eta,
-                                                        'allocation'                => $alloc_text,
-                                                        'allocation_url'            => $alloc_url,
-                                                        'allocation_label'          => $alloc_status,
-                                                        'order_backorder_outstand'  => 0, // populated when order is added.
-                                                );
-                                        }
-
-                                        if ( $has_backorder_line && ! empty( $order_rows ) ) {
-                                                foreach ( $order_rows as $row ) {
-                                                        $row['order_backorder_outstand'] = $total_backordered;
-                                                        $rows[]                          = $row;
-                                                }
-                                        }
+                                if ( empty( $result['has_more'] ) ) {
+                                        break;
                                 }
 
                                 $page++;
                         } while ( true );
 
+                        return self::finalize_rows( $rows );
+                }
+
+                /**
+                 * Build a single page of snapshot data.
+                 *
+                 * @param int   $page     Page number.
+                 * @param int   $limit    Items per page.
+                 * @param array $statuses Optional precomputed statuses.
+                 * @return array
+                 */
+                protected static function build_snapshot_page( int $page, int $limit, array $statuses = null ): array {
+                        if ( null === $statuses ) {
+                                $statuses = self::get_statuses();
+                        }
+
+                        $rows = array();
+
+                        $args      = array(
+                                'status'  => $statuses,
+                                'limit'   => $limit,
+                                'page'    => $page,
+                                'orderby' => 'date',
+                                'order'   => 'ASC',
+                                'return'  => 'ids',
+                                'type'    => 'shop_order',
+                        );
+                        $order_ids = function_exists( 'wc_get_orders' ) ? wc_get_orders( $args ) : array();
+
+                        if ( empty( $order_ids ) ) {
+                                return array(
+                                        'rows'     => array(),
+                                        'has_more' => false,
+                                );
+                        }
+
+                        foreach ( $order_ids as $oid ) {
+                                $order = wc_get_order( $oid );
+                                if ( ! ( $order instanceof \WC_Order ) ) {
+                                        continue;
+                                }
+
+                                $order_date = $order->get_date_created();
+                                $order_ts   = $order_date instanceof \WC_DateTime ? $order_date->getTimestamp() : (int) $order->get_id();
+                                $status     = (string) $order->get_status();
+                                $status_h   = function_exists( 'wc_get_order_status_name' ) ? wc_get_order_status_name( $status ) : $status;
+                                $number     = method_exists( $order, 'get_order_number' ) ? $order->get_order_number() : (string) $order->get_id();
+                                $customer   = trim( $order->get_formatted_shipping_full_name() );
+                                if ( '' === $customer ) {
+                                        $customer = trim( $order->get_formatted_billing_full_name() );
+                                }
+                                if ( '' === $customer ) {
+                                        $customer = (string) $order->get_billing_email();
+                                }
+                                $order_url = function_exists( 'get_edit_post_link' ) ? get_edit_post_link( $order->get_id(), '' ) : '';
+
+                                $order_rows         = array();
+                                $has_backorder_line = false;
+                                $total_backordered  = 0;
+
+                                foreach ( $order->get_items( 'line_item' ) as $item ) {
+                                        if ( ! ( $item instanceof \WC_Order_Item_Product ) ) {
+                                                continue;
+                                        }
+
+                                        $target_id = (int) $item->get_variation_id();
+                                        if ( $target_id <= 0 ) {
+                                                $target_id = (int) $item->get_product_id();
+                                        }
+                                        if ( $target_id <= 0 || ! lpr_allocator_product_exists( $target_id ) ) {
+                                                continue;
+                                        }
+
+                                        $desired = lpr_allocator_calc_backorder_desired( $item );
+
+                                        $allocated          = lpr_allocator_get_item_allocated_active( $item );
+                                        $backordered        = max( 0, $desired - $allocated );
+                                        $qty_ordered        = max( 0, (int) $item->get_quantity() );
+                                        $line_total         = (float) $item->get_total() + (float) $item->get_total_tax();
+                                        $eta_meta_key       = defined( __NAMESPACE__ . '\ORDER_ITEM_META_LINE_ETA' ) ? ORDER_ITEM_META_LINE_ETA : '_lpr_line_eta';
+                                        $line_eta           = (string) $item->get_meta( $eta_meta_key, true );
+                                        $alloc_source       = self::summarize_allocation_source( $item );
+                                        $alloc_text         = isset( $alloc_source['text'] ) ? (string) $alloc_source['text'] : '';
+                                        $alloc_url          = isset( $alloc_source['url'] ) ? (string) $alloc_source['url'] : '';
+                                        $alloc_status       = ( $allocated >= $desired ) ? __( 'Fully allocated', 'lpr-backorder-allocator' ) : ( $allocated > 0 ? __( 'Partially allocated', 'lpr-backorder-allocator' ) : __( 'Not allocated', 'lpr-backorder-allocator' ) );
+                                        $product_label      = $item->get_name();
+                                        $is_backorder_line  = ( $desired > 0 );
+
+                                        if ( $is_backorder_line ) {
+                                                $has_backorder_line = true;
+                                                $total_backordered += (int) $backordered;
+                                        }
+
+                                        $order_rows[] = array(
+                                                'order_id'                  => (int) $order->get_id(),
+                                                'order_number'              => (string) $number,
+                                                'order_url'                 => (string) $order_url,
+                                                'order_date_ts'             => $order_ts,
+                                                'order_date'                => $order_date ? $order_date->date_i18n( 'd-m-Y' ) : '',
+                                                'status'                    => (string) $status_h,
+                                                'customer'                  => $customer,
+                                                'customer_email'            => (string) $order->get_billing_email(),
+                                                'currency'                  => (string) $order->get_currency(),
+                                                'item_id'                   => (int) $item->get_id(),
+                                                'product_id'                => $target_id,
+                                                'product'                   => $product_label,
+                                                'qty_ordered'               => $qty_ordered,
+                                                'qty_allocated'             => (int) $allocated,
+                                                'qty_backordered'           => (int) $backordered,
+                                                'qty_backorder_desired'     => (int) $desired,
+                                                'is_backorder_line'         => $is_backorder_line,
+                                                'line_value'                => $line_total,
+                                                'eta'                       => $line_eta,
+                                                'allocation'                => $alloc_text,
+                                                'allocation_url'            => $alloc_url,
+                                                'allocation_label'          => $alloc_status,
+                                                'order_backorder_outstand'  => 0, // populated when order is added.
+                                        );
+                                }
+
+                                if ( $has_backorder_line && ! empty( $order_rows ) ) {
+                                        foreach ( $order_rows as $row ) {
+                                                $row['order_backorder_outstand'] = $total_backordered;
+                                                $rows[]                          = $row;
+                                        }
+                                }
+                        }
+
+                        return array(
+                                'rows'     => $rows,
+                                'has_more' => count( $order_ids ) === $limit,
+                        );
+                }
+
+                /**
+                 * Finalize/sort the built rows.
+                 */
+                protected static function finalize_rows( array $rows ): array {
                         usort(
                                 $rows,
                                 static function ( $a, $b ) {
@@ -10781,6 +10857,61 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Order_Indexer' ) ) {
                                 'built_at' => time(),
                                 'rows'     => $rows,
                         );
+                }
+
+                /**
+                 * Derive order statuses to scan.
+                 */
+                protected static function get_statuses(): array {
+                        $settings = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array( 'order_statuses' => array( 'processing', 'on-hold' ) );
+                        $statuses = array();
+                        foreach ( (array) $settings['order_statuses'] as $st ) {
+                                $statuses[] = 'wc-' . preg_replace( '/^wc-/', '', sanitize_key( $st ) );
+                        }
+
+                        return $statuses;
+                }
+
+                /**
+                 * Store progress between chunk runs.
+                 */
+                protected static function persist_progress_state( array $rows, int $next_page ): void {
+                        $state = array(
+                                'rows' => $rows,
+                                'page' => max( 1, $next_page ),
+                        );
+
+                        if ( null === get_option( self::OPT_PROGRESS, null ) ) {
+                                add_option( self::OPT_PROGRESS, $state, '', 'no' );
+                        } else {
+                                update_option( self::OPT_PROGRESS, $state, false );
+                        }
+                }
+
+                /**
+                 * Retrieve progress state.
+                 */
+                protected static function get_progress_state(): array {
+                        $state = get_option( self::OPT_PROGRESS, array( 'rows' => array(), 'page' => 1 ) );
+                        if ( ! is_array( $state ) ) {
+                                $state = array( 'rows' => array(), 'page' => 1 );
+                        }
+
+                        if ( ! isset( $state['rows'] ) || ! is_array( $state['rows'] ) ) {
+                                $state['rows'] = array();
+                        }
+                        if ( ! isset( $state['page'] ) || (int) $state['page'] < 1 ) {
+                                $state['page'] = 1;
+                        }
+
+                        return $state;
+                }
+
+                /**
+                 * Clear any in-flight progress when scheduling a rebuild.
+                 */
+                protected static function reset_progress(): void {
+                        delete_option( self::OPT_PROGRESS );
                 }
 
                 protected static function summarize_allocation_source( \WC_Order_Item_Product $item ): array {
