@@ -1756,6 +1756,50 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_touch_allocation_status'
         }
 }
 
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_logging_enabled' ) ) {
+        /**
+         * Toggleable logging helper (static cache to keep runtime cost negligible).
+         */
+        function lpr_allocator_logging_enabled(): bool {
+                static $enabled = null;
+
+                if ( null === $enabled ) {
+                        $enabled = (bool) apply_filters( 'lpr_allocator_enable_logging', false );
+                }
+
+                return $enabled;
+        }
+}
+
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_log_event' ) ) {
+        /**
+         * Lightweight structured logger for allocator events.
+         */
+        function lpr_allocator_log_event( string $action, array $context = array() ): void {
+                if ( ! lpr_allocator_logging_enabled() || ! function_exists( 'wc_get_logger' ) ) {
+                        return;
+                }
+
+                $parts = array( 'action=' . $action );
+
+                foreach ( $context as $key => $value ) {
+                        if ( is_scalar( $value ) || null === $value ) {
+                                $parts[] = $key . '=' . ( null === $value ? 'null' : (string) $value );
+                                continue;
+                        }
+
+                        if ( is_object( $value ) && method_exists( $value, 'get_id' ) ) {
+                                $parts[] = $key . '=' . (string) $value->get_id();
+                                continue;
+                        }
+
+                        $parts[] = $key . '=' . wp_json_encode( $value );
+                }
+
+                wc_get_logger()->info( implode( ' | ', $parts ), array( 'source' => 'lpr-allocator' ) );
+        }
+}
+
 if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_add_release_note' ) ) {
         /**
          * Add a standardized order note explaining why allocations were released.
@@ -2646,13 +2690,32 @@ table.appendChild(tr);
 			}
 
 			// Lines save.
-			if ( isset( $_POST['lpr_po_lines_nonce'] ) && wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['lpr_po_lines_nonce'] ) ), 'lpr_po_lines_action' ) ) {
-				$raw_lines = isset( $_POST['lpr_po_lines'] ) ? (array) $_POST['lpr_po_lines'] : array();
-				$clean     = lpr_allocator_sanitize_po_lines_input( $raw_lines );
-				$clean     = lpr_allocator_recalculate_po_lines_from_allocations( $post_id, $clean );
-				update_post_meta( $post_id, PO_META_LINES, $clean );
-			}
-		}
+                        if ( isset( $_POST['lpr_po_lines_nonce'] ) && wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['lpr_po_lines_nonce'] ) ), 'lpr_po_lines_action' ) ) {
+                                $raw_lines = isset( $_POST['lpr_po_lines'] ) ? (array) $_POST['lpr_po_lines'] : array();
+                                $clean     = lpr_allocator_sanitize_po_lines_input( $raw_lines );
+                                $clean     = lpr_allocator_recalculate_po_lines_from_allocations( $post_id, $clean );
+                                update_post_meta( $post_id, PO_META_LINES, $clean );
+                        }
+
+                        $po_number_for_log = (string) get_post_meta( $post_id, PO_META_PO_NUMBER, true );
+                        $created_marker    = (string) get_post_meta( $post_id, '_lpr_po_created_at', true );
+
+                        if ( '' === $created_marker && ! in_array( $post->post_status, array( 'auto-draft', 'trash' ), true ) ) {
+                                $reason = __( 'Supplier PO saved via admin UI.', 'lpr-backorder-allocator' );
+
+                                update_post_meta( $post_id, '_lpr_po_created_at', current_time( 'mysql' ) );
+
+                                lpr_allocator_log_event(
+                                        'po_created',
+                                        array(
+                                                'po_id'     => $post_id,
+                                                'po_number' => $po_number_for_log,
+                                                'status'    => $post->post_status,
+                                                'reason'    => $reason,
+                                        )
+                                );
+                        }
+                }
 
 		public static function columns( array $columns ): array {
 			$new = array();
@@ -4515,15 +4578,11 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_VIP_Prioritizer' ) ) {
 
                                         $qty_taken = isset( $disp['qty_taken'] ) ? max( 0, (int) $disp['qty_taken'] ) : 0;
                                         $from_po   = isset( $disp['from_po'] ) ? (int) $disp['from_po'] : 0;
+                                        $release_reason = __( 'Allocation moved to higher-priority VIP order.', 'lpr-backorder-allocator' );
                                         if ( $qty_taken > 0 && $from_po > 0 ) {
-                                                $released = self::release_from_po( $lost_item, $from_po, $qty_taken );
+                                                $released = self::release_from_po( $lost_item, $from_po, $qty_taken, $release_reason );
                                                 if ( $released > 0 ) {
-                                                        lpr_allocator_add_release_note(
-                                                                $lost_order,
-                                                                $lost_item,
-                                                                (int) $released,
-                                                                __( 'Allocation moved to higher-priority VIP order.', 'lpr-backorder-allocator' )
-                                                        );
+                                                        lpr_allocator_add_release_note( $lost_order, $lost_item, (int) $released, $release_reason );
                                                 }
                                         }
 
@@ -4532,7 +4591,9 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_VIP_Prioritizer' ) ) {
                                                         $qty_add = isset( $add['qty'] ) ? max( 0, (int) $add['qty'] ) : 0;
                                                         $po_id   = isset( $add['po_id'] ) ? (int) $add['po_id'] : 0;
                                                         if ( $qty_add > 0 && $po_id > 0 ) {
-                                                                self::add_allocation_row( $lost_order, $lost_item, $po_id, (string) ( $add['po_number'] ?? '' ), (string) ( $add['eta'] ?? '' ), $qty_add );
+                                                                $alloc_reason = __( 'VIP displacement allocation.', 'lpr-backorder-allocator' );
+
+                                                                self::add_allocation_row( $lost_order, $lost_item, $po_id, (string) ( $add['po_number'] ?? '' ), (string) ( $add['eta'] ?? '' ), $qty_add, $alloc_reason );
                                                         }
                                                 }
                                         }
@@ -4616,12 +4677,20 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_VIP_Prioritizer' ) ) {
                         $allocs   = $released['allocs'];
 
                         if ( $released['released'] > 0 ) {
-                                lpr_allocator_add_release_note(
-                                        $order,
-                                        $item,
-                                        (int) $released['released'],
-                                        __( 'VIP prioritization freed later allocation rows to avoid over-allocation.', 'lpr-backorder-allocator' )
-                                );
+                                $release_reason = __( 'VIP prioritization freed later allocation rows to avoid over-allocation.', 'lpr-backorder-allocator' );
+
+                                lpr_allocator_add_release_note( $order, $item, (int) $released['released'], $release_reason );
+
+                                        lpr_allocator_log_event(
+                                                'allocation_released',
+                                                array(
+                                                        'order_id' => $order->get_id(),
+                                                        'item_id'  => $item->get_id(),
+                                                        'qty'      => (int) $released['released'],
+                                                        'po_id'    => 'mixed',
+                                                        'reason'   => $release_reason,
+                                                )
+                                        );
                         }
                         }
 
@@ -4706,7 +4775,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_VIP_Prioritizer' ) ) {
                 /**
                  * Release a specific quantity tied to a PO from an item.
                  */
-                protected static function release_from_po( \WC_Order_Item_Product $item, int $po_id, int $qty ): int {
+                protected static function release_from_po( \WC_Order_Item_Product $item, int $po_id, int $qty, string $reason = '' ): int {
                         if ( $po_id <= 0 || $qty <= 0 ) {
                                 return 0;
                         }
@@ -4745,13 +4814,26 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_VIP_Prioritizer' ) ) {
                         $item->update_meta_data( $meta_key, $allocs );
                         $item->save();
 
+                        if ( $released > 0 ) {
+                                lpr_allocator_log_event(
+                                        'allocation_released',
+                                        array(
+                                                'order_id' => $item->get_order_id(),
+                                                'item_id'  => $item->get_id(),
+                                                'po_id'    => $po_id,
+                                                'qty'      => (int) $released,
+                                                'reason'   => $reason ? $reason : 'Allocation release',
+                                        )
+                                );
+                        }
+
                         return $released;
                 }
 
                 /**
                  * Add a fresh allocation row.
                  */
-                protected static function add_allocation_row( \WC_Order $order, \WC_Order_Item_Product $item, int $po_id, string $po_number, string $eta, int $qty ): void {
+                protected static function add_allocation_row( \WC_Order $order, \WC_Order_Item_Product $item, int $po_id, string $po_number, string $eta, int $qty, string $reason = '' ): void {
                         $meta_key = defined( __NAMESPACE__ . '\ORDER_ITEM_META_ALLOCATIONS' ) ? ORDER_ITEM_META_ALLOCATIONS : 'lpr_allocations';
                         $allocs   = $item->get_meta( $meta_key, true );
                         if ( ! is_array( $allocs ) ) {
@@ -4774,6 +4856,19 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_VIP_Prioritizer' ) ) {
                         $item->save();
 
                         lpr_allocator_index_po_allocation( $po_id, (int) $order->get_id(), (int) $item->get_id() );
+
+                        lpr_allocator_log_event(
+                                'allocation_reserved',
+                                array(
+                                        'order_id'  => $order->get_id(),
+                                        'item_id'   => $item->get_id(),
+                                        'po_id'     => $po_id,
+                                        'po_number' => $po_number,
+                                        'qty'       => (int) $qty,
+                                        'eta'       => $eta,
+                                        'reason'    => $reason ? $reason : 'Allocation recorded',
+                                )
+                        );
                 }
 
                 /**
@@ -6016,16 +6111,30 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_FIFO_Allocator' ) ) {
 				$sku         = $product instanceof \WC_Product ? $product->get_sku() : '';
 				$line_name   = $target_item->get_name();
 				$eta_display = $eta_to_store ? $eta_to_store : ( $po_eta_header ?: '-' );
-				$note = sprintf(
-					/* translators: 1: qty, 2: item name, 3: SKU, 4: PO number, 5: ETA */
-					__( 'Allocated %1$dx %2$s%3$s from PO #%4$s (ETA %5$s).', 'lpr-backorder-allocator' ),
+                                $note = sprintf(
+                                        /* translators: 1: qty, 2: item name, 3: SKU, 4: PO number, 5: ETA */
+                                        __( 'Allocated %1$dx %2$s%3$s from PO #%4$s (ETA %5$s).', 'lpr-backorder-allocator' ),
 					(int) $allocate_now,
 					$line_name,
 					$sku ? ' [' . $sku . ']' : '',
 					$po_number ? $po_number : (string) $po_id,
-					$eta_display
-				);
-				$order->add_order_note( $note, false, true );
+                                        $eta_display
+                                );
+                                $order->add_order_note( $note, false, true );
+
+                                lpr_allocator_log_event(
+                                        'allocation_reserved',
+                                        array(
+                                                'order_id'   => $order->get_id(),
+                                                'item_id'    => $target_item->get_id(),
+                                                'product_id' => $target_product_or_variation_id,
+                                                'qty'        => (int) $allocate_now,
+                                                'po_id'      => $po_id,
+                                                'po_number'  => $po_number,
+                                                'eta'        => $eta_to_store,
+                                                'reason'     => 'FIFO allocation to cover backorder demand',
+                                        )
+                                );
 
                                 $affected_orders[ (int) $order->get_id() ] = true;
 
@@ -6701,6 +6810,19 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_FIFO_Allocator' ) ) {
                         );
                         $order->add_order_note( $note, false, true );
 
+                        lpr_allocator_log_event(
+                                'allocation_reallocated_later',
+                                array(
+                                        'order_id'  => $order->get_id(),
+                                        'item_id'   => $item->get_id(),
+                                        'qty'       => (int) $moved_qty,
+                                        'po_id'     => $po_id,
+                                        'po_number' => $po_number,
+                                        'eta'       => $eta_to_store,
+                                        'reason'    => 'Requested delivery window adjustment',
+                                )
+                        );
+
                         // Refresh PO line tallies after releasing earlier allocations.
                         if ( function_exists( __NAMESPACE__ . '\lpr_allocator_reapply_po_allocations_for_order' ) ) {
                                 lpr_allocator_reapply_po_allocations_for_order( (int) $order->get_id() );
@@ -6787,6 +6909,19 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_FIFO_Allocator' ) ) {
                                 $eta_to_store ? $eta_to_store : '—'
                         );
                         $order->add_order_note( $note, false, true );
+
+                        lpr_allocator_log_event(
+                                'allocation_reallocated_earlier',
+                                array(
+                                        'order_id'  => $order->get_id(),
+                                        'item_id'   => $item->get_id(),
+                                        'qty'       => (int) $moved_qty,
+                                        'po_id'     => $po_id,
+                                        'po_number' => $po_number,
+                                        'eta'       => $eta_to_store,
+                                        'reason'    => 'Improved delivery ETA for customer request',
+                                )
+                        );
 
                         if ( function_exists( __NAMESPACE__ . '\lpr_allocator_reapply_po_allocations_for_order' ) ) {
                                 lpr_allocator_reapply_po_allocations_for_order( (int) $order->get_id() );
@@ -8958,11 +9093,19 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Overage_Checker' ) ) {
                                 if ( ! empty( $payload['released'] ) ) {
                                         $order = wc_get_order( $payload['item']->get_order_id() );
                                         if ( $order instanceof \WC_Order ) {
-                                                lpr_allocator_add_release_note(
-                                                        $order,
-                                                        $payload['item'],
-                                                        (int) $payload['released'],
-                                                        sprintf( __( 'Adjusted because %s has less available quantity than previously allocated.', 'lpr-backorder-allocator' ), $po_label )
+                                                $release_reason = sprintf( __( 'Adjusted because %s has less available quantity than previously allocated.', 'lpr-backorder-allocator' ), $po_label );
+
+                                                lpr_allocator_add_release_note( $order, $payload['item'], (int) $payload['released'], $release_reason );
+
+                                                lpr_allocator_log_event(
+                                                        'allocation_released',
+                                                        array(
+                                                                'order_id' => $order->get_id(),
+                                                                'item_id'  => $payload['item']->get_id(),
+                                                                'po_id'    => $po_id,
+                                                                'qty'      => (int) $payload['released'],
+                                                                'reason'   => $release_reason,
+                                                        )
                                                 );
                                         }
                                 }
