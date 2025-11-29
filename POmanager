@@ -6802,7 +6802,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Auto_PO_Allocator' ) ) {
         /**
          * Recurring job to allocate all open Supplier POs using the FIFO allocator.
          */
-        class Auto_PO_Allocator {
+class Auto_PO_Allocator {
 
                 const ACTION_HOOK     = 'lpr_allocator_auto_allocate_open_pos';
                 const MAX_STORED_JOBS = 10;
@@ -7034,7 +7034,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Auto_PO_Allocator' ) ) {
                 /**
                  * Queue a single allocation pass in the background (prefers Action Scheduler).
                  */
-                protected static function queue_allocation_pass( int $page = 1, string $job_id = '' ): string {
+                protected static function queue_allocation_pass( int $page = 1, string $job_id = '' ): bool {
                         $page   = max( 1, $page );
                         $job_id = self::ensure_job_id( $job_id );
                         $args   = array(
@@ -7045,22 +7045,34 @@ if ( ! class_exists( __NAMESPACE__ . '\Auto_PO_Allocator' ) ) {
                         // Use Action Scheduler when available for async execution.
                         if ( function_exists( 'as_enqueue_async_action' ) ) {
                                 as_enqueue_async_action( self::ACTION_HOOK, $args, 'lpr-allocator', true );
-                                return $job_id;
+                                return true;
                         }
                         if ( function_exists( 'as_schedule_single_action' ) ) {
                                 if ( function_exists( 'as_next_scheduled_action' ) && as_next_scheduled_action( self::ACTION_HOOK, $args, 'lpr-allocator' ) ) {
-                                        return $job_id;
+                                        return true;
                                 }
                                 as_schedule_single_action( time() + 5, self::ACTION_HOOK, $args, 'lpr-allocator' );
-                                return $job_id;
+                                return true;
                         }
 
                         // Fallback to WP-Cron single event if Action Scheduler is unavailable.
                         if ( ! wp_next_scheduled( self::ACTION_HOOK, $args ) ) {
-                                wp_schedule_single_event( time() + 5, self::ACTION_HOOK, $args );
+                                return (bool) wp_schedule_single_event( time() + 5, self::ACTION_HOOK, $args );
                         }
 
-                        return $job_id;
+                        return true;
+                }
+
+                protected static function process_inline( int $page, string $job_id ): void {
+                        $next_page = $page;
+
+                        do {
+                                self::record_job_progress( $job_id, $next_page );
+                                $result = self::allocate_page( $next_page, $job_id );
+                                $next_page++;
+                        } while ( ! empty( $result['has_more'] ) );
+
+                        self::record_job_finish( $job_id );
                 }
 
                 public static function maybe_schedule( bool $force = false ): void {
@@ -7102,7 +7114,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Auto_PO_Allocator' ) ) {
                         $result = self::allocate_page( $page, $job_id );
 
                         if ( ! empty( $result['has_more'] ) ) {
-                                self::queue_allocation_pass( $page + 1, $job_id );
+                                if ( ! self::queue_allocation_pass( $page + 1, $job_id ) ) {
+                                        self::process_inline( $page + 1, $job_id );
+                                        return;
+                                }
                         } else {
                                 self::record_job_finish( $job_id );
                         }
