@@ -7523,26 +7523,27 @@ self::persist_state( $state );
 				'po_id'  => 0,
 			);
 
-			// Use Action Scheduler when available for async execution.
-			if ( function_exists( 'as_enqueue_async_action' ) ) {
-				as_enqueue_async_action( self::ACTION_HOOK, $args, 'lpr-allocator', true );
-				return true;
-			}
-			if ( function_exists( 'as_schedule_single_action' ) ) {
-				if ( function_exists( 'as_next_scheduled_action' ) && as_next_scheduled_action( self::ACTION_HOOK, $args, 'lpr-allocator' ) ) {
-					return true;
-				}
+                        // Use Action Scheduler when available for async execution.
+                        if ( function_exists( 'as_enqueue_async_action' ) ) {
+                                $queued = as_enqueue_async_action( self::ACTION_HOOK, $args, 'lpr-allocator', true );
+                                if ( $queued ) {
+                                        return true;
+                                }
+                        }
+                        if ( function_exists( 'as_schedule_single_action' ) ) {
+                                if ( function_exists( 'as_next_scheduled_action' ) && as_next_scheduled_action( self::ACTION_HOOK, $args, 'lpr-allocator' ) ) {
+                                        return true;
+                                }
 
-				as_schedule_single_action( time() + 5, self::ACTION_HOOK, $args, 'lpr-allocator' );
-				return true;
-			}
+                                return (bool) as_schedule_single_action( time() + 5, self::ACTION_HOOK, $args, 'lpr-allocator' );
+                        }
 
-			// Fallback to WP-Cron single event if Action Scheduler is unavailable.
-			if ( ! wp_next_scheduled( self::ACTION_HOOK, $args ) ) {
-				return (bool) wp_schedule_single_event( time() + 5, self::ACTION_HOOK, $args );
-			}
+                        // Fallback to WP-Cron single event if Action Scheduler is unavailable.
+                        if ( ! wp_next_scheduled( self::ACTION_HOOK, $args ) ) {
+                                return (bool) wp_schedule_single_event( time() + 5, self::ACTION_HOOK, $args );
+                        }
 
-			return true;
+                        return true;
 		}
 
 		/**
@@ -7616,27 +7617,28 @@ self::persist_state( $state );
 				'po_id'  => $po_id,
 			);
 
-			// Use Action Scheduler when available for async execution.
-			if ( function_exists( 'as_enqueue_async_action' ) ) {
-				as_enqueue_async_action( self::ACTION_HOOK, $args, 'lpr-allocator', true );
-				return true;
-			}
+                        // Use Action Scheduler when available for async execution.
+                        if ( function_exists( 'as_enqueue_async_action' ) ) {
+                                $queued = as_enqueue_async_action( self::ACTION_HOOK, $args, 'lpr-allocator', true );
+                                if ( $queued ) {
+                                        return true;
+                                }
+                        }
 
-			if ( function_exists( 'as_schedule_single_action' ) ) {
-				if ( function_exists( 'as_next_scheduled_action' ) && as_next_scheduled_action( self::ACTION_HOOK, $args, 'lpr-allocator' ) ) {
-					return true;
-				}
+                        if ( function_exists( 'as_schedule_single_action' ) ) {
+                                if ( function_exists( 'as_next_scheduled_action' ) && as_next_scheduled_action( self::ACTION_HOOK, $args, 'lpr-allocator' ) ) {
+                                        return true;
+                                }
 
-				as_schedule_single_action( time() + 5, self::ACTION_HOOK, $args, 'lpr-allocator' );
-				return true;
-			}
+                                return (bool) as_schedule_single_action( time() + 5, self::ACTION_HOOK, $args, 'lpr-allocator' );
+                        }
 
-			// Fallback to WP-Cron single event if Action Scheduler is unavailable.
-			if ( ! wp_next_scheduled( self::ACTION_HOOK, $args ) ) {
-				return (bool) wp_schedule_single_event( time() + 5, self::ACTION_HOOK, $args );
-			}
+                        // Fallback to WP-Cron single event if Action Scheduler is unavailable.
+                        if ( ! wp_next_scheduled( self::ACTION_HOOK, $args ) ) {
+                                return (bool) wp_schedule_single_event( time() + 5, self::ACTION_HOOK, $args );
+                        }
 
-			return true;
+                        return true;
 		}
 
 		/**
