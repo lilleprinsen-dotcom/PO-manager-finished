@@ -7804,8 +7804,9 @@ self::persist_state( $state );
                                         $queued += count( $chunk );
                                 } else {
                                         foreach ( $chunk as $po_id ) {
-                                                $queued++;
-                                                self::process_po_allocation( (int) $po_id, $job_id, 1 );
+                                                if ( self::queue_single_po_action( (int) $po_id, $job_id ) ) {
+                                                        $queued++;
+                                                }
                                         }
                                 }
 
