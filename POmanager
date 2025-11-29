@@ -6939,15 +6939,15 @@ if ( ! class_exists( __NAMESPACE__ . '\Auto_PO_Allocator' ) ) {
          */
 class Auto_PO_Allocator {
 
-                const ACTION_HOOK     = 'lpr_allocator_auto_allocate_open_pos';
-                const MAX_STORED_JOBS = 10;
+const ACTION_HOOK     = 'lpr_allocator_auto_allocate_open_pos';
+const MAX_STORED_JOBS = 10;
 
-                public static function init(): void {
-                        add_action( 'init', array( __CLASS__, 'maybe_schedule' ) );
-                        add_action( self::ACTION_HOOK, array( __CLASS__, 'run' ), 10, 2 );
-                        add_action( 'transition_post_status', array( __CLASS__, 'handle_po_status_change' ), 10, 3 );
-                        add_action( 'before_delete_post', array( __CLASS__, 'handle_po_delete' ) );
-                }
+public static function init(): void {
+add_action( 'init', array( __CLASS__, 'maybe_schedule' ) );
+add_action( self::ACTION_HOOK, array( __CLASS__, 'run' ), 10, 3 );
+add_action( 'transition_post_status', array( __CLASS__, 'handle_po_status_change' ), 10, 3 );
+add_action( 'before_delete_post', array( __CLASS__, 'handle_po_delete' ) );
+}
 
                 public static function reset_schedule(): void {
                         if ( function_exists( 'as_unschedule_all_actions' ) ) {
@@ -6988,13 +6988,14 @@ class Auto_PO_Allocator {
                         return $interval;
                 }
 
-                protected static function default_state(): array {
-                        return array(
-                                'jobs'                   => array(),
-                                'last_finished_at'       => '',
-                                'last_full_reallocation' => '',
-                        );
-                }
+protected static function default_state(): array {
+return array(
+'jobs'                   => array(),
+'last_finished_at'       => '',
+'last_full_reallocation' => '',
+'pending'                => 0,
+);
+}
 
                 protected static function get_state(): array {
                         $state = get_option( defined( __NAMESPACE__ . '\\AUTO_ALLOCATOR_STATE_OPTION' ) ? AUTO_ALLOCATOR_STATE_OPTION : 'lpr_allocator_auto_alloc_state', array() );
@@ -7034,23 +7035,25 @@ class Auto_PO_Allocator {
                         update_option( defined( __NAMESPACE__ . '\\AUTO_ALLOCATOR_STATE_OPTION' ) ? AUTO_ALLOCATOR_STATE_OPTION : 'lpr_allocator_auto_alloc_state', $state, false );
                 }
 
-                protected static function start_job(): string {
-                        $job_id = uniqid( 'lpr_auto_alloc_', true );
-                        $state  = self::get_state();
-                        $now    = current_time( 'mysql' );
+protected static function start_job(): string {
+$job_id = uniqid( 'lpr_auto_alloc_', true );
+$state  = self::get_state();
+$now    = current_time( 'mysql' );
 
-                        $state['jobs'][ $job_id ] = array(
-                                'id'          => $job_id,
-                                'page'        => 1,
-                                'processed'   => 0,
-                                'last_po_id'  => 0,
-                                'updated_at'  => $now,
-                                'finished_at' => '',
-                                'started_at'  => $now,
-                                'status'      => 'running',
-                        );
+$state['jobs'][ $job_id ] = array(
+'id'          => $job_id,
+'page'        => 1,
+'processed'   => 0,
+'last_po_id'  => 0,
+'updated_at'  => $now,
+'finished_at' => '',
+'started_at'  => $now,
+'status'      => 'running',
+'pending'     => 0,
+'total'       => 0,
+);
 
-                        self::persist_state( $state );
+self::persist_state( $state );
 
                         return $job_id;
                 }
@@ -7063,93 +7066,125 @@ class Auto_PO_Allocator {
                         return self::start_job();
                 }
 
-                protected static function record_job_progress( string $job_id, int $page, int $po_id = 0 ): void {
-                        $state = self::get_state();
-                        $now   = current_time( 'mysql' );
+		protected static function record_job_progress( string $job_id, int $page, int $po_id = 0 ): void {
+			$state = self::get_state();
+			$now   = current_time( 'mysql' );
 
-                        if ( ! isset( $state['jobs'][ $job_id ] ) ) {
-                                $state['jobs'][ $job_id ] = array(
-                                        'id'          => $job_id,
-                                        'page'        => $page,
-                                        'processed'   => 0,
-                                        'last_po_id'  => 0,
-                                        'updated_at'  => $now,
-                                        'finished_at' => '',
-                                        'started_at'  => $now,
-                                        'status'      => 'running',
-                                );
-                        }
+			if ( ! isset( $state['jobs'][ $job_id ] ) ) {
+				$state['jobs'][ $job_id ] = array(
+					'id'          => $job_id,
+					'page'        => $page,
+					'processed'   => 0,
+					'last_po_id'  => 0,
+					'updated_at'  => $now,
+					'finished_at' => '',
+					'started_at'  => $now,
+					'status'      => 'running',
+					'pending'     => 0,
+					'total'       => 0,
+				);
+			}
 
-                        $state['jobs'][ $job_id ]['page']       = $page;
-                        $state['jobs'][ $job_id ]['updated_at'] = $now;
-                        $state['jobs'][ $job_id ]['status']     = 'running';
-                        $state['jobs'][ $job_id ]['processed']  = isset( $state['jobs'][ $job_id ]['processed'] ) ? (int) $state['jobs'][ $job_id ]['processed'] : 0;
+			$state['jobs'][ $job_id ]['page']       = $page;
+			$state['jobs'][ $job_id ]['updated_at'] = $now;
+			$state['jobs'][ $job_id ]['status']     = 'running';
+			$state['jobs'][ $job_id ]['processed']  = isset( $state['jobs'][ $job_id ]['processed'] ) ? (int) $state['jobs'][ $job_id ]['processed'] : 0;
+			$state['jobs'][ $job_id ]['pending']    = isset( $state['jobs'][ $job_id ]['pending'] ) ? max( 0, (int) $state['jobs'][ $job_id ]['pending'] ) : 0;
+			$state['jobs'][ $job_id ]['total']      = isset( $state['jobs'][ $job_id ]['total'] ) ? max( 0, (int) $state['jobs'][ $job_id ]['total'] ) : 0;
 
-                        if ( $po_id > 0 ) {
-                                $state['jobs'][ $job_id ]['processed'] += 1;
-                                $state['jobs'][ $job_id ]['last_po_id'] = $po_id;
-                        }
+			if ( $po_id > 0 ) {
+				$state['jobs'][ $job_id ]['processed'] += 1;
+				$state['jobs'][ $job_id ]['last_po_id'] = $po_id;
+				if ( $state['jobs'][ $job_id ]['pending'] > 0 ) {
+					$state['jobs'][ $job_id ]['pending'] -= 1;
+				}
+			}
 
-                        self::persist_state( $state );
-                }
+			self::persist_state( $state );
+		}
 
-                protected static function record_job_finish( string $job_id ): void {
-                        $state = self::get_state();
-                        if ( ! isset( $state['jobs'][ $job_id ] ) ) {
-                                return;
-                        }
+						protected static function record_job_queue_size( string $job_id, int $queued ): void {
+			$state = self::get_state();
+			if ( ! isset( $state['jobs'][ $job_id ] ) ) {
+				return;
+			}
 
-                        $finished = current_time( 'mysql' );
-                        $state['jobs'][ $job_id ]['status']       = 'completed';
-                        $state['jobs'][ $job_id ]['finished_at']  = $finished;
-                        $state['jobs'][ $job_id ]['updated_at']   = $finished;
-                        $state['last_finished_at']                = $finished;
+			$now = current_time( 'mysql' );
 
-                        if ( (int) $state['jobs'][ $job_id ]['processed'] > 0 ) {
-                                $state['last_full_reallocation'] = $finished;
-                        }
+			$state['jobs'][ $job_id ]['pending']    = max( 0, $queued );
+			$state['jobs'][ $job_id ]['total']      = max( 0, $queued );
+			$state['jobs'][ $job_id ]['updated_at'] = $now;
+			$state['jobs'][ $job_id ]['status']     = $queued > 0 ? 'running' : 'completed';
 
-                        self::persist_state( $state );
-                }
+			if ( 0 === $queued ) {
+				$state['jobs'][ $job_id ]['finished_at']       = $now;
+				$state['last_finished_at']                      = $now;
+				if ( ! empty( $state['jobs'][ $job_id ]['processed'] ) ) {
+					$state['last_full_reallocation'] = $now;
+				}
+			}
 
-                public static function get_status_snapshot(): array {
-                        $state       = self::get_state();
-                        $jobs        = isset( $state['jobs'] ) && is_array( $state['jobs'] ) ? $state['jobs'] : array();
-                        $unfinished  = array();
-                        $last_finish = isset( $state['last_finished_at'] ) ? (string) $state['last_finished_at'] : '';
+			self::persist_state( $state );
+		}
 
-                        foreach ( $jobs as $job ) {
-                                $status = isset( $job['status'] ) ? (string) $job['status'] : '';
-                                if ( 'completed' !== $status ) {
-                                        $unfinished[] = $job;
-                                }
-                                if ( 'completed' === $status && ! empty( $job['finished_at'] ) ) {
-                                        if ( '' === $last_finish || strcmp( (string) $job['finished_at'], $last_finish ) > 0 ) {
-                                                $last_finish = (string) $job['finished_at'];
-                                        }
-                                }
-                        }
+		protected static function record_job_finish( string $job_id ): void {
+			$state = self::get_state();
+			if ( ! isset( $state['jobs'][ $job_id ] ) ) {
+				return;
+			}
 
-                        uasort(
-                                $unfinished,
-                                static function ( $a, $b ) {
-                                        $start_a = isset( $a['started_at'] ) ? (string) $a['started_at'] : '';
-                                        $start_b = isset( $b['started_at'] ) ? (string) $b['started_at'] : '';
+			$finished = current_time( 'mysql' );
+			$state['jobs'][ $job_id ]['status']       = 'completed';
+			$state['jobs'][ $job_id ]['finished_at']  = $finished;
+			$state['jobs'][ $job_id ]['updated_at']   = $finished;
+			$state['jobs'][ $job_id ]['pending']      = 0;
+			$state['last_finished_at']                = $finished;
 
-                                        return strcmp( $start_b, $start_a );
-                                }
-                        );
+			if ( (int) $state['jobs'][ $job_id ]['processed'] > 0 ) {
+				$state['last_full_reallocation'] = $finished;
+			}
 
-                        $unfinished = array_slice( $unfinished, 0, 5 );
+			self::persist_state( $state );
+		}
 
-                        return array(
-                                'last_finished_at'       => $last_finish,
-                                'unfinished_jobs'        => $unfinished,
-                                'last_full_reallocation' => isset( $state['last_full_reallocation'] ) ? (string) $state['last_full_reallocation'] : '',
-                        );
-                }
+				public static function get_status_snapshot(): array {
+			$state       = self::get_state();
+			$jobs        = isset( $state['jobs'] ) && is_array( $state['jobs'] ) ? $state['jobs'] : array();
+			$unfinished  = array();
+			$last_finish = isset( $state['last_finished_at'] ) ? (string) $state['last_finished_at'] : '';
 
-                public static function format_datetime( string $mysql ): string {
+			foreach ( $jobs as $job ) {
+				$status = isset( $job['status'] ) ? (string) $job['status'] : '';
+				if ( 'completed' !== $status ) {
+					$unfinished[] = $job;
+				}
+				if ( 'completed' === $status && ! empty( $job['finished_at'] ) ) {
+					if ( '' === $last_finish || strcmp( (string) $job['finished_at'], $last_finish ) > 0 ) {
+						$last_finish = (string) $job['finished_at'];
+					}
+				}
+			}
+
+			uasort(
+			$unfinished,
+			static function ( $a, $b ) {
+					$start_a = isset( $a['started_at'] ) ? (string) $a['started_at'] : '';
+					$start_b = isset( $b['started_at'] ) ? (string) $b['started_at'] : '';
+
+					return strcmp( $start_b, $start_a );
+			}
+			);
+
+			$unfinished = array_slice( $unfinished, 0, 5 );
+
+			return array(
+				'last_finished_at'       => $last_finish,
+				'unfinished_jobs'        => $unfinished,
+				'last_full_reallocation' => isset( $state['last_full_reallocation'] ) ? (string) $state['last_full_reallocation'] : '',
+			);
+		}
+
+				public static function format_datetime( string $mysql ): string {
                         $mysql = trim( $mysql );
                         if ( '' === $mysql ) {
                                 return '—';
@@ -7166,51 +7201,168 @@ class Auto_PO_Allocator {
                         return function_exists( 'date_i18n' ) ? date_i18n( $date_fmt . ' ' . $time_fmt, $ts ) : date( $date_fmt . ' ' . $time_fmt, $ts );
                 }
 
-                /**
-                 * Queue a single allocation pass in the background (prefers Action Scheduler).
-                 */
-                protected static function queue_allocation_pass( int $page = 1, string $job_id = '' ): bool {
-                        $page   = max( 1, $page );
-                        $job_id = self::ensure_job_id( $job_id );
-                        $args   = array(
-                                'page'   => $page,
-                                'job_id' => $job_id,
-                        );
+                		/**
+		 * Queue a single allocation pass in the background (prefers Action Scheduler).
+		 */
+		protected static function queue_allocation_pass( int $page = 1, string $job_id = '' ): bool {
+			$page   = max( 1, $page );
+			$job_id = self::ensure_job_id( $job_id );
+			$args   = array(
+				'page'   => $page,
+				'job_id' => $job_id,
+				'po_id'  => 0,
+			);
 
-                        // Use Action Scheduler when available for async execution.
-                        if ( function_exists( 'as_enqueue_async_action' ) ) {
-                                as_enqueue_async_action( self::ACTION_HOOK, $args, 'lpr-allocator', true );
-                                return true;
-                        }
-                        if ( function_exists( 'as_schedule_single_action' ) ) {
-                                if ( function_exists( 'as_next_scheduled_action' ) && as_next_scheduled_action( self::ACTION_HOOK, $args, 'lpr-allocator' ) ) {
-                                        return true;
-                                }
-                                as_schedule_single_action( time() + 5, self::ACTION_HOOK, $args, 'lpr-allocator' );
-                                return true;
-                        }
+			// Use Action Scheduler when available for async execution.
+			if ( function_exists( 'as_enqueue_async_action' ) ) {
+				as_enqueue_async_action( self::ACTION_HOOK, $args, 'lpr-allocator', true );
+				return true;
+			}
+			if ( function_exists( 'as_schedule_single_action' ) ) {
+				if ( function_exists( 'as_next_scheduled_action' ) && as_next_scheduled_action( self::ACTION_HOOK, $args, 'lpr-allocator' ) ) {
+					return true;
+				}
 
-                        // Fallback to WP-Cron single event if Action Scheduler is unavailable.
-                        if ( ! wp_next_scheduled( self::ACTION_HOOK, $args ) ) {
-                                return (bool) wp_schedule_single_event( time() + 5, self::ACTION_HOOK, $args );
-                        }
+				as_schedule_single_action( time() + 5, self::ACTION_HOOK, $args, 'lpr-allocator' );
+				return true;
+			}
 
-                        return true;
-                }
+			// Fallback to WP-Cron single event if Action Scheduler is unavailable.
+			if ( ! wp_next_scheduled( self::ACTION_HOOK, $args ) ) {
+				return (bool) wp_schedule_single_event( time() + 5, self::ACTION_HOOK, $args );
+			}
 
-                protected static function process_inline( int $page, string $job_id ): void {
-                        $next_page = $page;
+			return true;
+		}
 
-                        do {
-                                self::record_job_progress( $job_id, $next_page );
-                                $result = self::allocate_page( $next_page, $job_id );
-                                $next_page++;
-                        } while ( ! empty( $result['has_more'] ) );
+		/**
+		 * Retrieve all open PO IDs ordered by ETA/date.
+		 */
+		protected static function get_open_po_ids( int $per_page = 20 ): array {
+			$statuses = array( defined( __NAMESPACE__ . '\\PO_STATUS_OPEN' ) ? PO_STATUS_OPEN : 'open' );
+			if ( defined( __NAMESPACE__ . '\\PO_STATUS_PARTIAL' ) ) {
+				$statuses[] = PO_STATUS_PARTIAL;
+			}
 
-                        self::record_job_finish( $job_id );
-                }
+			$orderby_filter = static function ( $orderby, $query_obj ) {
+				global $wpdb;
 
-                public static function maybe_schedule( bool $force = false ): void {
+				if ( ! $query_obj instanceof \WP_Query || ! $query_obj->get( 'lpr_eta_sort' ) ) {
+					return $orderby;
+				}
+
+				$meta_order = "STR_TO_DATE({$wpdb->postmeta}.meta_value, '%d-%m-%Y') ASC";
+
+				return implode( ', ', array( $meta_order, "{$wpdb->posts}.post_date ASC", "{$wpdb->posts}.ID ASC" ) );
+			};
+
+			add_filter( 'posts_orderby', $orderby_filter, 10, 2 );
+
+			$page     = 1;
+			$po_ids   = array();
+			$has_more = true;
+
+			while ( $has_more ) {
+				$query = new \WP_Query(
+					array(
+						'post_type'      => defined( __NAMESPACE__ . '\\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po',
+						'post_status'    => $statuses,
+						'posts_per_page' => $per_page,
+						'paged'          => $page,
+						'fields'         => 'ids',
+						'no_found_rows'  => true,
+						'meta_key'       => defined( __NAMESPACE__ . '\\PO_META_ETA_DATE' ) ? PO_META_ETA_DATE : '_lpr_eta_date',
+						'orderby'        => array(
+							'meta_value' => 'ASC',
+							'date'       => 'ASC',
+							'ID'         => 'ASC',
+						),
+						'order'          => 'ASC',
+						'lpr_eta_sort'   => true,
+					)
+				);
+
+				if ( empty( $query->posts ) ) {
+					break;
+				}
+
+				foreach ( $query->posts as $po_id ) {
+					$po_ids[] = (int) $po_id;
+				}
+
+				$has_more = count( $query->posts ) === $per_page;
+				$page++;
+			}
+
+			remove_filter( 'posts_orderby', $orderby_filter, 10 );
+
+			return $po_ids;
+		}
+
+		protected static function queue_single_po_action( int $po_id, string $job_id ): bool {
+			$args = array(
+				'page'   => 1,
+				'job_id' => $job_id,
+				'po_id'  => $po_id,
+			);
+
+			// Use Action Scheduler when available for async execution.
+			if ( function_exists( 'as_enqueue_async_action' ) ) {
+				as_enqueue_async_action( self::ACTION_HOOK, $args, 'lpr-allocator', true );
+				return true;
+			}
+
+			if ( function_exists( 'as_schedule_single_action' ) ) {
+				if ( function_exists( 'as_next_scheduled_action' ) && as_next_scheduled_action( self::ACTION_HOOK, $args, 'lpr-allocator' ) ) {
+					return true;
+				}
+
+				as_schedule_single_action( time() + 5, self::ACTION_HOOK, $args, 'lpr-allocator' );
+				return true;
+			}
+
+			// Fallback to WP-Cron single event if Action Scheduler is unavailable.
+			if ( ! wp_next_scheduled( self::ACTION_HOOK, $args ) ) {
+				return (bool) wp_schedule_single_event( time() + 5, self::ACTION_HOOK, $args );
+			}
+
+			return true;
+		}
+
+		/**
+		 * Queue all open POs as separate jobs so Action Scheduler can parallelize the work.
+		 */
+protected static function queue_open_po_actions( string $job_id ): int {
+$po_ids = self::get_open_po_ids( 20 );
+			$total  = count( $po_ids );
+
+			self::record_job_queue_size( $job_id, $total );
+
+			if ( 0 === $total ) {
+				return 0;
+			}
+
+			$queued = 0;
+
+			foreach ( $po_ids as $po_id ) {
+				if ( self::queue_single_po_action( $po_id, $job_id ) ) {
+					$queued++;
+					continue;
+				}
+
+				if ( class_exists( __NAMESPACE__ . '\\PO_FIFO_Allocator' ) ) {
+					PO_FIFO_Allocator::allocate_po( (int) $po_id );
+				}
+
+				self::record_job_progress( $job_id, 1, (int) $po_id );
+			}
+
+			self::maybe_finish_job( $job_id );
+
+			return $queued;
+		}
+
+		public static function maybe_schedule( bool $force = false ): void {
                         $interval = self::get_interval();
 
                         if ( $interval <= 0 ) {
@@ -7240,20 +7392,27 @@ class Auto_PO_Allocator {
                         }
                 }
 
-                public static function run( int $page = 1, string $job_id = '' ): void {
+                
+                public static function run( int $page = 1, string $job_id = '', int $po_id = 0 ): void {
                         $page   = max( 1, $page );
                         $job_id = self::ensure_job_id( $job_id );
 
+                        if ( $po_id > 0 ) {
+                                self::record_job_progress( $job_id, $page, $po_id );
+
+                                if ( class_exists( __NAMESPACE__ . '\PO_FIFO_Allocator' ) ) {
+                                        PO_FIFO_Allocator::allocate_po( (int) $po_id );
+                                }
+
+                                self::maybe_finish_job( $job_id );
+                                return;
+                        }
+
                         self::record_job_progress( $job_id, $page );
 
-                        $result = self::allocate_page( $page, $job_id );
+                        $queued = self::queue_open_po_actions( $job_id );
 
-                        if ( ! empty( $result['has_more'] ) ) {
-                                if ( ! self::queue_allocation_pass( $page + 1, $job_id ) ) {
-                                        self::process_inline( $page + 1, $job_id );
-                                        return;
-                                }
-                        } else {
+                        if ( 0 === $queued ) {
                                 self::record_job_finish( $job_id );
                         }
 
@@ -7265,80 +7424,6 @@ class Auto_PO_Allocator {
                         if ( ! function_exists( 'as_schedule_recurring_action' ) && ! wp_next_scheduled( self::ACTION_HOOK ) ) {
                                 wp_schedule_single_event( time() + $interval, self::ACTION_HOOK );
                         }
-                }
-
-                /**
-                 * Run allocation for a single page of POs. Returns an array with has_more and processed counts.
-                 */
-                protected static function allocate_page( int $page, string $job_id ): array {
-                        if ( ! class_exists( __NAMESPACE__ . '\PO_FIFO_Allocator' ) ) {
-                                return array(
-                                        'has_more'  => false,
-                                        'processed' => 0,
-                                );
-                        }
-
-                        $statuses = array( defined( __NAMESPACE__ . '\PO_STATUS_OPEN' ) ? PO_STATUS_OPEN : 'open' );
-                        if ( defined( __NAMESPACE__ . '\PO_STATUS_PARTIAL' ) ) {
-                                $statuses[] = PO_STATUS_PARTIAL;
-                        }
-
-                        $per_page = 1;
-
-                        $orderby_filter = static function ( $orderby, $query_obj ) {
-                                global $wpdb;
-
-                                if ( ! $query_obj instanceof \WP_Query || ! $query_obj->get( 'lpr_eta_sort' ) ) {
-                                        return $orderby;
-                                }
-
-                                $meta_order = "STR_TO_DATE({$wpdb->postmeta}.meta_value, '%d-%m-%Y') ASC";
-
-                                return implode( ', ', array( $meta_order, "{$wpdb->posts}.post_date ASC", "{$wpdb->posts}.ID ASC" ) );
-                        };
-
-                        add_filter( 'posts_orderby', $orderby_filter, 10, 2 );
-
-                        $query = new \WP_Query(
-                                array(
-                                        'post_type'      => defined( __NAMESPACE__ . '\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po',
-                                        'post_status'    => $statuses,
-                                        'posts_per_page' => $per_page,
-                                        'paged'          => $page,
-                                        'fields'         => 'ids',
-                                        'no_found_rows'  => true,
-                                        'meta_key'       => defined( __NAMESPACE__ . '\PO_META_ETA_DATE' ) ? PO_META_ETA_DATE : '_lpr_eta_date',
-                                        'orderby'        => array(
-                                                'meta_value' => 'ASC',
-                                                'date'       => 'ASC',
-                                                'ID'         => 'ASC',
-                                        ),
-                                        'order'          => 'ASC',
-                                        'lpr_eta_sort'   => true,
-                                )
-                        );
-
-                        remove_filter( 'posts_orderby', $orderby_filter, 10 );
-
-                        if ( empty( $query->posts ) ) {
-                                return array(
-                                        'has_more'  => false,
-                                        'processed' => 0,
-                                );
-                        }
-
-                        $processed = 0;
-
-                        foreach ( $query->posts as $po_id ) {
-                                PO_FIFO_Allocator::allocate_po( (int) $po_id );
-                                self::record_job_progress( $job_id, $page, (int) $po_id );
-                                $processed++;
-                        }
-
-                        return array(
-                                'has_more'  => count( $query->posts ) === $per_page,
-                                'processed' => $processed,
-                        );
                 }
 
                 /**
