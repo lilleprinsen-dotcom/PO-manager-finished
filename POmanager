@@ -9519,7 +9519,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Overage_Checker' ) ) {
                                 if ( $target_id <= 0 || $qty_ordered <= 0 ) {
                                         continue;
                                 }
-                                $caps[ $target_id ] = max( $caps[ $target_id ] ?? 0, $qty_ordered );
+                                $caps[ $target_id ] = ( $caps[ $target_id ] ?? 0 ) + $qty_ordered;
                         }
 
                         if ( empty( $caps ) ) {
