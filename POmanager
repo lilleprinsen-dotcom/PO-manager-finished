@@ -10717,7 +10717,12 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Order_Indexer' ) ) {
                                                 $allocated          = lpr_allocator_get_item_allocated_active( $item );
                                                 $backordered        = max( 0, $desired - $allocated );
                                                 $qty_ordered        = max( 0, (int) $item->get_quantity() );
-                                                $line_total         = (float) $item->get_total() + (float) $item->get_total_tax();
+                                                // Use pre-discount subtotals so replacement/adjustment math is based on the
+                                                // original line value rather than any coupons already applied to the order.
+                                                // Using discounted totals caused additional payment requests to be
+                                                // understated when a customer swapped items after paying the original
+                                                // order total.
+                                                $line_total         = (float) $item->get_subtotal() + (float) $item->get_subtotal_tax();
                                                 $eta_meta_key       = defined( __NAMESPACE__ . '\ORDER_ITEM_META_LINE_ETA' ) ? ORDER_ITEM_META_LINE_ETA : '_lpr_line_eta';
                                                 $line_eta           = (string) $item->get_meta( $eta_meta_key, true );
                                                 $alloc_source       = self::summarize_allocation_source( $item );
