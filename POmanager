@@ -41,6 +41,9 @@ if ( ! defined( __NAMESPACE__ . '\ORDER_ITEM_META_FORCE_ALLOCATION' ) ) {
 if ( ! defined( __NAMESPACE__ . '\ORDER_META_REQUESTED_DELIVERY' ) ) {
         define( __NAMESPACE__ . '\ORDER_META_REQUESTED_DELIVERY', '_lpr_requested_delivery_date' );
 }
+if ( ! defined( __NAMESPACE__ . '\ORDER_META_LAST_ETA_EMAIL' ) ) {
+        define( __NAMESPACE__ . '\ORDER_META_LAST_ETA_EMAIL', '_lpr_last_eta_email' );
+}
 if ( ! defined( __NAMESPACE__ . '\PRODUCT_META_UNALLOCATED_POOL' ) ) {
         define( __NAMESPACE__ . '\PRODUCT_META_UNALLOCATED_POOL', '_lpr_unallocated_pool' );
 }
@@ -1183,49 +1186,96 @@ if ( ! class_exists( __NAMESPACE__ . '\Email_Settings_Page' ) ) {
                                 return array();
                         }
 
-                        $idx   = Backorder_Order_Indexer::get_index( false );
-                        $rows  = isset( $idx['rows'] ) && is_array( $idx['rows'] ) ? $idx['rows'] : array();
+                        $idx    = Backorder_Order_Indexer::get_index( false );
+                        $rows   = isset( $idx['rows'] ) && is_array( $idx['rows'] ) ? $idx['rows'] : array();
                         $orders = array();
 
                         foreach ( $rows as $row ) {
-                                if ( empty( $row['is_backorder_line'] ) ) {
-                                        continue;
-                                }
-
                                 $order_id = isset( $row['order_id'] ) ? (int) $row['order_id'] : 0;
                                 if ( $order_id <= 0 ) {
                                         continue;
                                 }
 
+                                $is_backorder_line = ! empty( $row['is_backorder_line'] );
+                                $qty_backordered   = isset( $row['qty_backordered'] ) ? (int) $row['qty_backordered'] : 0;
+                                $product_name      = isset( $row['product'] ) ? (string) $row['product'] : '';
+                                $item_key          = isset( $row['item_id'] ) ? (string) $row['item_id'] : ( $product_name ?: (string) $order_id );
+                                $qty_ordered       = isset( $row['qty_ordered'] ) ? (int) $row['qty_ordered'] : 0;
+
                                 if ( ! isset( $orders[ $order_id ] ) ) {
                                         $orders[ $order_id ] = array(
-                                                'order_id'        => $order_id,
-                                                'order_number'    => isset( $row['order_number'] ) ? (string) $row['order_number'] : (string) $order_id,
-                                                'status'          => isset( $row['status'] ) ? (string) $row['status'] : '',
-                                                'customer'        => isset( $row['customer'] ) ? (string) $row['customer'] : '',
-                                                'customer_email'  => isset( $row['customer_email'] ) ? sanitize_email( (string) $row['customer_email'] ) : '',
-                                                'latest_eta'      => '',
-                                                'latest_eta_ts'   => 0,
-                                                'backordered_qty' => 0,
+                                                'order_id'             => $order_id,
+                                                'order_number'         => isset( $row['order_number'] ) ? (string) $row['order_number'] : (string) $order_id,
+                                                'status'               => isset( $row['status'] ) ? (string) $row['status'] : '',
+                                                'order_date'           => isset( $row['order_date'] ) ? (string) $row['order_date'] : '',
+                                                'customer'             => isset( $row['customer'] ) ? (string) $row['customer'] : '',
+                                                'customer_email'       => isset( $row['customer_email'] ) ? sanitize_email( (string) $row['customer_email'] ) : '',
+                                                'latest_eta'           => '',
+                                                'latest_eta_ts'        => 0,
+                                                'backordered_qty'      => 0,
+                                                'backordered_products' => array(),
+                                                'all_products'         => array(),
+                                                'product_search'       => '',
+                                                'eta_email_sent'       => ! empty( $row['eta_email_sent'] ),
                                         );
                                 }
 
-                                $orders[ $order_id ]['backordered_qty'] += isset( $row['qty_backordered'] ) ? (int) $row['qty_backordered'] : 0;
+                                $orders[ $order_id ]['eta_email_sent'] = ( $orders[ $order_id ]['eta_email_sent'] ?? false ) || ! empty( $row['eta_email_sent'] );
 
-                                if ( ! empty( $row['eta'] ) ) {
-                                        $eta    = lpr_allocator_sanitize_ymd( (string) $row['eta'] );
-                                        $eta_ts = 0;
-                                        if ( $eta ) {
-                                                $eta_obj = lpr_allocator_parse_date( $eta );
-                                                $eta_ts  = $eta_obj ? $eta_obj->getTimestamp() : 0;
+                                if ( $product_name ) {
+                                        $orders[ $order_id ]['all_products'][ $item_key ] = array(
+                                                'name'            => $product_name,
+                                                'qty'             => $qty_ordered,
+                                                'backordered_qty' => $qty_backordered,
+                                                'is_backorder'    => $is_backorder_line,
+                                        );
+                                }
+
+                                if ( $is_backorder_line ) {
+                                        $orders[ $order_id ]['backordered_qty'] += $qty_backordered;
+
+                                        if ( $product_name ) {
+                                                $orders[ $order_id ]['backordered_products'][ $item_key ] = array(
+                                                        'name' => $product_name,
+                                                        'qty'  => $qty_backordered,
+                                                );
                                         }
 
-                                        if ( $eta_ts > ( $orders[ $order_id ]['latest_eta_ts'] ?? 0 ) ) {
-                                                $orders[ $order_id ]['latest_eta']    = $eta;
-                                                $orders[ $order_id ]['latest_eta_ts'] = $eta_ts;
+                                        if ( ! empty( $row['eta'] ) ) {
+                                                $eta    = lpr_allocator_sanitize_ymd( (string) $row['eta'] );
+                                                $eta_ts = 0;
+                                                if ( $eta ) {
+                                                        $eta_obj = lpr_allocator_parse_date( $eta );
+                                                        $eta_ts  = $eta_obj ? $eta_obj->getTimestamp() : 0;
+                                                }
+
+                                                if ( $eta_ts > ( $orders[ $order_id ]['latest_eta_ts'] ?? 0 ) ) {
+                                                        $orders[ $order_id ]['latest_eta']    = $eta;
+                                                        $orders[ $order_id ]['latest_eta_ts'] = $eta_ts;
+                                                }
                                         }
                                 }
                         }
+
+                        $orders = array_filter(
+                                $orders,
+                                static function ( $order ) {
+                                        return ! empty( $order['backordered_products'] );
+                                }
+                        );
+
+                        foreach ( $orders as &$order ) {
+                                $order['all_products']         = array_values( $order['all_products'] );
+                                $order['backordered_products'] = array_values( $order['backordered_products'] );
+                                $names                         = array_map(
+                                        static function ( $product_row ) {
+                                                return isset( $product_row['name'] ) ? (string) $product_row['name'] : '';
+                                        },
+                                        $order['all_products']
+                                );
+                                $order['product_search'] = strtolower( implode( ' ', $names ) );
+                        }
+                        unset( $order );
 
                         uasort(
                                 $orders,
@@ -1317,33 +1367,88 @@ if ( ! class_exists( __NAMESPACE__ . '\Email_Settings_Page' ) ) {
                                 echo '<p style="margin:6px 0;">' . esc_html__( 'No backordered orders are available to email right now.', 'lpr-backorder-allocator' ) . '</p>';
                         } else {
                                 echo '<p style="margin:6px 0;">' . esc_html__( 'Select the orders that should receive the updated ETA email. Emails will be sent sequentially with a short pause between each send.', 'lpr-backorder-allocator' ) . '</p>';
-                                echo '<div style="max-height:220px;overflow:auto;border:1px solid #ddd;padding:10px 12px;background:#fff;">';
+                                echo '<div class="lpr-bulk-eta-search">';
+                                echo '<label class="screen-reader-text" for="lpr-bulk-eta-search">' . esc_html__( 'Search products', 'lpr-backorder-allocator' ) . '</label>';
+                                echo '<input type="search" id="lpr-bulk-eta-search" class="regular-text" placeholder="' . esc_attr__( 'Search products…', 'lpr-backorder-allocator' ) . '" />';
+                                echo '</div>';
+                                echo '<div class="lpr-bulk-eta-table-wrap">';
+                                echo '<table class="widefat striped lpr-bulk-eta-table">';
+                                echo '<thead><tr>';
+                                echo '<th class="lpr-col-select">' . esc_html__( 'Email', 'lpr-backorder-allocator' ) . '</th>';
+                                echo '<th>' . esc_html__( 'Order', 'lpr-backorder-allocator' ) . '</th>';
+                                echo '<th>' . esc_html__( 'Customer', 'lpr-backorder-allocator' ) . '</th>';
+                                echo '<th>' . esc_html__( 'Status', 'lpr-backorder-allocator' ) . '</th>';
+                                echo '<th>' . esc_html__( 'Order date', 'lpr-backorder-allocator' ) . '</th>';
+                                echo '<th>' . esc_html__( 'Backordered products', 'lpr-backorder-allocator' ) . '</th>';
+                                echo '<th>' . esc_html__( 'All products', 'lpr-backorder-allocator' ) . '</th>';
+                                echo '<th>' . esc_html__( 'Latest ETA', 'lpr-backorder-allocator' ) . '</th>';
+                                echo '</tr></thead><tbody>';
+
                                 foreach ( $bulk_orders as $order_row ) {
-                                        $order_id   = isset( $order_row['order_id'] ) ? (int) $order_row['order_id'] : 0;
-                                        $order_no   = isset( $order_row['order_number'] ) ? (string) $order_row['order_number'] : (string) $order_id;
-                                        $customer   = isset( $order_row['customer'] ) ? (string) $order_row['customer'] : '';
-                                        $status     = isset( $order_row['status'] ) ? (string) $order_row['status'] : '';
-                                        $qty        = isset( $order_row['backordered_qty'] ) ? (int) $order_row['backordered_qty'] : 0;
-                                        $eta_label  = '';
+                                        $order_id  = isset( $order_row['order_id'] ) ? (int) $order_row['order_id'] : 0;
+                                        $order_no  = isset( $order_row['order_number'] ) ? (string) $order_row['order_number'] : (string) $order_id;
+                                        $customer  = isset( $order_row['customer'] ) ? (string) $order_row['customer'] : '';
+                                        $status    = isset( $order_row['status'] ) ? (string) $order_row['status'] : '';
+                                        $order_date = isset( $order_row['order_date'] ) ? (string) $order_row['order_date'] : '';
+                                        $eta_label = '';
                                         if ( ! empty( $order_row['latest_eta'] ) ) {
                                                 $eta_label = lpr_allocator_format_store_date( (string) $order_row['latest_eta'] );
                                         }
-
-                                        $description = $status ? sprintf( /* translators: %s: order status */ __( 'Status: %s', 'lpr-backorder-allocator' ), $status ) : __( 'Status: unknown', 'lpr-backorder-allocator' );
-                                        $description .= $eta_label ? ' — ' . sprintf( /* translators: %s: ETA date */ __( 'Latest ETA: %s', 'lpr-backorder-allocator' ), $eta_label ) : ' — ' . __( 'Latest ETA: not set', 'lpr-backorder-allocator' );
-                                        $description .= ' — ' . sprintf( /* translators: %d: backordered quantity */ __( 'Backordered qty: %d', 'lpr-backorder-allocator' ), $qty );
 
                                         $label = '#' . $order_no;
                                         if ( $customer ) {
                                                 $label .= ' — ' . $customer;
                                         }
 
-                                        echo '<label style="display:block;margin:6px 0;">';
-                                        echo '<input type="checkbox" class="lpr-eta-bulk-order" value="' . esc_attr( (string) $order_id ) . '" data-order-label="' . esc_attr( $label ) . '" /> ' . esc_html( $label );
-                                        echo '<div class="description" style="margin-left:20px;margin-top:2px;">' . esc_html( $description ) . '</div>';
-                                        echo '</label>';
+                                        $backordered_products = isset( $order_row['backordered_products'] ) && is_array( $order_row['backordered_products'] ) ? $order_row['backordered_products'] : array();
+                                        $all_products         = isset( $order_row['all_products'] ) && is_array( $order_row['all_products'] ) ? $order_row['all_products'] : array();
+                                        $product_search       = isset( $order_row['product_search'] ) ? (string) $order_row['product_search'] : '';
+                                        $backordered_badges   = '';
+
+                                        foreach ( $backordered_products as $product_row ) {
+                                                $prod_name = isset( $product_row['name'] ) ? (string) $product_row['name'] : '';
+                                                $prod_qty  = isset( $product_row['qty'] ) ? (int) $product_row['qty'] : 0;
+                                                $backordered_badges .= '<span class="lpr-eta-pill"><span class="lpr-eta-pill__name">' . esc_html( $prod_name ) . '</span><span class="lpr-eta-badge">' . esc_html__( 'Backordered', 'lpr-backorder-allocator' ) . '</span><span class="lpr-eta-pill__qty">×' . esc_html( (string) $prod_qty ) . '</span></span>';
+                                        }
+
+                                        if ( '' === $backordered_badges ) {
+                                                $backordered_badges = '<span class="lpr-eta-empty">' . esc_html__( '—', 'lpr-backorder-allocator' ) . '</span>';
+                                        }
+
+                                        $all_products_list = '';
+                                        if ( empty( $all_products ) ) {
+                                                $all_products_list = '<span class="lpr-eta-empty">' . esc_html__( '—', 'lpr-backorder-allocator' ) . '</span>';
+                                        } else {
+                                                $items = '';
+                                                foreach ( $all_products as $product_row ) {
+                                                        $prod_name  = isset( $product_row['name'] ) ? (string) $product_row['name'] : '';
+                                                        $prod_qty   = isset( $product_row['qty'] ) ? (int) $product_row['qty'] : 0;
+                                                        $is_back    = ! empty( $product_row['is_backorder'] );
+                                                        $badge_text = $is_back ? '<span class="lpr-eta-badge">' . esc_html__( 'Backordered', 'lpr-backorder-allocator' ) . '</span>' : '';
+                                                        $items     .= '<li><span class="lpr-eta-product-name">' . esc_html( $prod_name ) . '</span> <span class="lpr-eta-qty">×' . esc_html( (string) $prod_qty ) . '</span> ' . $badge_text . '</li>';
+                                                }
+
+                                                $all_products_list = '<details class="lpr-eta-all-products"><summary>' . esc_html__( 'Show products', 'lpr-backorder-allocator' ) . ' (' . count( $all_products ) . ')</summary><ul>' . $items . '</ul></details>';
+                                        }
+
+                                        $has_eta_email = ! empty( $order_row['eta_email_sent'] );
+                                        $eta_icon      = $has_eta_email ? '<span class="lpr-eta-check" title="' . esc_attr__( 'ETA email sent previously', 'lpr-backorder-allocator' ) . '">&#10003;</span>' : '<span class="lpr-eta-check lpr-eta-check--muted" title="' . esc_attr__( 'No ETA email sent yet', 'lpr-backorder-allocator' ) . '">—</span>';
+
+                                        echo '<tr class="lpr-eta-order-row" data-products="' . esc_attr( $product_search ) . '">';
+                                        echo '<td class="lpr-col-select"><label class="screen-reader-text" for="lpr-eta-order-' . esc_attr( (string) $order_id ) . '">' . esc_html__( 'Email order', 'lpr-backorder-allocator' ) . '</label><input type="checkbox" id="lpr-eta-order-' . esc_attr( (string) $order_id ) . '" class="lpr-eta-bulk-order" value="' . esc_attr( (string) $order_id ) . '" data-order-label="' . esc_attr( $label ) . '" /></td>';
+                                        echo '<td><strong>#' . esc_html( $order_no ) . '</strong></td>';
+                                        echo '<td>' . esc_html( $customer ?: __( 'Guest', 'lpr-backorder-allocator' ) ) . ' ' . $eta_icon . '</td>';
+                                        echo '<td>' . esc_html( $status ?: __( 'Unknown', 'lpr-backorder-allocator' ) ) . '</td>';
+                                        echo '<td>' . esc_html( $order_date ?: __( '—', 'lpr-backorder-allocator' ) ) . '</td>';
+                                        echo '<td>' . $backordered_badges . '</td>';
+                                        echo '<td>' . $all_products_list . '</td>';
+                                        echo '<td>' . esc_html( $eta_label ?: __( 'Not set', 'lpr-backorder-allocator' ) ) . '</td>';
+                                        echo '</tr>';
                                 }
+
+                                echo '</tbody></table>';
                                 echo '</div>';
+                                echo '<div id="lpr-bulk-eta-empty" class="description" style="display:none;margin-top:6px;">' . esc_html__( 'No orders match this search.', 'lpr-backorder-allocator' ) . '</div>';
                                 echo '<p style="margin:10px 0 0;"><button type="button" class="button button-primary" id="lpr-bulk-eta-send" data-nonce="' . esc_attr( $bulk_nonce ) . '">' . esc_html__( 'Send selected ETA emails', 'lpr-backorder-allocator' ) . '</button> <span class="description">' . esc_html__( 'Sends emails one-by-one with a short delay to avoid spam flags.', 'lpr-backorder-allocator' ) . '</span></p>';
                                 echo '<div id="lpr-bulk-eta-status" style="margin:8px 0 0;color:#555;"></div>';
                         }
@@ -1356,7 +1461,43 @@ if ( ! class_exists( __NAMESPACE__ . '\Email_Settings_Page' ) ) {
                         (function($){
                                 if(!document.getElementById('lpr-email-preview-style')){
                                         var css = '.lpr-vip-overlay{position:fixed;z-index:100000;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;padding:20px;}.lpr-vip-modal{background:#fff;max-width:820px;width:100%;border-radius:6px;box-shadow:0 10px 40px rgba(0,0,0,.25);overflow:hidden;}.lpr-vip-modal header{padding:14px 16px;border-bottom:1px solid #eee;display:flex;justify-content:space-between;align-items:center;}.lpr-vip-modal .lpr-vip-body{max-height:60vh;overflow:auto;padding:16px;}';
+                                        css += '.lpr-bulk-eta-table-wrap{max-height:320px;overflow:auto;border:1px solid #ddd;background:#fff;margin-top:8px;}';
+                                        css += '.lpr-bulk-eta-table td,.lpr-bulk-eta-table th{vertical-align:top;}';
+                                        css += '.lpr-col-select{width:70px;}';
+                                        css += '.lpr-eta-badge{display:inline-block;background:#eef4ff;color:#1d4ed8;border-radius:10px;padding:2px 8px;font-size:11px;font-weight:600;}';
+                                        css += '.lpr-eta-pill{display:inline-flex;align-items:center;gap:6px;background:#f7f7f7;border:1px solid #e2e8f0;border-radius:12px;padding:4px 8px;margin:2px 4px 4px 0;font-size:12px;}';
+                                        css += '.lpr-eta-pill__qty,.lpr-eta-qty{color:#555;font-size:12px;}';
+                                        css += '.lpr-eta-all-products summary{cursor:pointer;font-weight:600;}';
+                                        css += '.lpr-eta-all-products ul{margin:6px 0 0;padding-left:18px;}';
+                                        css += '.lpr-eta-product-name{font-weight:600;}';
+                                        css += '.lpr-eta-check{color:#16a34a;font-weight:700;margin-left:4px;}';
+                                        css += '.lpr-eta-check--muted{color:#9ca3af;}';
+                                        css += '.lpr-eta-empty{color:#999;}';
+                                        css += '.lpr-bulk-eta-search{margin:6px 0;}';
                                         $('head').append('<style id="lpr-email-preview-style">'+css+'</style>');
+                                }
+                                var $search = $('#lpr-bulk-eta-search');
+                                var $orderRows = $('.lpr-eta-order-row');
+                                function filterBulkOrders(){
+                                        var term = ($search.val() || '').toString().toLowerCase().trim();
+                                        var visible = 0;
+                                        $orderRows.each(function(){
+                                                var $row = $(this);
+                                                var hay = ($row.data('products') || '').toString();
+                                                var match = !term || hay.indexOf(term) !== -1;
+                                                if(match){
+                                                        $row.show();
+                                                        visible++;
+                                                }else{
+                                                        $row.hide();
+                                                        $row.find('.lpr-eta-bulk-order').prop('checked', false);
+                                                }
+                                        });
+                                        $('#lpr-bulk-eta-empty').toggle(visible === 0);
+                                }
+                                if($search.length){
+                                        filterBulkOrders();
+                                        $search.on('input', filterBulkOrders);
                                 }
                                 function showEmailPreview(html){
                                         var $wrap = $('#lpr-email-preview-wrap');
@@ -3398,6 +3539,13 @@ public static function update_line_eta( int $order_id ): void {
                         } else {
                                 wp_mail( $email, $subject, $body, array( 'Content-Type: text/html; charset=UTF-8' ) );
                         }
+
+                        $note = sprintf( /* translators: %s: customer email */ __( 'Backorder ETA email sent to %s.', 'lpr-backorder-allocator' ), $email );
+                        $order->add_order_note( $note, false, true );
+
+                        $eta_email_meta_key = defined( __NAMESPACE__ . '\\ORDER_META_LAST_ETA_EMAIL' ) ? ORDER_META_LAST_ETA_EMAIL : '_lpr_last_eta_email';
+                        $order->update_meta_data( $eta_email_meta_key, time() );
+                        $order->save();
 
                         return true;
                 }
@@ -10695,6 +10843,9 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Order_Indexer' ) ) {
                                         }
                                         $order_url = function_exists( 'get_edit_post_link' ) ? get_edit_post_link( $order->get_id(), '' ) : '';
 
+                                        $eta_email_meta_key = defined( __NAMESPACE__ . '\\ORDER_META_LAST_ETA_EMAIL' ) ? ORDER_META_LAST_ETA_EMAIL : '_lpr_last_eta_email';
+                                        $eta_email_sent     = (bool) $order->get_meta( $eta_email_meta_key );
+
                                         $order_rows           = array();
                                         $has_backorder_line   = false;
                                         $total_backordered    = 0;
@@ -10755,6 +10906,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Order_Indexer' ) ) {
                                                         'allocation'                => $alloc_text,
                                                         'allocation_url'            => $alloc_url,
                                                         'allocation_label'          => $alloc_status,
+                                                        'eta_email_sent'            => $eta_email_sent,
                                                         'order_backorder_outstand'  => 0, // populated when order is added.
                                                 );
                                         }
