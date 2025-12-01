@@ -113,6 +113,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                                 'frontend_notice_color'         => '#2f855a',
                                 'frontend_cart_notice_template' => __( 'Next free stock: %qty% units expected (ETA %eta%)', 'lpr-backorder-allocator' ),
                                 'frontend_refresh_interval'     => 900,
+                                'backorder_index_interval'      => 21600,
                                 'auto_allocation_interval'      => 0,
                                 'brand_logo_url'        => '',
                                 'brand_primary_color'   => '#1a1a1a',
@@ -224,6 +225,12 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                                 $interval = $defaults['frontend_refresh_interval'];
                         }
 
+                        $allowed_index_intervals = array( 0, 3600, 10800, 21600, 43200 );
+                        $index_interval          = isset( $raw['backorder_index_interval'] ) ? (int) $raw['backorder_index_interval'] : $defaults['backorder_index_interval'];
+                        if ( ! in_array( $index_interval, $allowed_index_intervals, true ) ) {
+                                $index_interval = $defaults['backorder_index_interval'];
+                        }
+
                         $mobile_users = array();
                         $raw_users    = $raw['incoming_mobile_users'] ?? array();
                         if ( is_string( $raw_users ) ) {
@@ -319,6 +326,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                                 'frontend_notice_color'    => $notice_color,
                                 'frontend_cart_notice_template' => $cart_notice_tpl,
                                 'frontend_refresh_interval' => (int) $interval,
+                                'backorder_index_interval' => (int) $index_interval,
                                 'auto_allocation_interval' => (int) $alloc_interval,
                                 'brand_logo_url'        => $logo,
                                 'brand_primary_color'   => $color,
@@ -467,12 +475,27 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
 				'default' => 0,
 				),
 				
-				array(
-				'title' => __( 'Auto allocation status', 'lpr-backorder-allocator' ),
-				'type'  => 'title',
-				'desc'  => self::render_auto_allocation_status(),
-				'id'    => 'lpr_allocator_auto_allocation_status',
+                                array(
+                                'title' => __( 'Auto allocation status', 'lpr-backorder-allocator' ),
+                                'type'  => 'title',
+                                'desc'  => self::render_auto_allocation_status(),
+                                'id'    => 'lpr_allocator_auto_allocation_status',
 ),
+
+                                array(
+                                        'title'   => __( 'Backorder index rebuild', 'lpr-backorder-allocator' ),
+                                        'desc'    => __( 'Rebuild the cached backordered products index on this cadence. You can also trigger an immediate rebuild from the Backordered Products page.', 'lpr-backorder-allocator' ),
+                                        'id'      => 'lpr_allocator_backorder_index_interval',
+                                        'type'    => 'select',
+                                        'options' => array(
+                                                0      => __( 'Manual only', 'lpr-backorder-allocator' ),
+                                                3600   => __( 'Every hour', 'lpr-backorder-allocator' ),
+                                                10800  => __( 'Every 3 hours', 'lpr-backorder-allocator' ),
+                                                21600  => __( 'Every 6 hours', 'lpr-backorder-allocator' ),
+                                                43200  => __( 'Every 12 hours', 'lpr-backorder-allocator' ),
+                                        ),
+                                        'default' => Settings::defaults()['backorder_index_interval'],
+                                ),
 
                                 array(
                                         'title' => __( 'Incoming PIN access', 'lpr-backorder-allocator' ),
@@ -869,6 +892,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                 'lpr_allocator_frontend_notice_color'      => (string) $settings['frontend_notice_color'],
                                 'lpr_allocator_frontend_cart_notice_template' => (string) $settings['frontend_cart_notice_template'],
                                 'lpr_allocator_frontend_refresh_interval'  => (int) $settings['frontend_refresh_interval'],
+                                'lpr_allocator_backorder_index_interval'   => (int) $settings['backorder_index_interval'],
                                 'lpr_allocator_auto_allocation_interval'   => (int) $settings['auto_allocation_interval'],
                                 'lpr_allocator_incoming_mobile_users'      => self::format_mobile_users_field( (array) ( $settings['incoming_mobile_users'] ?? array() ) ),
                                 'lpr_allocator_brand_logo_url'             => (string) $settings['brand_logo_url'],
@@ -1068,10 +1092,15 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                         $raw['frontend_notice_color']       = isset( $_POST['lpr_allocator_frontend_notice_color'] ) ? (string) wp_unslash( $_POST['lpr_allocator_frontend_notice_color'] ) : $settings['frontend_notice_color'];
                         $raw['frontend_cart_notice_template'] = isset( $_POST['lpr_allocator_frontend_cart_notice_template'] ) ? (string) wp_unslash( $_POST['lpr_allocator_frontend_cart_notice_template'] ) : $settings['frontend_cart_notice_template'];
                         $raw['frontend_refresh_interval']   = isset( $_POST['lpr_allocator_frontend_refresh_interval'] ) ? (int) $_POST['lpr_allocator_frontend_refresh_interval'] : $settings['frontend_refresh_interval'];
+                        $raw['backorder_index_interval']    = isset( $_POST['lpr_allocator_backorder_index_interval'] ) ? (int) $_POST['lpr_allocator_backorder_index_interval'] : $settings['backorder_index_interval'];
                         $raw['auto_allocation_interval']    = isset( $_POST['lpr_allocator_auto_allocation_interval'] ) ? (int) $_POST['lpr_allocator_auto_allocation_interval'] : $settings['auto_allocation_interval'];
                         $raw['incoming_mobile_users']       = isset( $_POST['lpr_allocator_incoming_mobile_users'] ) ? (string) wp_unslash( $_POST['lpr_allocator_incoming_mobile_users'] ) : $settings['incoming_mobile_users'];
 
                         Settings::update( $raw );
+
+                        if ( class_exists( __NAMESPACE__ . '\Backorder_Indexer' ) ) {
+                                Backorder_Indexer::reset_schedule();
+                        }
 
                         if ( class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ) {
                                 Incoming_Stock_Indexer::reset_schedule();
@@ -10482,30 +10511,104 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ) {
  * Builds a cached "backordered products" index from orders (async-capable via Action Scheduler).
  */
 if ( ! class_exists( __NAMESPACE__ . '\Backorder_Indexer' ) ) {
-        class Backorder_Indexer {
+                class Backorder_Indexer {
 
-		const OPT_KEY = 'lpr_allocator_backorder_index';
-		const MAX_AGE = 600; // seconds
+                        const OPT_KEY = 'lpr_allocator_backorder_index';
+                        const MAX_AGE = 600; // seconds
+                        const ACTION_BUILD = 'lpr_allocator_build_index';
 
-		public static function init(): void {
-			add_action( 'admin_init', array( __CLASS__, 'ensure_index_option' ) );
-			add_action( 'admin_post_lpr_build_backorder_index', array( __CLASS__, 'handle_build_index_request' ) );
-			// Async worker (Action Scheduler).
-			add_action( 'lpr_allocator_build_index', array( __CLASS__, 'build_and_store' ) );
-		}
+                        public static function init(): void {
+                                add_action( 'init', array( __CLASS__, 'maybe_schedule' ) );
+                                add_action( 'admin_init', array( __CLASS__, 'ensure_index_option' ) );
+                                add_action( 'admin_post_lpr_build_backorder_index', array( __CLASS__, 'handle_build_index_request' ) );
+                                // Async worker (Action Scheduler).
+                                add_action( self::ACTION_BUILD, array( __CLASS__, 'build_and_store' ) );
+                        }
 
-		public static function ensure_index_option(): void {
-			if ( null === get_option( self::OPT_KEY, null ) ) {
-				add_option( self::OPT_KEY, array( 'built_at' => 0, 'rows' => array() ), '', 'no' );
-				// Kick off an initial async build if AS available, else do a lightweight inline build (first page only).
-				if ( function_exists( 'as_enqueue_async_action' ) ) {
-					as_enqueue_async_action( 'lpr_allocator_build_index', array(), 'lpr-allocator' );
-				} else {
-					// Inline quick build (best-effort).
-					self::build_and_store( false );
-				}
-			}
-		}
+                        public static function reset_schedule(): void {
+                                if ( function_exists( 'as_unschedule_all_actions' ) ) {
+                                        as_unschedule_all_actions( self::ACTION_BUILD, array(), 'lpr-allocator' );
+                                } else {
+                                        wp_clear_scheduled_hook( self::ACTION_BUILD );
+                                }
+
+                                self::maybe_schedule( true );
+                        }
+
+                        protected static function get_interval(): int {
+                                $settings = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : Settings::defaults();
+                                $interval = isset( $settings['backorder_index_interval'] ) ? (int) $settings['backorder_index_interval'] : Settings::defaults()['backorder_index_interval'];
+
+                                return max( 0, $interval );
+                        }
+
+                        public static function maybe_schedule( bool $force = false ): void {
+                                $interval = self::get_interval();
+
+                                if ( function_exists( 'as_schedule_recurring_action' ) && function_exists( 'as_next_scheduled_action' ) ) {
+                                        if ( $force && function_exists( 'as_unschedule_all_actions' ) ) {
+                                                as_unschedule_all_actions( self::ACTION_BUILD, array(), 'lpr-allocator' );
+                                        }
+
+                                        if ( $interval <= 0 ) {
+                                                return;
+                                        }
+
+                                        $next = as_next_scheduled_action( self::ACTION_BUILD, array(), 'lpr-allocator' );
+                                        if ( ! $next ) {
+                                                as_schedule_recurring_action( time() + 60, $interval, self::ACTION_BUILD, array(), 'lpr-allocator', true );
+                                        }
+
+                                        return;
+                                }
+
+                                if ( $force ) {
+                                        wp_clear_scheduled_hook( self::ACTION_BUILD );
+                                }
+
+                                if ( $interval <= 0 ) {
+                                        return;
+                                }
+
+                                if ( ! wp_next_scheduled( self::ACTION_BUILD ) ) {
+                                        wp_schedule_single_event( time() + $interval, self::ACTION_BUILD );
+                                }
+                        }
+
+                        protected static function queue_async_build( bool $force = false ): bool {
+                                if ( function_exists( 'as_next_scheduled_action' ) ) {
+                                        $next = as_next_scheduled_action( self::ACTION_BUILD, array(), 'lpr-allocator' );
+                                        if ( ! $force && $next && ( (int) $next - time() ) < 300 ) {
+                                                return false;
+                                        }
+                                } elseif ( ! $force && function_exists( 'as_has_scheduled_action' ) && as_has_scheduled_action( self::ACTION_BUILD, array(), 'lpr-allocator' ) ) {
+                                        return false;
+                                }
+
+                                if ( function_exists( 'as_enqueue_async_action' ) ) {
+                                        as_enqueue_async_action( self::ACTION_BUILD, array(), 'lpr-allocator' );
+
+                                        return true;
+                                }
+
+                                if ( function_exists( 'as_schedule_single_action' ) ) {
+                                        as_schedule_single_action( time(), self::ACTION_BUILD, array(), 'lpr-allocator' );
+
+                                        return true;
+                                }
+
+                                self::build_and_store( false );
+
+                                return false;
+                        }
+
+                public static function ensure_index_option(): void {
+                        if ( null === get_option( self::OPT_KEY, null ) ) {
+                                add_option( self::OPT_KEY, array( 'built_at' => 0, 'rows' => array() ), '', 'no' );
+                                // Kick off an initial async build if AS available, else do a lightweight inline build (first page only).
+                                self::queue_async_build( true );
+                        }
+                }
 
 		public static function handle_build_index_request(): void {
 			if ( ! current_user_can( 'manage_woocommerce' ) ) {
@@ -10515,22 +10618,13 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Indexer' ) ) {
 			if ( ! wp_verify_nonce( $nonce, 'lpr_build_backorder_index' ) ) {
 				wp_die( esc_html__( 'Invalid request.', 'lpr-backorder-allocator' ) );
 			}
-			$redirect = isset( $_GET['redirect'] ) ? esc_url_raw( wp_unslash( $_GET['redirect'] ) ) : admin_url( 'admin.php?page=lpr-backordered-products' ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $redirect = isset( $_GET['redirect'] ) ? esc_url_raw( wp_unslash( $_GET['redirect'] ) ) : admin_url( 'admin.php?page=lpr-backordered-products' ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended
 
-			$queued = false;
-			if ( function_exists( 'as_enqueue_async_action' ) ) {
-				as_enqueue_async_action( 'lpr_allocator_build_index', array(), 'lpr-allocator' );
-				$queued = true;
-			} elseif ( function_exists( 'as_schedule_single_action' ) ) {
-				as_schedule_single_action( time(), 'lpr_allocator_build_index', array(), 'lpr-allocator' );
-				$queued = true;
-			} else {
-				self::build_and_store( false );
-			}
+                        $queued = self::queue_async_build( true );
 
-			wp_safe_redirect( add_query_arg( array( 'lpr_index' => $queued ? 'queued' : 'rebuilt' ), $redirect ) );
-			exit;
-		}
+                        wp_safe_redirect( add_query_arg( array( 'lpr_index' => $queued ? 'queued' : 'rebuilt' ), $redirect ) );
+                        exit;
+                }
 
 		/**
 		 * Returns the index array: ['built_at'=>timestamp, 'rows'=>[ id => [desired_total, allocated_total, need_total, count] ] ]
@@ -10538,19 +10632,19 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Indexer' ) ) {
 		 * @param bool $allow_stale When false, will attempt to queue a rebuild if stale.
 		 */
 		public static function get_index( bool $allow_stale = true ): array {
-			$idx = get_option( self::OPT_KEY, array( 'built_at' => 0, 'rows' => array() ) );
-			if ( ! is_array( $idx ) || ! isset( $idx['rows'] ) ) {
-				$idx = array( 'built_at' => 0, 'rows' => array() );
-			}
-			// If stale and allowed, queue a refresh (non-blocking).
-			if ( ! $allow_stale ) {
-				$stale = ( time() - (int) $idx['built_at'] ) > self::MAX_AGE;
-				if ( $stale && function_exists( 'as_enqueue_async_action' ) ) {
-					as_enqueue_async_action( 'lpr_allocator_build_index', array(), 'lpr-allocator' );
-				}
-			}
-			return $idx;
-		}
+                        $idx = get_option( self::OPT_KEY, array( 'built_at' => 0, 'rows' => array() ) );
+                        if ( ! is_array( $idx ) || ! isset( $idx['rows'] ) ) {
+                                $idx = array( 'built_at' => 0, 'rows' => array() );
+                        }
+                        // If stale and allowed, queue a refresh (non-blocking).
+                        if ( ! $allow_stale ) {
+                                $stale = ( time() - (int) $idx['built_at'] ) > self::MAX_AGE;
+                                if ( $stale ) {
+                                        self::queue_async_build();
+                                }
+                        }
+                        return $idx;
+                }
 
 		/**
 		 * Build full snapshot and store in option.
