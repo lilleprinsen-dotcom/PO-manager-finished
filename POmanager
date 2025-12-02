@@ -11557,16 +11557,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Orders_Page' ) ) {
 if ( ! class_exists( __NAMESPACE__ . '\Incoming_Purchase_Orders_Page' ) ) {
         class Incoming_Purchase_Orders_Page {
 
-                /**
-                 * Cache the collected rows so render and assets share the same data set.
-                 *
-                 * @var array|null
-                 */
-                protected static $cached_rows = null;
-
                 public static function init(): void {
                         add_action( 'admin_menu', array( __CLASS__, 'register_page' ) );
-                        add_action( 'admin_enqueue_scripts', array( __CLASS__, 'enqueue_assets' ) );
                 }
 
                 public static function register_page(): void {
@@ -11698,193 +11690,16 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Purchase_Orders_Page' ) ) {
                         return $rows;
                 }
 
-                /**
-                 * Get cached incoming rows.
-                 */
-                protected static function get_rows(): array {
-                        if ( null === self::$cached_rows ) {
-                                self::$cached_rows = self::collect_rows();
-                        }
-
-                        return self::$cached_rows;
-                }
-
-                /**
-                 * Prepare a compact export payload for the JS PDF generator.
-                 */
-                protected static function prepare_export_rows(): array {
-                        $rows   = self::get_rows();
-                        $export = array();
-
-                        foreach ( $rows as $row ) {
-                                $totals          = isset( $row['totals'] ) && is_array( $row['totals'] ) ? $row['totals'] : array();
-                                $ordered_total   = (int) ( $totals['ordered'] ?? 0 );
-                                $received_total  = (int) ( $totals['received'] ?? 0 );
-                                $allocated_total = (int) ( $totals['allocated'] ?? 0 );
-                                $incoming_total  = max( 0, $ordered_total - $received_total );
-                                $stock_total     = max( 0, $incoming_total - $allocated_total );
-
-                                $lines = array();
-                                foreach ( (array) ( $row['lines'] ?? array() ) as $line ) {
-                                        $line_ordered  = (int) ( $line['ordered'] ?? 0 );
-                                        $line_received = (int) ( $line['received'] ?? 0 );
-                                        $line_alloc    = (int) ( $line['allocated'] ?? 0 );
-                                        $line_incoming = max( 0, $line_ordered - $line_received );
-                                        $line_stock    = max( 0, $line_incoming - $line_alloc );
-
-                                        $lines[] = array(
-                                                'product_label' => (string) ( $line['product_label'] ?? '' ),
-                                                'incoming'      => $line_incoming,
-                                                'allocated'     => $line_alloc,
-                                                'stock'         => $line_stock,
-                                        );
-                                }
-
-                                $export[] = array(
-                                        'po_id'          => (int) ( $row['po_id'] ?? 0 ),
-                                        'po_number'      => (string) ( $row['po_number'] ?? '' ),
-                                        'supplier'       => (string) ( $row['supplier'] ?? '' ),
-                                        'eta'            => (string) ( $row['eta'] ?? '' ),
-                                        'status'         => (string) ( $row['status'] ?? '' ),
-                                        'incoming_total' => $incoming_total,
-                                        'allocated_total'=> $allocated_total,
-                                        'stock_total'    => $stock_total,
-                                        'lines'          => $lines,
-                                );
-                        }
-
-                        return $export;
-                }
-
-                /**
-                 * Enqueue PDF generation assets for the incoming POs page.
-                 */
-                public static function enqueue_assets( $hook ): void {
-                        $page = isset( $_GET['page'] ) ? sanitize_key( wp_unslash( $_GET['page'] ) ) : '';
-                        if ( 'lpr-incoming-pos' !== $page ) {
-                                return;
-                        }
-
-                        wp_enqueue_script( 'jspdf', 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js', array(), '2.5.1', true );
-                        wp_enqueue_script( 'jspdf-autotable', 'https://cdnjs.cloudflare.com/ajax/libs/jspdf-autotable/3.5.28/jspdf.plugin.autotable.min.js', array( 'jspdf' ), '3.5.28', true );
-
-                        wp_register_script( 'lpr-incoming-po-pdf', '', array( 'jquery', 'jspdf', 'jspdf-autotable' ), VERSION, true );
-                        wp_enqueue_script( 'lpr-incoming-po-pdf' );
-
-                        wp_localize_script(
-                                'lpr-incoming-po-pdf',
-                                'lprIncomingPoExport',
-                                array(
-                                        'rows'   => self::prepare_export_rows(),
-                                        'labels' => array(
-                                                'documentTitle'  => __( 'Incoming Purchase Orders', 'lpr-backorder-allocator' ),
-                                                'poLabel'        => __( 'PO #', 'lpr-backorder-allocator' ),
-                                                'supplierLabel'  => __( 'Supplier', 'lpr-backorder-allocator' ),
-                                                'statusLabel'    => __( 'Status', 'lpr-backorder-allocator' ),
-                                                'etaLabel'       => __( 'ETA', 'lpr-backorder-allocator' ),
-                                                'incomingLabel'  => __( 'Incoming', 'lpr-backorder-allocator' ),
-                                                'allocatedLabel' => __( 'For orders', 'lpr-backorder-allocator' ),
-                                                'stockLabel'     => __( 'For stock', 'lpr-backorder-allocator' ),
-                                                'productHeading' => __( 'Product line', 'lpr-backorder-allocator' ),
-                                                'noData'         => __( 'No incoming purchase orders to export.', 'lpr-backorder-allocator' ),
-                                                'fileName'       => __( 'incoming-pos.pdf', 'lpr-backorder-allocator' ),
-                                        ),
-                                )
-                        );
-
-                        $script = <<<'JS'
-(function($){
-const exportData = window.lprIncomingPoExport || {};
-const labels = exportData.labels || {};
-const rows = exportData.rows || [];
-
-function formatDate(dateStr){
-        if(!dateStr){return (labels.etaLabel||'ETA')+' —';}
-        try{
-                const parts = dateStr.split('-').map(Number);
-                if(parts.length !== 3 || parts.some(function(part){return !part;})){
-                        return dateStr||'';
-                }
-                const dt = new Date(Date.UTC(parts[0],parts[1]-1,parts[2]));
-                return dt.toLocaleDateString();
-        }catch(e){
-                return dateStr||'';
-        }
-}
-
-function buildTable(doc,startY,lineRows){
-        if(!doc||!doc.autoTable){
-                return startY;
-        }
-        const head=[[labels.productHeading||'Product',labels.incomingLabel||'Incoming',labels.allocatedLabel||'For orders',labels.stockLabel||'For stock']];
-        const body=(lineRows||[]).map(function(line){
-                return [line.product_label||'',(line.incoming||0).toString(),(line.allocated||0).toString(),(line.stock||0).toString()];
-        });
-        doc.autoTable({startY:startY,head:head,body:body,theme:'grid',styles:{fontSize:9,valign:'middle'},headStyles:{fillColor:[30,115,190],textColor:255},alternateRowStyles:{fillColor:[248,250,252]}});
-        return doc.lastAutoTable?doc.lastAutoTable.finalY:startY;
-}
-
-function renderPdf(){
-        if(!rows.length){
-                window.alert(labels.noData||'');
-                return;
-        }
-        const doc=new window.jspdf.jsPDF({orientation:'portrait',unit:'pt',format:'a4'});
-        rows.forEach(function(row,index){
-                let cursorY=40;
-                doc.setFontSize(14);
-                doc.text((labels.documentTitle||'')+(rows.length>1?' ('+(index+1)+'/'+rows.length+')':''),40,cursorY);
-                cursorY+=18;
-                const poLabel=[labels.poLabel||'PO #',row.po_number||row.po_id||''].filter(Boolean).join(' ');
-                const supplier=[labels.supplierLabel||'Supplier',row.supplier||''].filter(Boolean).join(': ');
-                const status=[labels.statusLabel||'Status',row.status||''].filter(Boolean).join(': ');
-                const eta=[labels.etaLabel||'ETA',formatDate(row.eta)].filter(Boolean).join(': ');
-                doc.setFontSize(11);
-                [poLabel,supplier,status,eta].forEach(function(line){
-                        doc.text(line,40,cursorY);
-                        cursorY+=16;
-                });
-                cursorY+=6;
-                doc.setFontSize(10);
-                doc.text((labels.incomingLabel||'Incoming')+': '+(row.incoming_total||0),40,cursorY);
-                doc.text((labels.allocatedLabel||'For orders')+': '+(row.allocated_total||0),200,cursorY);
-                doc.text((labels.stockLabel||'For stock')+': '+(row.stock_total||0),360,cursorY);
-                cursorY+=14;
-                cursorY=buildTable(doc,cursorY,row.lines||[]);
-                if(index<rows.length-1){
-                        doc.addPage();
-                }
-        });
-        doc.save(labels.fileName||'incoming-pos.pdf');
-}
-
-$(function(){
-        $('#lpr-export-incoming-pdf').on('click',function(event){
-                event.preventDefault();
-                renderPdf();
-        });
-});
-})(jQuery);
-JS;
-                        wp_add_inline_script( 'lpr-incoming-po-pdf', $script );
-                }
-
                 public static function render(): void {
                         if ( ! current_user_can( 'manage_woocommerce' ) ) {
                                 return;
                         }
 
-                        $rows = self::get_rows();
+                        $rows = self::collect_rows();
                         ?>
                         <div class="wrap">
                                 <h1><?php echo esc_html__( 'Incoming Purchase Orders', 'lpr-backorder-allocator' ); ?></h1>
                                 <p class="description"><?php echo esc_html__( 'Open supplier POs grouped by ETA. Line-level ETAs split a PO into multiple arrivals when needed.', 'lpr-backorder-allocator' ); ?></p>
-
-                                <p>
-                                        <button type="button" class="button button-primary" id="lpr-export-incoming-pdf">
-                                                <?php esc_html_e( 'Download PDF', 'lpr-backorder-allocator' ); ?>
-                                        </button>
-                                </p>
 
                                 <?php if ( empty( $rows ) ) : ?>
                                         <div class="notice notice-info"><p><?php echo esc_html__( 'No incoming purchase orders in open or partial status.', 'lpr-backorder-allocator' ); ?></p></div>
