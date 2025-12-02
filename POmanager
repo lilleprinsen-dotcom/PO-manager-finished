@@ -3565,6 +3565,32 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder' ) ) {
                                 $keys[] = $localized;
                         }
 
+                        // In cron or CLI contexts, the site locale may differ from the locale
+                        // used when the order was created (e.g., orders in Norwegian with cron
+                        // running in en_US). Try to add the order's locale translation as well
+                        // so we can read the meta key that was saved at checkout.
+                        $order_locale = '';
+                        $order_id     = (int) $item->get_order_id();
+                        if ( $order_id > 0 && function_exists( 'wc_get_order' ) ) {
+                                $order = wc_get_order( $order_id );
+                                if ( $order instanceof \WC_Order ) {
+                                        $order_locale = (string) $order->get_meta( '_locale' );
+                                }
+                        }
+
+                        if ( '' !== $order_locale && function_exists( 'switch_to_locale' ) && function_exists( 'restore_previous_locale' ) ) {
+                                $current_locale = function_exists( 'determine_locale' ) ? determine_locale() : get_locale();
+                                if ( $current_locale !== $order_locale ) {
+                                        switch_to_locale( $order_locale );
+                                        $order_localized = __( 'Backordered', 'woocommerce' );
+                                        restore_previous_locale();
+
+                                        if ( is_string( $order_localized ) && '' !== $order_localized && ! in_array( $order_localized, $keys, true ) ) {
+                                                $keys[] = $order_localized;
+                                        }
+                                }
+                        }
+
                         $meta_backordered = 0;
                         foreach ( array_unique( $keys ) as $k ) {
                                 $v = $item->get_meta( $k, true );
