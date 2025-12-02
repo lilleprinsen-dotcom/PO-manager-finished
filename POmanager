@@ -2006,6 +2006,236 @@ if ( ! is_admin() && ! wp_doing_cron() && ! lpr_allocator_is_incoming_request() 
         return;
 }
 
+if ( ! class_exists( __NAMESPACE__ . '\\Supplier_PO_Print_PDF' ) ) {
+        /**
+         * Adds a print-friendly PDF view for Supplier PO edit screens.
+         */
+        class Supplier_PO_Print_PDF {
+
+                public static function init(): void {
+                        add_action( 'add_meta_boxes', array( __CLASS__, 'add_metabox' ) );
+                        add_action( 'admin_footer', array( __CLASS__, 'render_footer_assets' ) );
+                }
+
+                public static function add_metabox(): void {
+                        add_meta_box(
+                                'lpr_po_print_pdf',
+                                __( 'Print PO PDF', 'lpr-backorder-allocator' ),
+                                array( __CLASS__, 'render_metabox' ),
+                                defined( __NAMESPACE__ . '\\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po',
+                                'side',
+                                'high'
+                        );
+                }
+
+                public static function render_metabox( \WP_Post $post ): void {
+                        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                                return;
+                        }
+                        ?>
+                        <p><?php echo esc_html__( 'Create a print-ready PDF using the details currently on screen (including unsaved changes).', 'lpr-backorder-allocator' ); ?></p>
+                        <p><button type="button" class="button button-primary" id="lpr-po-print-pdf" data-po-id="<?php echo esc_attr( (string) $post->ID ); ?>"><?php echo esc_html__( 'Print PO as PDF', 'lpr-backorder-allocator' ); ?></button></p>
+                        <?php
+                }
+
+                public static function render_footer_assets(): void {
+                        if ( ! self::is_po_screen() ) {
+                                return;
+                        }
+                        ?>
+                        <style id="lpr-po-print-styles" type="text/css">
+                                /* Reserve namespace for print preview window */
+                        </style>
+                        <div id="lpr-po-print-root" aria-hidden="true" style="display:none;"></div>
+                        <script>
+                                (function($){
+                                        function escapeHtml(str){
+                                                return (str || '').toString()
+                                                        .replace(/&/g, '&amp;')
+                                                        .replace(/</g, '&lt;')
+                                                        .replace(/>/g, '&gt;')
+                                                        .replace(/"/g, '&quot;')
+                                                        .replace(/'/g, '&#039;');
+                                        }
+
+                                        function parseQty(val){
+                                                const num = parseInt(val, 10);
+                                                return Number.isFinite(num) ? num : 0;
+                                        }
+
+                                        function collectLines(){
+                                                const lines = [];
+                                                $('#lpr-po-lines-table tbody tr').each(function(){
+                                                        const $row = $(this);
+                                                        const product = ($row.find('select.lpr-product-select option:selected').text() || '').trim();
+                                                        const qtyIncoming = parseQty($row.find('input[name*="[qty_ordered]"]').val());
+                                                        const qtyAllocated = parseQty($row.find('input[name*="[qty_allocated]"]').val());
+                                                        const qtyReceived = parseQty($row.find('input[name*="[qty_received]"]').val());
+                                                        const etaOverride = ($row.find('input[name*="[eta_override]"]').val() || '').trim();
+                                                        const qtyStock = Math.max(0, qtyIncoming - qtyAllocated);
+
+                                                        if (product || qtyIncoming || qtyAllocated || qtyReceived || etaOverride) {
+                                                                lines.push({
+                                                                        product,
+                                                                        qtyIncoming,
+                                                                        qtyAllocated,
+                                                                        qtyStock,
+                                                                        etaOverride,
+                                                                        qtyReceived
+                                                                });
+                                                        }
+                                                });
+                                                return lines;
+                                        }
+
+                                        function collectHeader(){
+                                                return {
+                                                        title: ($('#title').val() || '').trim() || '<?php echo esc_js( __( 'Supplier Purchase Order', 'lpr-backorder-allocator' ) ); ?>',
+                                                        supplier: ($('#lpr_supplier_name').val() || '').trim(),
+                                                        poNumber: ($('#lpr_po_number').val() || '').trim(),
+                                                        eta: ($('#lpr_eta_date').val() || '').trim(),
+                                                        note: ($('#lpr_po_note').val() || '').trim(),
+                                                        status: ($('#lpr_po_status option:selected').text() || '').trim()
+                                                };
+                                        }
+
+                                        function renderPrintable(data){
+                                                const lineRows = data.lines.map(function(line){
+                                                        return '<tr>' +
+                                                                '<td>'+ escapeHtml(line.product || '<?php echo esc_js( __( 'Product', 'lpr-backorder-allocator' ) ); ?>') +'</td>' +
+                                                                '<td class="num">'+ line.qtyIncoming +'</td>' +
+                                                                '<td class="num">'+ line.qtyAllocated +'</td>' +
+                                                                '<td class="num">'+ line.qtyStock +'</td>' +
+                                                                '<td>'+ escapeHtml(line.etaOverride) +'</td>' +
+                                                                '<td class="num">'+ line.qtyReceived +'</td>' +
+                                                        '</tr>';
+                                                }).join('');
+
+                                                const noteBlock = data.note ? '<div class="lpr-po-print-note"><strong><?php echo esc_js( __( 'Note', 'lpr-backorder-allocator' ) ); ?>:</strong><p>'+ escapeHtml(data.note) +'</p></div>' : '';
+                                                const linesHtml = lineRows || '<tr><td class="empty" colspan="6"><?php echo esc_js( __( 'No PO lines available.', 'lpr-backorder-allocator' ) ); ?></td></tr>';
+
+                                                return `<!doctype html>
+                                                <html>
+                                                <head>
+                                                <meta charset="utf-8">
+                                                <title>${escapeHtml(data.title)}</title>
+                                                <style>
+                                                        @page { size: A4; margin: 14mm; }
+                                                        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #111; margin: 0; padding: 0; background: #f5f5f7; }
+                                                        .lpr-po-print-shell { max-width: 210mm; margin: 0 auto; padding: 18px 20px 28px; background: #fff; box-shadow: 0 2px 10px rgba(0,0,0,0.08); }
+                                                        .lpr-po-print-header { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 14px; }
+                                                        .lpr-po-print-header .item { padding: 10px 12px; background: #f3f6fb; border: 1px solid #d8e2f1; border-radius: 6px; }
+                                                        .lpr-po-print-header .label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; color: #4a5a6a; margin-bottom: 4px; }
+                                                        .lpr-po-print-header .value { font-size: 15px; font-weight: 600; color: #1d1d1f; word-break: break-word; }
+                                                        h1 { margin: 0 0 12px; font-size: 24px; letter-spacing: -0.02em; color: #111; }
+                                                        .lpr-po-summary { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0 6px; }
+                                                        .lpr-po-summary .pill { padding: 10px 14px; background: #f0f7ff; border: 1px solid #d0e4ff; border-radius: 999px; font-weight: 600; color: #0b5394; }
+                                                        .lpr-po-print-note { margin: 12px 0 6px; padding: 10px 12px; background: #fff7e6; border: 1px solid #f4d9a8; border-radius: 6px; }
+                                                        .lpr-po-print-note p { margin: 6px 0 0; white-space: pre-wrap; }
+                                                        table { width: 100%; border-collapse: collapse; margin-top: 14px; }
+                                                        table th { text-align: left; background: #0b5394; color: #fff; padding: 10px 8px; font-size: 13px; letter-spacing: 0.3px; }
+                                                        table td { padding: 9px 8px; border-bottom: 1px solid #e2e8f0; font-size: 13px; }
+                                                        table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+                                                        table td.empty { text-align: center; color: #555; font-style: italic; }
+                                                        .lpr-po-totals { margin-top: 14px; display: flex; gap: 12px; flex-wrap: wrap; }
+                                                        .lpr-po-totals .card { flex: 1 1 180px; background: #0b5394; color: #fff; padding: 12px 14px; border-radius: 8px; }
+                                                        .lpr-po-totals .card .label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; opacity: 0.9; margin-bottom: 4px; }
+                                                        .lpr-po-totals .card .value { font-size: 20px; font-weight: 700; letter-spacing: 0.4px; }
+                                                        .lpr-po-footer { margin-top: 14px; font-size: 12px; color: #555; text-align: right; }
+                                                        @media print {
+                                                                body { background: #fff; }
+                                                                .lpr-po-print-shell { box-shadow: none; }
+                                                        }
+                                                </style>
+                                                </head>
+                                                <body>
+                                                        <div class="lpr-po-print-shell">
+                                                                <h1>${escapeHtml(data.title)}</h1>
+                                                                <div class="lpr-po-print-header">
+                                                                        <div class="item"><div class="label"><?php echo esc_js( __( 'Supplier', 'lpr-backorder-allocator' ) ); ?></div><div class="value">${escapeHtml(data.supplier || '<?php echo esc_js( __( 'Not set', 'lpr-backorder-allocator' ) ); ?>')}</div></div>
+                                                                        <div class="item"><div class="label"><?php echo esc_js( __( 'PO Number', 'lpr-backorder-allocator' ) ); ?></div><div class="value">${escapeHtml(data.poNumber || '<?php echo esc_js( __( 'Not set', 'lpr-backorder-allocator' ) ); ?>')}</div></div>
+                                                                        <div class="item"><div class="label"><?php echo esc_js( __( 'ETA', 'lpr-backorder-allocator' ) ); ?></div><div class="value">${escapeHtml(data.eta || '<?php echo esc_js( __( 'Not provided', 'lpr-backorder-allocator' ) ); ?>')}</div></div>
+                                                                        <div class="item"><div class="label"><?php echo esc_js( __( 'Status', 'lpr-backorder-allocator' ) ); ?></div><div class="value">${escapeHtml(data.status || '<?php echo esc_js( __( 'Open', 'lpr-backorder-allocator' ) ); ?>')}</div></div>
+                                                                </div>
+
+                                                                <div class="lpr-po-summary">
+                                                                        <div class="pill">${escapeHtml('<?php echo esc_js( __( 'Total incoming', 'lpr-backorder-allocator' ) ); ?>')}: ${data.totalIncoming}</div>
+                                                                </div>
+
+                                                                ${noteBlock}
+
+                                                                <table>
+                                                                        <thead>
+                                                                                <tr>
+                                                                                        <th><?php echo esc_js( __( 'Product line', 'lpr-backorder-allocator' ) ); ?></th>
+                                                                                        <th><?php echo esc_js( __( 'Incoming', 'lpr-backorder-allocator' ) ); ?></th>
+                                                                                        <th><?php echo esc_js( __( 'Allocated to orders', 'lpr-backorder-allocator' ) ); ?></th>
+                                                                                        <th><?php echo esc_js( __( 'For stock', 'lpr-backorder-allocator' ) ); ?></th>
+                                                                                        <th><?php echo esc_js( __( 'ETA Override', 'lpr-backorder-allocator' ) ); ?></th>
+                                                                                        <th><?php echo esc_js( __( 'Received', 'lpr-backorder-allocator' ) ); ?></th>
+                                                                                </tr>
+                                                                        </thead>
+                                                                        <tbody>${linesHtml}</tbody>
+                                                                </table>
+
+                                                                <div class="lpr-po-totals">
+                                                                        <div class="card">
+                                                                                <div class="label"><?php echo esc_js( __( 'Total incoming', 'lpr-backorder-allocator' ) ); ?></div>
+                                                                                <div class="value">${data.totalIncoming}</div>
+                                                                        </div>
+                                                                </div>
+
+                                                                <div class="lpr-po-footer"><?php echo esc_js( __( 'Generated from the current admin PO screen', 'lpr-backorder-allocator' ) ); ?> — ${escapeHtml(data.generatedOn)}</div>
+                                                        </div>
+                                                </body>
+                                                </html>`;
+                                        }
+
+                                        function openPrint(){
+                                                const header = collectHeader();
+                                                const lines = collectLines();
+                                                const totalIncoming = lines.reduce(function(sum, line){ return sum + line.qtyIncoming; }, 0);
+                                                const html = renderPrintable({
+                                                        ...header,
+                                                        lines,
+                                                        totalIncoming,
+                                                        generatedOn: new Date().toLocaleString()
+                                                });
+
+                                                const win = window.open('', 'lprPoPrint', 'width=900,height=1050');
+                                                if (!win) {
+                                                        alert('<?php echo esc_js( __( 'Please allow popups to view the printable PO.', 'lpr-backorder-allocator' ) ); ?>');
+                                                        return;
+                                                }
+
+                                                win.document.open();
+                                                win.document.write(html);
+                                                win.document.close();
+                                                win.focus();
+                                                win.print();
+                                        }
+
+                                        $(document).on('click', '#lpr-po-print-pdf', function(e){
+                                                e.preventDefault();
+                                                openPrint();
+                                        });
+                                })(jQuery);
+                        </script>
+                        <?php
+                }
+
+                protected static function is_po_screen(): bool {
+                        $screen = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
+                        if ( ! $screen || ! isset( $screen->post_type ) ) {
+                                return false;
+                        }
+                        $post_type = defined( __NAMESPACE__ . '\\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po';
+                        return $screen->post_type === $post_type;
+                }
+        }
+        Supplier_PO_Print_PDF::init();
+}
+
 /**
  * Constants for Supplier PO CPT and meta keys (guarded).
  */
