@@ -10293,17 +10293,24 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Integrity_Checker' ) ) {
                                         }
                                         unset( $alloc_row );
                                 } else {
-                                        $desired = function_exists( __NAMESPACE__ . '\lpr_allocator_calc_backorder_desired' ) ? lpr_allocator_calc_backorder_desired( $item ) : max( 0, (int) $item->get_quantity() );
-                                        $cap     = min( max( 0, (int) $item->get_quantity() ), max( 0, (int) $desired ) );
+                                $line_qty = max( 0, (int) $item->get_quantity() );
+                                $desired  = function_exists( __NAMESPACE__ . '\lpr_allocator_calc_backorder_desired' ) ? lpr_allocator_calc_backorder_desired( $item ) : $line_qty;
 
-                                        $active_total = 0;
-                                        foreach ( $allocs as $alloc_row ) {
-                                                $status = isset( $alloc_row['status'] ) ? sanitize_key( (string) $alloc_row['status'] ) : 'reserved';
-                                                if ( 'released' === $status ) {
-                                                        continue;
-                                                }
-                                                $active_total += isset( $alloc_row['qty_allocated'] ) ? max( 0, (int) $alloc_row['qty_allocated'] ) : 0;
+                                $active_total = 0;
+                                foreach ( $allocs as $alloc_row ) {
+                                        $status = isset( $alloc_row['status'] ) ? sanitize_key( (string) $alloc_row['status'] ) : 'reserved';
+                                        if ( 'released' === $status ) {
+                                                continue;
                                         }
+                                        $active_total += isset( $alloc_row['qty_allocated'] ) ? max( 0, (int) $alloc_row['qty_allocated'] ) : 0;
+                                }
+
+                                if ( $desired <= 0 && $active_total > 0 ) {
+                                        // Preserve existing allocations when backorder meta is missing instead of zeroing them out.
+                                        $desired = min( $active_total, $line_qty );
+                                }
+
+                                $cap = min( $line_qty, max( 0, (int) $desired ) );
 
                                         $over = max( 0, $active_total - $cap );
                                         if ( $over > 0 ) {
