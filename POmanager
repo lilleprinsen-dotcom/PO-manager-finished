@@ -418,6 +418,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                         add_action( 'woocommerce_update_options_' . self::TAB_ID, array( __CLASS__, 'save_general' ) );
                         add_action( 'woocommerce_settings_save_' . self::TAB_ID, array( __CLASS__, 'save_general' ) );
                         add_action( 'admin_post_lpr_allocator_force_auto_allocation', array( __CLASS__, 'handle_force_auto_allocation' ) );
+                        add_action( 'woocommerce_admin_field_lpr_po_index_rebuild', array( __CLASS__, 'render_po_index_rebuild_field' ) );
+                        add_action( 'admin_post_lpr_allocator_force_po_index_rebuild', array( __CLASS__, 'handle_force_po_index_rebuild' ) );
                 }
 
 		/**
@@ -498,6 +500,20 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                                 43200  => __( 'Every 12 hours', 'lpr-backorder-allocator' ),
                                         ),
                                         'default' => Settings::defaults()['backorder_index_interval'],
+                                ),
+
+                                array(
+                                        'title' => __( 'PO allocation index', 'lpr-backorder-allocator' ),
+                                        'type'  => 'title',
+                                        'desc'  => __( 'If a purchase order shows incorrect allocated quantities, rebuild its allocation index from order items.', 'lpr-backorder-allocator' ),
+                                        'id'    => 'lpr_allocator_section_po_index',
+                                ),
+
+                                array(
+                                        'title' => __( 'Force PO index rebuild', 'lpr-backorder-allocator' ),
+                                        'id'    => 'lpr_allocator_po_index_rebuild',
+                                        'type'  => 'lpr_po_index_rebuild',
+                                        'desc'  => __( 'Enter a PO ID and force the allocator to rescan orders for its allocations.', 'lpr-backorder-allocator' ),
                                 ),
 
                                 array(
@@ -1020,6 +1036,61 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                 return wp_kses_post( $html );
 }
 
+                /**
+                 * Render the custom force PO index rebuild field.
+                 */
+                public static function render_po_index_rebuild_field( array $field ): void {
+                        $po_id      = isset( $_GET['po_id'] ) ? absint( wp_unslash( $_GET['po_id'] ) ) : 0; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $redirect   = admin_url( 'admin.php?page=wc-settings&tab=' . self::TAB_ID );
+                        $action_url = wp_nonce_url(
+                                add_query_arg(
+                                        array(
+                                                'action'   => 'lpr_allocator_force_po_index_rebuild',
+                                                'redirect' => rawurlencode( $redirect ),
+                                        ),
+                                        admin_url( 'admin-post.php' )
+                                ),
+                                'lpr_allocator_force_po_index_rebuild'
+                        );
+
+                        ?>
+                        <tr valign="top">
+                                <th scope="row" class="titledesc">
+                                        <label for="lpr-po-index-po-id"><?php echo esc_html( $field['title'] ); ?></label>
+                                </th>
+                                <td class="forminp">
+                                        <fieldset>
+                                                <legend class="screen-reader-text"><span><?php echo esc_html( $field['title'] ); ?></span></legend>
+                                                <p class="description"><?php echo esc_html( $field['desc'] ); ?></p>
+                                                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                                                        <input type="number" min="1" class="small-text" id="lpr-po-index-po-id" value="<?php echo $po_id ? esc_attr( $po_id ) : ''; ?>" />
+                                                        <button type="button" class="button" id="lpr-po-index-rebuild-btn"><?php echo esc_html__( 'Rebuild index', 'lpr-backorder-allocator' ); ?></button>
+                                                </div>
+                                                <p class="description" style="margin-top:4px;">
+                                                        <?php esc_html_e( 'This scans order items for allocations and refreshes the PO index without changing quantities.', 'lpr-backorder-allocator' ); ?>
+                                                </p>
+                                        </fieldset>
+                                        <script>
+                                                (function(){
+                                                        var btn = document.getElementById('lpr-po-index-rebuild-btn');
+                                                        var input = document.getElementById('lpr-po-index-po-id');
+                                                        if(!btn || !input){return;}
+                                                        var base = '<?php echo esc_js( $action_url ); ?>';
+                                                        btn.addEventListener('click', function(){
+                                                                var val = parseInt(input.value, 10) || 0;
+                                                                var target = base;
+                                                                if(val > 0){
+                                                                        target += '&po_id=' + encodeURIComponent(val);
+                                                                }
+                                                                window.location.href = target;
+                                                        });
+                                                })();
+                                        </script>
+                                </td>
+                        </tr>
+                        <?php
+                }
+
                 public static function handle_force_auto_allocation(): void {
                         if ( ! current_user_can( 'manage_woocommerce' ) ) {
                                 wp_die( esc_html__( 'Insufficient permissions.', 'lpr-backorder-allocator' ) );
@@ -1056,6 +1127,54 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                 }
 
                 /**
+                 * Handle requests to rebuild a PO allocation index from settings.
+                 */
+                public static function handle_force_po_index_rebuild(): void {
+                        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                                wp_die( esc_html__( 'Insufficient permissions.', 'lpr-backorder-allocator' ) );
+                        }
+
+                        $nonce = isset( $_REQUEST['_wpnonce'] ) ? (string) $_REQUEST['_wpnonce'] : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        if ( ! wp_verify_nonce( $nonce, 'lpr_allocator_force_po_index_rebuild' ) ) {
+                                wp_die( esc_html__( 'Invalid request.', 'lpr-backorder-allocator' ) );
+                        }
+
+                        $po_id    = isset( $_REQUEST['po_id'] ) ? absint( wp_unslash( $_REQUEST['po_id'] ) ) : 0; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $redirect = isset( $_REQUEST['redirect'] ) ? rawurldecode( (string) wp_unslash( $_REQUEST['redirect'] ) ) : admin_url( 'admin.php?page=wc-settings&tab=' . self::TAB_ID ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $redirect = wp_validate_redirect( $redirect, admin_url( 'admin.php?page=wc-settings&tab=' . self::TAB_ID ) );
+
+                        $status = 'invalid';
+                        $count  = 0;
+
+                        if ( $po_id > 0 ) {
+                                if (
+                                        function_exists( __NAMESPACE__ . '\\lpr_allocator_rebuild_po_alloc_index' )
+                                        && function_exists( __NAMESPACE__ . '\\lpr_allocator_store_po_alloc_index' )
+                                        && function_exists( __NAMESPACE__ . '\\lpr_allocator_normalize_po_alloc_index' )
+                                ) {
+                                        $rebuilt = lpr_allocator_normalize_po_alloc_index( lpr_allocator_rebuild_po_alloc_index( $po_id ) );
+                                        $count   = count( $rebuilt );
+                                        lpr_allocator_store_po_alloc_index( $po_id, $rebuilt );
+                                        $status = $count > 0 ? 'rebuilt' : 'cleared';
+                                } else {
+                                        $status = 'missing';
+                                }
+                        }
+
+                        $redirect = add_query_arg(
+                                array(
+                                        'lpr_po_index_rebuild'  => $status,
+                                        'po_id'                 => $po_id,
+                                        'po_index_row_count'    => $count,
+                                ),
+                                $redirect
+                        );
+
+                        wp_safe_redirect( $redirect );
+                        exit;
+                }
+
+                /**
                  * Render settings tab.
                  */
                 public static function render(): void {
@@ -1064,6 +1183,30 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
 			}
                         if ( ! function_exists( 'woocommerce_admin_fields' ) ) {
                                 return;
+                        }
+                        $status   = isset( $_GET['lpr_po_index_rebuild'] ) ? sanitize_key( wp_unslash( $_GET['lpr_po_index_rebuild'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $po_id    = isset( $_GET['po_id'] ) ? absint( wp_unslash( $_GET['po_id'] ) ) : 0; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $row_cnt  = isset( $_GET['po_index_row_count'] ) ? max( 0, (int) $_GET['po_index_row_count'] ) : 0; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+
+                        if ( '' !== $status ) {
+                                $message = '';
+                                $class   = 'updated';
+
+                                if ( 'rebuilt' === $status ) {
+                                        $message = sprintf( __( 'Rebuilt the allocation index for PO #%1$d (%2$d linked order items).', 'lpr-backorder-allocator' ), $po_id, $row_cnt );
+                                } elseif ( 'cleared' === $status ) {
+                                        $message = sprintf( __( 'Cleared the allocation index for PO #%1$d because no allocations were found on orders.', 'lpr-backorder-allocator' ), $po_id );
+                                } elseif ( 'missing' === $status ) {
+                                        $class   = 'notice-warning';
+                                        $message = __( 'Allocator index tools are unavailable in this environment.', 'lpr-backorder-allocator' );
+                                } else {
+                                        $class   = 'notice-warning';
+                                        $message = __( 'Enter a valid PO ID to rebuild its allocation index.', 'lpr-backorder-allocator' );
+                                }
+
+                                if ( '' !== $message ) {
+                                        echo '<div class="notice ' . esc_attr( $class ) . ' is-dismissible"><p>' . esc_html( $message ) . '</p></div>';
+                                }
                         }
                         $settings = Settings::get();
                         self::prime_field_values( $settings );
@@ -2264,6 +2407,12 @@ if ( ! defined( __NAMESPACE__ . '\PO_META_ALLOC_INDEX' ) ) {
         // Stores [{order_id,int,item_id,int}] used to reconstitute allocations safely.
         define( __NAMESPACE__ . '\PO_META_ALLOC_INDEX', '_lpr_po_alloc_index' );
 }
+if ( ! defined( __NAMESPACE__ . '\PO_META_ALLOC_INDEX_BUILT_AT' ) ) {
+        define( __NAMESPACE__ . '\PO_META_ALLOC_INDEX_BUILT_AT', '_lpr_po_alloc_index_built_at' );
+}
+if ( ! defined( __NAMESPACE__ . '\PO_ALLOC_INDEX_REFRESH_TTL' ) ) {
+        define( __NAMESPACE__ . '\PO_ALLOC_INDEX_REFRESH_TTL', 600 ); // 10 minutes.
+}
 if ( ! defined( __NAMESPACE__ . '\PO_META_RECEIPTS' ) ) {
         define( __NAMESPACE__ . '\PO_META_RECEIPTS', '_lpr_po_receipts' );
 }
@@ -2617,8 +2766,65 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_sanitize_po_lines_input'
 			$clean[] = $line;
 		}
 
-		return $clean;
-	}
+                return $clean;
+        }
+}
+
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_normalize_po_alloc_index' ) ) {
+        /**
+         * Normalize a PO allocation index array into a keyed map of order:item => row.
+         *
+         * @param array $rows
+         * @return array<string, array{order_id:int,item_id:int}>
+         */
+        function lpr_allocator_normalize_po_alloc_index( array $rows ): array {
+                $sanitized = array();
+
+                foreach ( $rows as $row ) {
+                        $oid = isset( $row['order_id'] ) ? absint( $row['order_id'] ) : 0;
+                        $iid = isset( $row['item_id'] ) ? absint( $row['item_id'] ) : 0;
+                        if ( $oid > 0 && $iid > 0 ) {
+                                $sanitized[ $oid . ':' . $iid ] = array(
+                                        'order_id' => $oid,
+                                        'item_id'  => $iid,
+                                );
+                        }
+                }
+
+                return $sanitized;
+        }
+}
+
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_store_po_alloc_index' ) ) {
+        /**
+         * Persist the PO allocation index and bump its built timestamp.
+         */
+        function lpr_allocator_store_po_alloc_index( int $po_id, array $rows ): void {
+                if ( $po_id <= 0 ) {
+                        return;
+                }
+
+                update_post_meta( $po_id, PO_META_ALLOC_INDEX, array_values( $rows ) );
+                update_post_meta( $po_id, PO_META_ALLOC_INDEX_BUILT_AT, time() );
+        }
+}
+
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_po_alloc_index_is_stale' ) ) {
+        /**
+         * Determine if a PO allocation index should be rebuilt.
+         */
+        function lpr_allocator_po_alloc_index_is_stale( int $po_id ): bool {
+                if ( $po_id <= 0 ) {
+                        return true;
+                }
+
+                $built_at = (int) get_post_meta( $po_id, PO_META_ALLOC_INDEX_BUILT_AT, true );
+                if ( $built_at <= 0 ) {
+                        return true;
+                }
+
+                return ( time() - $built_at ) >= PO_ALLOC_INDEX_REFRESH_TTL;
+        }
 }
 
 if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_get_po_allocation_index' ) ) {
@@ -2634,48 +2840,36 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_get_po_allocation_index'
                 }
 
                 $meta_exists = metadata_exists( 'post', $po_id, PO_META_ALLOC_INDEX );
-
-                $index = get_post_meta( $po_id, PO_META_ALLOC_INDEX, true );
-                if ( ! is_array( $index ) ) {
-                        $index = array();
+                $raw         = get_post_meta( $po_id, PO_META_ALLOC_INDEX, true );
+                if ( ! is_array( $raw ) ) {
+                        $raw = array();
                 }
 
-                // Sanitize entries.
-                $sanitized = array();
-                foreach ( $index as $row ) {
-                        $oid = isset( $row['order_id'] ) ? absint( $row['order_id'] ) : 0;
-                        $iid = isset( $row['item_id'] ) ? absint( $row['item_id'] ) : 0;
-                        if ( $oid > 0 && $iid > 0 ) {
-                                $sanitized[ $oid . ':' . $iid ] = array(
-                                        'order_id' => $oid,
-                                        'item_id'  => $iid,
-                                );
-                        }
-                }
+                $sanitized       = lpr_allocator_normalize_po_alloc_index( $raw );
+                $needs_normalize = count( $sanitized ) !== count( $raw );
 
                 if ( ! empty( $sanitized ) ) {
-                        // Normalize storage if we cleaned anything.
-                        update_post_meta( $po_id, PO_META_ALLOC_INDEX, array_values( $sanitized ) );
+                        if ( $needs_normalize || lpr_allocator_po_alloc_index_is_stale( $po_id ) ) {
+                                $rebuilt = lpr_allocator_normalize_po_alloc_index( lpr_allocator_rebuild_po_alloc_index( $po_id ) );
+
+                                $sanitized = $rebuilt;
+
+                                lpr_allocator_store_po_alloc_index( $po_id, $sanitized );
+                        }
+
                         return array_values( $sanitized );
                 }
 
-                if ( ! $meta_exists ) {
-                        // Legacy POs may have allocations on orders but no stored index; attempt a one-time rebuild.
-                        $rebuilt = lpr_allocator_rebuild_po_alloc_index( $po_id );
+                if ( ! $meta_exists || lpr_allocator_po_alloc_index_is_stale( $po_id ) ) {
+                        // Legacy POs may have allocations on orders but no stored index; attempt a rebuild and cache the result.
+                        $rebuilt = lpr_allocator_normalize_po_alloc_index( lpr_allocator_rebuild_po_alloc_index( $po_id ) );
                         if ( ! empty( $rebuilt ) ) {
-                                update_post_meta( $po_id, PO_META_ALLOC_INDEX, $rebuilt );
-                                return $rebuilt;
+                                lpr_allocator_store_po_alloc_index( $po_id, $rebuilt );
+                                return array_values( $rebuilt );
                         }
 
-                        // Cache an empty array to avoid repeated expensive scans on brand new POs.
-                        update_post_meta( $po_id, PO_META_ALLOC_INDEX, array() );
+                        lpr_allocator_store_po_alloc_index( $po_id, array() );
                         return array();
-                }
-
-                $rebuilt = lpr_allocator_rebuild_po_alloc_index( $po_id );
-                if ( ! empty( $rebuilt ) ) {
-                        update_post_meta( $po_id, PO_META_ALLOC_INDEX, $rebuilt );
-                        return $rebuilt;
                 }
 
                 return array();
@@ -2778,7 +2972,7 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_index_po_allocation' ) )
                                 'order_id' => $order_id,
                                 'item_id'  => $item_id,
                         );
-                        update_post_meta( $po_id, PO_META_ALLOC_INDEX, array_values( $map ) );
+                        lpr_allocator_store_po_alloc_index( $po_id, $map );
                 }
         }
 }
@@ -2858,7 +3052,7 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_recalculate_po_lines_fro
                 }
 
                 // Rebuild index to drop stale entries and to capture any new valid pairs we found.
-                update_post_meta( $po_id, PO_META_ALLOC_INDEX, array_values( $valid ) );
+                lpr_allocator_store_po_alloc_index( $po_id, $valid );
 
                 // Apply available active allocations to PO lines in order.
                 foreach ( $lines as &$line ) {
