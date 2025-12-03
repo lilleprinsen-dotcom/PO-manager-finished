@@ -2883,6 +2883,33 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_recalculate_po_lines_fro
         }
 }
 
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_refresh_po_allocation_state' ) ) {
+        /**
+         * Ensure PO line and index tallies reflect the live allocation ledger before display.
+         *
+         * @param int $po_id
+         * @return array Sanitized PO lines with refreshed qty_allocated values.
+         */
+        function lpr_allocator_refresh_po_allocation_state( int $po_id ): array {
+                if ( $po_id <= 0 ) {
+                        return array();
+                }
+
+                $lines = get_post_meta( $po_id, PO_META_LINES, true );
+                if ( ! is_array( $lines ) || empty( $lines ) ) {
+                        return array();
+                }
+
+                $updated = lpr_allocator_recalculate_po_lines_from_allocations( $po_id, $lines );
+
+                if ( $updated !== $lines ) {
+                        update_post_meta( $po_id, PO_META_LINES, $updated );
+                }
+
+                return $updated;
+        }
+}
+
 if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_reapply_po_allocations_for_order' ) ) {
         /**
          * When an order status changes, refresh qty_allocated on all POs that allocated its items.
@@ -6502,10 +6529,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Supplier_PO_Live_Product_UI' ) ) {
 				return;
 			}
 			wp_nonce_field( 'lpr_po_lines_action', 'lpr_po_lines_nonce' );
-			$lines = get_post_meta( $post->ID, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', true );
-			if ( ! is_array( $lines ) ) {
-				$lines = array();
-			}
+                        $lines = lpr_allocator_refresh_po_allocation_state( (int) $post->ID );
+                        if ( ! is_array( $lines ) ) {
+                                $lines = array();
+                        }
 
 			?>
 			<style>
@@ -9548,6 +9575,8 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Overview' ) ) {
                         if ( $po_id <= 0 || ! function_exists( __NAMESPACE__ . '\lpr_allocator_get_po_allocation_index' ) ) {
                                 return array();
                         }
+
+                        lpr_allocator_refresh_po_allocation_state( $po_id );
 
                         $index = lpr_allocator_get_po_allocation_index( $po_id );
                         if ( empty( $index ) ) {
