@@ -10168,8 +10168,16 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Integrity_Checker' ) ) {
                         $expected_type = defined( __NAMESPACE__ . '\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po';
                         $live_statuses = lpr_allocator_live_po_statuses();
 
+                        // Keep allocations for closed/received POs so the overview retains historical links.
+                        $retained_statuses = array_unique(
+                                array_merge(
+                                        $live_statuses,
+                                        array( defined( __NAMESPACE__ . '\PO_STATUS_CLOSED' ) ? PO_STATUS_CLOSED : 'closed' )
+                                )
+                        );
+
                         foreach ( $po_ids as $po_id ) {
-                                if ( ! self::po_is_live( $po_id, $expected_type, $live_statuses ) ) {
+                                if ( ! self::po_has_allowed_status( $po_id, $expected_type, $retained_statuses ) ) {
                                         lpr_allocator_remove_po_allocations_from_orders( (int) $po_id );
                                 }
                         }
@@ -10222,16 +10230,16 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Integrity_Checker' ) ) {
                 }
 
                 /**
-                 * Check if the PO exists and remains in a live status.
+                 * Check if the PO exists and remains in an allowed status.
                  */
-                protected static function po_is_live( int $po_id, string $expected_type, array $live_statuses ): bool {
+                protected static function po_has_allowed_status( int $po_id, string $expected_type, array $allowed_statuses ): bool {
                         $po = get_post( $po_id );
 
                         if ( ! ( $po instanceof \WP_Post ) || $po->post_type !== $expected_type ) {
                                 return false;
                         }
 
-                        return in_array( $po->post_status, $live_statuses, true );
+                        return in_array( $po->post_status, $allowed_statuses, true );
                 }
 
                 /**
