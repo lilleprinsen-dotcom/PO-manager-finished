@@ -10405,11 +10405,12 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Integrity_Checker' ) ) {
                                 $is_completed      = in_array( $normalized_status, array( 'completed', 'fullfort' ), true );
                                 $is_live           = in_array( $normalized_status, $allowed_statuses, true );
 
-                                $qty_meta_key     = defined( __NAMESPACE__ . '\\ORDER_ITEM_META_ALLOC_QTY_SNAPSHOT' ) ? ORDER_ITEM_META_ALLOC_QTY_SNAPSHOT : '_lpr_alloc_qty_snapshot';
-                                $current_qty      = max( 0, (int) $item->get_quantity() );
-                                $last_qty         = (int) $item->get_meta( $qty_meta_key, true );
-                                $last_qty         = $last_qty > 0 ? $last_qty : $current_qty;
-                                $quantity_changed = ( $current_qty !== $last_qty );
+                                $qty_meta_key       = defined( __NAMESPACE__ . '\\ORDER_ITEM_META_ALLOC_QTY_SNAPSHOT' ) ? ORDER_ITEM_META_ALLOC_QTY_SNAPSHOT : '_lpr_alloc_qty_snapshot';
+                                $current_qty        = max( 0, (int) $item->get_quantity() );
+                                $last_qty_raw       = (int) $item->get_meta( $qty_meta_key, true );
+                                $has_qty_snapshot   = $item->meta_exists( $qty_meta_key );
+                                $last_qty           = $last_qty_raw > 0 ? $last_qty_raw : ( $has_qty_snapshot ? $current_qty : 0 );
+                                $quantity_changed   = $has_qty_snapshot ? ( $current_qty !== $last_qty ) : true;
                                 $allocations_changed = false;
                                 $released_qty        = 0;
 
