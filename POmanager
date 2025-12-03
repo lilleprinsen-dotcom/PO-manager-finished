@@ -2660,7 +2660,15 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_get_po_allocation_index'
                 }
 
                 if ( ! $meta_exists ) {
-                        // Brand new POs have no allocations; skip the expensive DB rebuild until an allocation is stored.
+                        // Legacy POs may have allocations on orders but no stored index; attempt a one-time rebuild.
+                        $rebuilt = lpr_allocator_rebuild_po_alloc_index( $po_id );
+                        if ( ! empty( $rebuilt ) ) {
+                                update_post_meta( $po_id, PO_META_ALLOC_INDEX, $rebuilt );
+                                return $rebuilt;
+                        }
+
+                        // Cache an empty array to avoid repeated expensive scans on brand new POs.
+                        update_post_meta( $po_id, PO_META_ALLOC_INDEX, array() );
                         return array();
                 }
 
