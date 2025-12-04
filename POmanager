@@ -38,6 +38,9 @@ if ( ! defined( __NAMESPACE__ . '\ORDER_ITEM_META_ALLOCATIONS' ) ) {
 if ( ! defined( __NAMESPACE__ . '\ORDER_ITEM_META_FORCE_ALLOCATION' ) ) {
         define( __NAMESPACE__ . '\ORDER_ITEM_META_FORCE_ALLOCATION', '_lpr_force_allocation' );
 }
+if ( ! defined( __NAMESPACE__ . '\ORDER_ITEM_META_ALLOC_QTY_SNAPSHOT' ) ) {
+        define( __NAMESPACE__ . '\ORDER_ITEM_META_ALLOC_QTY_SNAPSHOT', '_lpr_alloc_qty_snapshot' );
+}
 if ( ! defined( __NAMESPACE__ . '\ORDER_META_REQUESTED_DELIVERY' ) ) {
         define( __NAMESPACE__ . '\ORDER_META_REQUESTED_DELIVERY', '_lpr_requested_delivery_date' );
 }
@@ -415,6 +418,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                         add_action( 'woocommerce_update_options_' . self::TAB_ID, array( __CLASS__, 'save_general' ) );
                         add_action( 'woocommerce_settings_save_' . self::TAB_ID, array( __CLASS__, 'save_general' ) );
                         add_action( 'admin_post_lpr_allocator_force_auto_allocation', array( __CLASS__, 'handle_force_auto_allocation' ) );
+                        add_action( 'woocommerce_admin_field_lpr_po_index_rebuild', array( __CLASS__, 'render_po_index_rebuild_field' ) );
+                        add_action( 'admin_post_lpr_allocator_force_po_index_rebuild', array( __CLASS__, 'handle_force_po_index_rebuild' ) );
                 }
 
 		/**
@@ -495,6 +500,20 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                                 43200  => __( 'Every 12 hours', 'lpr-backorder-allocator' ),
                                         ),
                                         'default' => Settings::defaults()['backorder_index_interval'],
+                                ),
+
+                                array(
+                                        'title' => __( 'PO allocation index', 'lpr-backorder-allocator' ),
+                                        'type'  => 'title',
+                                        'desc'  => __( 'If a purchase order shows incorrect allocated quantities, rebuild its allocation index from order items.', 'lpr-backorder-allocator' ),
+                                        'id'    => 'lpr_allocator_section_po_index',
+                                ),
+
+                                array(
+                                        'title' => __( 'Force PO index rebuild', 'lpr-backorder-allocator' ),
+                                        'id'    => 'lpr_allocator_po_index_rebuild',
+                                        'type'  => 'lpr_po_index_rebuild',
+                                        'desc'  => __( 'Enter a PO ID and force the allocator to rescan orders for its allocations.', 'lpr-backorder-allocator' ),
                                 ),
 
                                 array(
@@ -1017,6 +1036,61 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                 return wp_kses_post( $html );
 }
 
+                /**
+                 * Render the custom force PO index rebuild field.
+                 */
+                public static function render_po_index_rebuild_field( array $field ): void {
+                        $po_id      = isset( $_GET['po_id'] ) ? absint( wp_unslash( $_GET['po_id'] ) ) : 0; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $redirect   = admin_url( 'admin.php?page=wc-settings&tab=' . self::TAB_ID );
+                        $action_url = wp_nonce_url(
+                                add_query_arg(
+                                        array(
+                                                'action'   => 'lpr_allocator_force_po_index_rebuild',
+                                                'redirect' => rawurlencode( $redirect ),
+                                        ),
+                                        admin_url( 'admin-post.php' )
+                                ),
+                                'lpr_allocator_force_po_index_rebuild'
+                        );
+
+                        ?>
+                        <tr valign="top">
+                                <th scope="row" class="titledesc">
+                                        <label for="lpr-po-index-po-id"><?php echo esc_html( $field['title'] ); ?></label>
+                                </th>
+                                <td class="forminp">
+                                        <fieldset>
+                                                <legend class="screen-reader-text"><span><?php echo esc_html( $field['title'] ); ?></span></legend>
+                                                <p class="description"><?php echo esc_html( $field['desc'] ); ?></p>
+                                                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                                                        <input type="number" min="1" class="small-text" id="lpr-po-index-po-id" value="<?php echo $po_id ? esc_attr( $po_id ) : ''; ?>" />
+                                                        <button type="button" class="button" id="lpr-po-index-rebuild-btn"><?php echo esc_html__( 'Rebuild index', 'lpr-backorder-allocator' ); ?></button>
+                                                </div>
+                                                <p class="description" style="margin-top:4px;">
+                                                        <?php esc_html_e( 'This scans order items for allocations and refreshes the PO index without changing quantities.', 'lpr-backorder-allocator' ); ?>
+                                                </p>
+                                        </fieldset>
+                                        <script>
+                                                (function(){
+                                                        var btn = document.getElementById('lpr-po-index-rebuild-btn');
+                                                        var input = document.getElementById('lpr-po-index-po-id');
+                                                        if(!btn || !input){return;}
+                                                        var base = '<?php echo esc_js( $action_url ); ?>';
+                                                        btn.addEventListener('click', function(){
+                                                                var val = parseInt(input.value, 10) || 0;
+                                                                var target = base;
+                                                                if(val > 0){
+                                                                        target += '&po_id=' + encodeURIComponent(val);
+                                                                }
+                                                                window.location.href = target;
+                                                        });
+                                                })();
+                                        </script>
+                                </td>
+                        </tr>
+                        <?php
+                }
+
                 public static function handle_force_auto_allocation(): void {
                         if ( ! current_user_can( 'manage_woocommerce' ) ) {
                                 wp_die( esc_html__( 'Insufficient permissions.', 'lpr-backorder-allocator' ) );
@@ -1053,6 +1127,54 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                 }
 
                 /**
+                 * Handle requests to rebuild a PO allocation index from settings.
+                 */
+                public static function handle_force_po_index_rebuild(): void {
+                        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                                wp_die( esc_html__( 'Insufficient permissions.', 'lpr-backorder-allocator' ) );
+                        }
+
+                        $nonce = isset( $_REQUEST['_wpnonce'] ) ? (string) $_REQUEST['_wpnonce'] : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        if ( ! wp_verify_nonce( $nonce, 'lpr_allocator_force_po_index_rebuild' ) ) {
+                                wp_die( esc_html__( 'Invalid request.', 'lpr-backorder-allocator' ) );
+                        }
+
+                        $po_id    = isset( $_REQUEST['po_id'] ) ? absint( wp_unslash( $_REQUEST['po_id'] ) ) : 0; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $redirect = isset( $_REQUEST['redirect'] ) ? rawurldecode( (string) wp_unslash( $_REQUEST['redirect'] ) ) : admin_url( 'admin.php?page=wc-settings&tab=' . self::TAB_ID ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $redirect = wp_validate_redirect( $redirect, admin_url( 'admin.php?page=wc-settings&tab=' . self::TAB_ID ) );
+
+                        $status = 'invalid';
+                        $count  = 0;
+
+                        if ( $po_id > 0 ) {
+                                if (
+                                        function_exists( __NAMESPACE__ . '\\lpr_allocator_rebuild_po_alloc_index' )
+                                        && function_exists( __NAMESPACE__ . '\\lpr_allocator_store_po_alloc_index' )
+                                        && function_exists( __NAMESPACE__ . '\\lpr_allocator_normalize_po_alloc_index' )
+                                ) {
+                                        $rebuilt = lpr_allocator_normalize_po_alloc_index( lpr_allocator_rebuild_po_alloc_index( $po_id ) );
+                                        $count   = count( $rebuilt );
+                                        lpr_allocator_store_po_alloc_index( $po_id, $rebuilt );
+                                        $status = $count > 0 ? 'rebuilt' : 'cleared';
+                                } else {
+                                        $status = 'missing';
+                                }
+                        }
+
+                        $redirect = add_query_arg(
+                                array(
+                                        'lpr_po_index_rebuild'  => $status,
+                                        'po_id'                 => $po_id,
+                                        'po_index_row_count'    => $count,
+                                ),
+                                $redirect
+                        );
+
+                        wp_safe_redirect( $redirect );
+                        exit;
+                }
+
+                /**
                  * Render settings tab.
                  */
                 public static function render(): void {
@@ -1061,6 +1183,30 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
 			}
                         if ( ! function_exists( 'woocommerce_admin_fields' ) ) {
                                 return;
+                        }
+                        $status   = isset( $_GET['lpr_po_index_rebuild'] ) ? sanitize_key( wp_unslash( $_GET['lpr_po_index_rebuild'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $po_id    = isset( $_GET['po_id'] ) ? absint( wp_unslash( $_GET['po_id'] ) ) : 0; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $row_cnt  = isset( $_GET['po_index_row_count'] ) ? max( 0, (int) $_GET['po_index_row_count'] ) : 0; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+
+                        if ( '' !== $status ) {
+                                $message = '';
+                                $class   = 'updated';
+
+                                if ( 'rebuilt' === $status ) {
+                                        $message = sprintf( __( 'Rebuilt the allocation index for PO #%1$d (%2$d linked order items).', 'lpr-backorder-allocator' ), $po_id, $row_cnt );
+                                } elseif ( 'cleared' === $status ) {
+                                        $message = sprintf( __( 'Cleared the allocation index for PO #%1$d because no allocations were found on orders.', 'lpr-backorder-allocator' ), $po_id );
+                                } elseif ( 'missing' === $status ) {
+                                        $class   = 'notice-warning';
+                                        $message = __( 'Allocator index tools are unavailable in this environment.', 'lpr-backorder-allocator' );
+                                } else {
+                                        $class   = 'notice-warning';
+                                        $message = __( 'Enter a valid PO ID to rebuild its allocation index.', 'lpr-backorder-allocator' );
+                                }
+
+                                if ( '' !== $message ) {
+                                        echo '<div class="notice ' . esc_attr( $class ) . ' is-dismissible"><p>' . esc_html( $message ) . '</p></div>';
+                                }
                         }
                         $settings = Settings::get();
                         self::prime_field_values( $settings );
@@ -2261,6 +2407,12 @@ if ( ! defined( __NAMESPACE__ . '\PO_META_ALLOC_INDEX' ) ) {
         // Stores [{order_id,int,item_id,int}] used to reconstitute allocations safely.
         define( __NAMESPACE__ . '\PO_META_ALLOC_INDEX', '_lpr_po_alloc_index' );
 }
+if ( ! defined( __NAMESPACE__ . '\PO_META_ALLOC_INDEX_BUILT_AT' ) ) {
+        define( __NAMESPACE__ . '\PO_META_ALLOC_INDEX_BUILT_AT', '_lpr_po_alloc_index_built_at' );
+}
+if ( ! defined( __NAMESPACE__ . '\PO_ALLOC_INDEX_REFRESH_TTL' ) ) {
+        define( __NAMESPACE__ . '\PO_ALLOC_INDEX_REFRESH_TTL', 600 ); // 10 minutes.
+}
 if ( ! defined( __NAMESPACE__ . '\PO_META_RECEIPTS' ) ) {
         define( __NAMESPACE__ . '\PO_META_RECEIPTS', '_lpr_po_receipts' );
 }
@@ -2614,8 +2766,65 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_sanitize_po_lines_input'
 			$clean[] = $line;
 		}
 
-		return $clean;
-	}
+                return $clean;
+        }
+}
+
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_normalize_po_alloc_index' ) ) {
+        /**
+         * Normalize a PO allocation index array into a keyed map of order:item => row.
+         *
+         * @param array $rows
+         * @return array<string, array{order_id:int,item_id:int}>
+         */
+        function lpr_allocator_normalize_po_alloc_index( array $rows ): array {
+                $sanitized = array();
+
+                foreach ( $rows as $row ) {
+                        $oid = isset( $row['order_id'] ) ? absint( $row['order_id'] ) : 0;
+                        $iid = isset( $row['item_id'] ) ? absint( $row['item_id'] ) : 0;
+                        if ( $oid > 0 && $iid > 0 ) {
+                                $sanitized[ $oid . ':' . $iid ] = array(
+                                        'order_id' => $oid,
+                                        'item_id'  => $iid,
+                                );
+                        }
+                }
+
+                return $sanitized;
+        }
+}
+
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_store_po_alloc_index' ) ) {
+        /**
+         * Persist the PO allocation index and bump its built timestamp.
+         */
+        function lpr_allocator_store_po_alloc_index( int $po_id, array $rows ): void {
+                if ( $po_id <= 0 ) {
+                        return;
+                }
+
+                update_post_meta( $po_id, PO_META_ALLOC_INDEX, array_values( $rows ) );
+                update_post_meta( $po_id, PO_META_ALLOC_INDEX_BUILT_AT, time() );
+        }
+}
+
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_po_alloc_index_is_stale' ) ) {
+        /**
+         * Determine if a PO allocation index should be rebuilt.
+         */
+        function lpr_allocator_po_alloc_index_is_stale( int $po_id ): bool {
+                if ( $po_id <= 0 ) {
+                        return true;
+                }
+
+                $built_at = (int) get_post_meta( $po_id, PO_META_ALLOC_INDEX_BUILT_AT, true );
+                if ( $built_at <= 0 ) {
+                        return true;
+                }
+
+                return ( time() - $built_at ) >= PO_ALLOC_INDEX_REFRESH_TTL;
+        }
 }
 
 if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_get_po_allocation_index' ) ) {
@@ -2631,40 +2840,36 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_get_po_allocation_index'
                 }
 
                 $meta_exists = metadata_exists( 'post', $po_id, PO_META_ALLOC_INDEX );
-
-                $index = get_post_meta( $po_id, PO_META_ALLOC_INDEX, true );
-                if ( ! is_array( $index ) ) {
-                        $index = array();
+                $raw         = get_post_meta( $po_id, PO_META_ALLOC_INDEX, true );
+                if ( ! is_array( $raw ) ) {
+                        $raw = array();
                 }
 
-                // Sanitize entries.
-                $sanitized = array();
-                foreach ( $index as $row ) {
-                        $oid = isset( $row['order_id'] ) ? absint( $row['order_id'] ) : 0;
-                        $iid = isset( $row['item_id'] ) ? absint( $row['item_id'] ) : 0;
-                        if ( $oid > 0 && $iid > 0 ) {
-                                $sanitized[ $oid . ':' . $iid ] = array(
-                                        'order_id' => $oid,
-                                        'item_id'  => $iid,
-                                );
-                        }
-                }
+                $sanitized       = lpr_allocator_normalize_po_alloc_index( $raw );
+                $needs_normalize = count( $sanitized ) !== count( $raw );
 
                 if ( ! empty( $sanitized ) ) {
-                        // Normalize storage if we cleaned anything.
-                        update_post_meta( $po_id, PO_META_ALLOC_INDEX, array_values( $sanitized ) );
+                        if ( $needs_normalize || lpr_allocator_po_alloc_index_is_stale( $po_id ) ) {
+                                $rebuilt = lpr_allocator_normalize_po_alloc_index( lpr_allocator_rebuild_po_alloc_index( $po_id ) );
+
+                                $sanitized = $rebuilt;
+
+                                lpr_allocator_store_po_alloc_index( $po_id, $sanitized );
+                        }
+
                         return array_values( $sanitized );
                 }
 
-                if ( ! $meta_exists ) {
-                        // Brand new POs have no allocations; skip the expensive DB rebuild until an allocation is stored.
-                        return array();
-                }
+                if ( ! $meta_exists || lpr_allocator_po_alloc_index_is_stale( $po_id ) ) {
+                        // Legacy POs may have allocations on orders but no stored index; attempt a rebuild and cache the result.
+                        $rebuilt = lpr_allocator_normalize_po_alloc_index( lpr_allocator_rebuild_po_alloc_index( $po_id ) );
+                        if ( ! empty( $rebuilt ) ) {
+                                lpr_allocator_store_po_alloc_index( $po_id, $rebuilt );
+                                return array_values( $rebuilt );
+                        }
 
-                $rebuilt = lpr_allocator_rebuild_po_alloc_index( $po_id );
-                if ( ! empty( $rebuilt ) ) {
-                        update_post_meta( $po_id, PO_META_ALLOC_INDEX, $rebuilt );
-                        return $rebuilt;
+                        lpr_allocator_store_po_alloc_index( $po_id, array() );
+                        return array();
                 }
 
                 return array();
@@ -2767,7 +2972,7 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_index_po_allocation' ) )
                                 'order_id' => $order_id,
                                 'item_id'  => $item_id,
                         );
-                        update_post_meta( $po_id, PO_META_ALLOC_INDEX, array_values( $map ) );
+                        lpr_allocator_store_po_alloc_index( $po_id, $map );
                 }
         }
 }
@@ -2847,7 +3052,7 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_recalculate_po_lines_fro
                 }
 
                 // Rebuild index to drop stale entries and to capture any new valid pairs we found.
-                update_post_meta( $po_id, PO_META_ALLOC_INDEX, array_values( $valid ) );
+                lpr_allocator_store_po_alloc_index( $po_id, $valid );
 
                 // Apply available active allocations to PO lines in order.
                 foreach ( $lines as &$line ) {
@@ -2869,6 +3074,33 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_recalculate_po_lines_fro
                 unset( $line );
 
                 return $lines;
+        }
+}
+
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_refresh_po_allocation_state' ) ) {
+        /**
+         * Ensure PO line and index tallies reflect the live allocation ledger before display.
+         *
+         * @param int $po_id
+         * @return array Sanitized PO lines with refreshed qty_allocated values.
+         */
+        function lpr_allocator_refresh_po_allocation_state( int $po_id ): array {
+                if ( $po_id <= 0 ) {
+                        return array();
+                }
+
+                $lines = get_post_meta( $po_id, PO_META_LINES, true );
+                if ( ! is_array( $lines ) || empty( $lines ) ) {
+                        return array();
+                }
+
+                $updated = lpr_allocator_recalculate_po_lines_from_allocations( $po_id, $lines );
+
+                if ( $updated !== $lines ) {
+                        update_post_meta( $po_id, PO_META_LINES, $updated );
+                }
+
+                return $updated;
         }
 }
 
@@ -4368,6 +4600,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
                         add_action( 'save_post_shop_order', array( __CLASS__, 'save_force_flags' ), 10, 2 );
                         add_action( 'woocommerce_before_order_object_save', array( __CLASS__, 'save_force_flags_object' ), 10, 1 );
 
+                        add_action( 'admin_post_lpr_allocator_free_item_allocations', array( __CLASS__, 'handle_free_item_allocations' ) );
+
                         // Force ETA email endpoint.
                         add_action( 'wp_ajax_lpr_force_eta_email', array( __CLASS__, 'ajax_force_eta_email' ) );
                         add_action( 'wp_ajax_lpr_force_eta_email_preview', array( __CLASS__, 'ajax_force_eta_email_preview' ) );
@@ -4554,6 +4788,85 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
                         self::persist_force_flags( (int) $order->get_id(), $order );
                 }
 
+                public static function handle_free_item_allocations(): void {
+                        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                                wp_die( esc_html__( 'Access denied.', 'lpr-backorder-allocator' ) );
+                        }
+
+                        $order_id = isset( $_GET['order_id'] ) ? absint( $_GET['order_id'] ) : 0; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $item_id  = isset( $_GET['item_id'] ) ? absint( $_GET['item_id'] ) : 0; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $nonce    = isset( $_GET['_wpnonce'] ) ? sanitize_text_field( wp_unslash( $_GET['_wpnonce'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+
+                        if ( $order_id <= 0 || $item_id <= 0 || ! wp_verify_nonce( $nonce, 'lpr_free_allocations_' . $order_id . '_' . $item_id ) ) {
+                                wp_die( esc_html__( 'Invalid request.', 'lpr-backorder-allocator' ) );
+                        }
+
+                        $order = wc_get_order( $order_id );
+                        if ( ! ( $order instanceof \WC_Order ) ) {
+                                wp_die( esc_html__( 'Order not found.', 'lpr-backorder-allocator' ) );
+                        }
+
+                        $item = $order->get_item( $item_id );
+                        if ( ! ( $item instanceof \WC_Order_Item_Product ) ) {
+                                wp_die( esc_html__( 'Order line not found.', 'lpr-backorder-allocator' ) );
+                        }
+
+                        if ( method_exists( $item, 'read_meta_data' ) ) {
+                                $item->read_meta_data( true );
+                        }
+
+                        $meta_key       = defined( __NAMESPACE__ . '\\ORDER_ITEM_META_ALLOCATIONS' ) ? ORDER_ITEM_META_ALLOCATIONS : 'lpr_allocations';
+                        $snapshot_key   = defined( __NAMESPACE__ . '\\ORDER_ITEM_META_ALLOC_QTY_SNAPSHOT' ) ? ORDER_ITEM_META_ALLOC_QTY_SNAPSHOT : '_lpr_alloc_qty_snapshot';
+                        $allocs         = $item->get_meta( $meta_key, true );
+                        $released_total = 0;
+
+                        if ( is_array( $allocs ) ) {
+                                foreach ( $allocs as &$alloc_row ) {
+                                        $status = isset( $alloc_row['status'] ) ? sanitize_key( (string) $alloc_row['status'] ) : 'reserved';
+                                        $qty    = isset( $alloc_row['qty_allocated'] ) ? max( 0, (int) $alloc_row['qty_allocated'] ) : 0;
+                                        if ( 'released' === $status || $qty <= 0 ) {
+                                                continue;
+                                        }
+                                        lpr_allocator_touch_allocation_status( $alloc_row, 'released' );
+                                        $released_total += $qty;
+                                }
+                                unset( $alloc_row );
+                        }
+
+                        $item->update_meta_data( $snapshot_key, max( 0, (int) $item->get_quantity() ) );
+
+                        if ( $released_total > 0 ) {
+                                $item->update_meta_data( $meta_key, $allocs );
+                                $item->save();
+
+                                $reason = sprintf(
+                                        /* translators: 1: user name */
+                                        __( 'Manual free allocation by %s from the order page.', 'lpr-backorder-allocator' ),
+                                        wp_get_current_user()->display_name
+                                );
+
+                                lpr_allocator_add_release_note( $order, $item, (int) $released_total, $reason );
+
+                                if ( function_exists( __NAMESPACE__ . '\\lpr_allocator_reapply_po_allocations_for_order' ) ) {
+                                        lpr_allocator_reapply_po_allocations_for_order( (int) $order_id );
+                                }
+
+                                if ( class_exists( __NAMESPACE__ . '\\ETA' ) ) {
+                                        ETA::update_line_eta( (int) $order_id );
+                                }
+                        } else {
+                                $item->save();
+                        }
+
+                        $redirect = wp_get_referer();
+                        if ( ! $redirect ) {
+                                $redirect = admin_url( 'post.php?post=' . $order_id . '&action=edit' );
+                        }
+
+                        wp_safe_redirect( $redirect );
+                        exit;
+                }
+
                 public static function render_box( $post_or_screen ): void {
                         if ( ! function_exists( 'wc_get_order' ) ) {
                                 return;
@@ -4666,6 +4979,14 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
                                 echo '<label><input type="checkbox" name="lpr_force_allocation[' . esc_attr( (string) $item->get_id() ) . ']" value="1" ' . checked( $force_qty > 0, true, false ) . ' /> ' . esc_html__( 'Enable force allocation', 'lpr-backorder-allocator' ) . '</label>';
                                 echo '<input type="number" name="lpr_force_allocation_qty[' . esc_attr( (string) $item->get_id() ) . ']" min="1" max="' . esc_attr( (string) $qty ) . '" value="' . esc_attr( (string) $prefill ) . '" />';
                                 echo '<span style="margin-left:6px;">' . esc_html__( 'Treat as needing PO allocation even if in stock.', 'lpr-backorder-allocator' ) . '</span>';
+                                if ( is_array( $allocs ) && ! empty( $allocs ) ) {
+                                        $free_url = wp_nonce_url(
+                                                admin_url( 'admin-post.php?action=lpr_allocator_free_item_allocations&order_id=' . (int) $order_id . '&item_id=' . (int) $item->get_id() ),
+                                                'lpr_free_allocations_' . (int) $order_id . '_' . (int) $item->get_id()
+                                        );
+
+                                        echo '<a class="button" style="margin-left:8px;" href="' . esc_url( $free_url ) . '">' . esc_html__( 'Free allocations', 'lpr-backorder-allocator' ) . '</a>';
+                                }
                                 echo '</div>';
                                 if ( $has_active_alloc ) {
                                         echo '<div class="lpr-free-controls">';
@@ -6479,10 +6800,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Supplier_PO_Live_Product_UI' ) ) {
 				return;
 			}
 			wp_nonce_field( 'lpr_po_lines_action', 'lpr_po_lines_nonce' );
-			$lines = get_post_meta( $post->ID, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', true );
-			if ( ! is_array( $lines ) ) {
-				$lines = array();
-			}
+                        $lines = lpr_allocator_refresh_po_allocation_state( (int) $post->ID );
+                        if ( ! is_array( $lines ) ) {
+                                $lines = array();
+                        }
 
 			?>
 			<style>
@@ -7119,7 +7440,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_FIFO_Allocator' ) ) {
                  * @param string $po_eta_for_line Current PO ETA (header or override) for eligibility checks.
                  * @return array[] Each item: [order_id, item_id, need, paid_ts, created_ts, ready_by]
                  */
-                protected static function build_fifo_queue( int $target_id, int $required_total, string $po_eta_for_line ): array {
+                public static function build_fifo_queue( int $target_id, int $required_total, string $po_eta_for_line ): array {
                         $settings = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array( 'order_statuses' => array( 'processing', 'on-hold' ) );
                         $statuses = array();
                         foreach ( (array) $settings['order_statuses'] as $st ) {
@@ -7822,6 +8143,500 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_FIFO_Allocator' ) ) {
                 }
         }
         PO_FIFO_Allocator::init();
+}
+
+if ( ! class_exists( __NAMESPACE__ . '\PO_Full_Shipment_Reorder' ) ) {
+        /**
+         * Reorder allocations on a PO to prioritise fully shippable orders while respecting FIFO.
+         */
+        class PO_Full_Shipment_Reorder {
+
+                public static function init(): void {
+                        add_action( 'wp_ajax_lpr_preview_po_reorder', array( __CLASS__, 'ajax_preview' ) );
+                        add_action( 'wp_ajax_lpr_apply_po_reorder', array( __CLASS__, 'ajax_apply' ) );
+                }
+
+                /**
+                 * AJAX: Build preview of reordered allocations.
+                 */
+                public static function ajax_preview(): void {
+                        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                                wp_send_json_error( array( 'message' => __( 'Insufficient permissions.', 'lpr-backorder-allocator' ) ), 403 );
+                        }
+
+                        $po_id = isset( $_POST['po_id'] ) ? absint( $_POST['po_id'] ) : 0; // phpcs:ignore WordPress.Security.NonceVerification.Missing
+                        $nonce = isset( $_POST['_wpnonce'] ) ? (string) $_POST['_wpnonce'] : ''; // phpcs:ignore WordPress.Security.NonceVerification.Missing
+                        if ( $po_id <= 0 || ! wp_verify_nonce( $nonce, 'lpr_reorder_po_' . $po_id ) ) {
+                                wp_send_json_error( array( 'message' => __( 'Invalid request.', 'lpr-backorder-allocator' ) ), 400 );
+                        }
+
+                        $preview = self::build_plan( $po_id );
+                        if ( empty( $preview['changes'] ) ) {
+                                wp_send_json_success(
+                                        array(
+                                                'changes' => array(),
+                                                'summary' => array(
+                                                        'orders'   => 0,
+                                                        'quantity' => 0,
+                                                ),
+                                        )
+                                );
+                        }
+
+                        wp_send_json_success( $preview );
+                }
+
+                /**
+                 * AJAX: Apply reorder using the same plan builder.
+                 */
+                public static function ajax_apply(): void {
+                        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                                wp_send_json_error( array( 'message' => __( 'Insufficient permissions.', 'lpr-backorder-allocator' ) ), 403 );
+                        }
+
+                        $po_id = isset( $_POST['po_id'] ) ? absint( $_POST['po_id'] ) : 0; // phpcs:ignore WordPress.Security.NonceVerification.Missing
+                        $nonce = isset( $_POST['_wpnonce'] ) ? (string) $_POST['_wpnonce'] : ''; // phpcs:ignore WordPress.Security.NonceVerification.Missing
+                        if ( $po_id <= 0 || ! wp_verify_nonce( $nonce, 'lpr_reorder_po_' . $po_id ) ) {
+                                wp_send_json_error( array( 'message' => __( 'Invalid request.', 'lpr-backorder-allocator' ) ), 400 );
+                        }
+
+                        $plan = self::build_plan( $po_id );
+                        if ( empty( $plan ) ) {
+                                wp_send_json_error( array( 'message' => __( 'Nothing to reorder for this PO.', 'lpr-backorder-allocator' ) ) );
+                        }
+
+                        $applied = self::apply_plan( $po_id, $plan );
+                        if ( ! $applied ) {
+                                wp_send_json_error( array( 'message' => __( 'Unable to reorder allocations.', 'lpr-backorder-allocator' ) ) );
+                        }
+
+                        wp_send_json_success(
+                                array(
+                                        'message' => __( 'Allocations reordered. Refreshing…', 'lpr-backorder-allocator' ),
+                                )
+                        );
+                }
+
+                /**
+                 * Build reorder plan for preview and application.
+                 */
+                protected static function build_plan( int $po_id ): array {
+                        $po = get_post( $po_id );
+                        if ( ! ( $po instanceof \WP_Post ) || ( defined( __NAMESPACE__ . '\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po' ) !== $po->post_type ) {
+                                return array();
+                        }
+
+                        $lines = get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', true );
+                        if ( ! is_array( $lines ) || empty( $lines ) ) {
+                                return array();
+                        }
+
+                        $po_eta      = (string) get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_ETA_DATE' ) ? PO_META_ETA_DATE : '_lpr_eta_date', true );
+                        $supply      = array();
+                        $index_items = array();
+
+                        foreach ( $lines as $line ) {
+                                $qty_ordered  = isset( $line['qty_ordered'] ) ? max( 0, (int) $line['qty_ordered'] ) : 0;
+                                $qty_received = isset( $line['qty_received'] ) ? max( 0, (int) $line['qty_received'] ) : 0;
+                                $target_id    = isset( $line['variation_id'] ) && (int) $line['variation_id'] > 0 ? (int) $line['variation_id'] : ( isset( $line['product_id'] ) ? (int) $line['product_id'] : 0 );
+                                if ( $target_id <= 0 || ! lpr_allocator_product_exists( $target_id ) ) {
+                                        continue;
+                                }
+
+                                $eta_override = isset( $line['eta_override'] ) ? lpr_allocator_sanitize_ymd( (string) $line['eta_override'] ) : '';
+                                $line_eta     = $eta_override ? $eta_override : lpr_allocator_sanitize_ymd( $po_eta );
+
+                                $available = max( 0, $qty_ordered - $qty_received );
+                                if ( $available <= 0 ) {
+                                        continue;
+                                }
+
+                                $supply[ $target_id ] = array(
+                                        'available' => $available,
+                                        'eta'       => $line_eta,
+                                );
+
+                                $queue = PO_FIFO_Allocator::build_fifo_queue( $target_id, $available, $line_eta );
+                                foreach ( $queue as $entry ) {
+                                        $oid = isset( $entry['order_id'] ) ? (int) $entry['order_id'] : 0;
+                                        if ( $oid <= 0 ) {
+                                                continue;
+                                        }
+
+                                        $index_items[ $oid ]['items'][ (int) $entry['item_id'] ] = array(
+                                                'need'       => (int) $entry['need'],
+                                                'product_id' => $target_id,
+                                                'eta'       => $line_eta,
+                                                'backorder_lines' => isset( $entry['backorder_lines'] ) ? (int) $entry['backorder_lines'] : 1,
+                                        );
+                                        $index_items[ $oid ]['ready_by']   = $index_items[ $oid ]['ready_by'] ?? ( $entry['ready_by'] ?? '' );
+                                        $index_items[ $oid ]['paid_ts']    = $index_items[ $oid ]['paid_ts'] ?? ( $entry['paid_ts'] ?? null );
+                                        $index_items[ $oid ]['created_ts'] = $index_items[ $oid ]['created_ts'] ?? ( $entry['created_ts'] ?? 0 );
+                                }
+                        }
+
+                        if ( empty( $supply ) || empty( $index_items ) ) {
+                                return array();
+                        }
+
+                        $current_allocs = self::collect_current_allocations( $po_id );
+
+                        foreach ( $current_allocs as $oid => $item_rows ) {
+                                foreach ( $item_rows as $iid => $row ) {
+                                        if ( isset( $index_items[ $oid ]['items'][ $iid ] ) ) {
+                                                continue;
+                                        }
+                                        $index_items[ $oid ]['items'][ $iid ] = array(
+                                                'need'       => 0,
+                                                'product_id' => $row['product_id'],
+                                                'eta'        => $row['eta'],
+                                                'backorder_lines' => 1,
+                                        );
+                                        $index_items[ $oid ]['ready_by']   = $index_items[ $oid ]['ready_by'] ?? '';
+                                        $index_items[ $oid ]['paid_ts']    = $index_items[ $oid ]['paid_ts'] ?? null;
+                                        $index_items[ $oid ]['created_ts'] = $index_items[ $oid ]['created_ts'] ?? 0;
+                                }
+                        }
+
+                        $order_blocks = self::identify_blocked_orders( array_keys( $index_items ), array_keys( $supply ) );
+
+                        $prioritized = array_keys( $index_items );
+                        usort(
+                                $prioritized,
+                                static function ( $a, $b ) use ( $index_items ) {
+                                        $ar = $index_items[ $a ]['ready_by'] ?? '';
+                                        $br = $index_items[ $b ]['ready_by'] ?? '';
+                                        if ( $ar !== $br ) {
+                                                if ( '' === $ar ) {
+                                                        return -1;
+                                                }
+                                                if ( '' === $br ) {
+                                                        return 1;
+                                                }
+                                                return lpr_allocator_compare_dates( $ar, $br );
+                                        }
+
+                                        $ap = $index_items[ $a ]['paid_ts'] ?? $index_items[ $a ]['created_ts'] ?? 0;
+                                        $bp = $index_items[ $b ]['paid_ts'] ?? $index_items[ $b ]['created_ts'] ?? 0;
+                                        if ( $ap !== $bp ) {
+                                                return (int) $ap <=> (int) $bp;
+                                        }
+
+                                        return (int) $a <=> (int) $b;
+                                }
+                        );
+
+                        $available = array();
+                        foreach ( $supply as $pid => $row ) {
+                                $available[ $pid ] = $row['available'];
+                        }
+
+                        $plan        = array();
+                        $full_orders = array();
+
+                        foreach ( $prioritized as $oid ) {
+                                $items = $index_items[ $oid ]['items'] ?? array();
+                                $blocked = $order_blocks[ $oid ] ?? false;
+                                if ( $blocked ) {
+                                        continue;
+                                }
+
+                                $can_cover = true;
+                                foreach ( $items as $item ) {
+                                        $pid  = $item['product_id'];
+                                        $need = (int) $item['need'];
+                                        if ( $need <= 0 ) {
+                                                continue;
+                                        }
+                                        if ( ! isset( $available[ $pid ] ) || $available[ $pid ] < $need ) {
+                                                $can_cover = false;
+                                                break;
+                                        }
+                                }
+
+                                if ( ! $can_cover ) {
+                                        continue;
+                                }
+
+                                foreach ( $items as $item_id => $item ) {
+                                        $pid  = $item['product_id'];
+                                        $need = (int) $item['need'];
+                                        if ( $need <= 0 || ! isset( $available[ $pid ] ) ) {
+                                                continue;
+                                        }
+                                        $take = min( $need, $available[ $pid ] );
+                                        if ( $take <= 0 ) {
+                                                continue;
+                                        }
+                                        $plan[ $oid ][ $item_id ] = array(
+                                                'qty'        => $take,
+                                                'product_id' => $pid,
+                                                'eta'        => $item['eta'],
+                                        );
+                                        $available[ $pid ] -= $take;
+                                }
+
+                                $full_orders[ $oid ] = true;
+                        }
+
+                        foreach ( $prioritized as $oid ) {
+                                $items = $index_items[ $oid ]['items'] ?? array();
+                                foreach ( $items as $item_id => $item ) {
+                                        $pid  = $item['product_id'];
+                                        $need = (int) $item['need'];
+                                        if ( $need <= 0 || ! isset( $available[ $pid ] ) ) {
+                                                continue;
+                                        }
+                                        $existing = $plan[ $oid ][ $item_id ]['qty'] ?? 0;
+                                        $remaining_need = max( 0, $need - $existing );
+                                        if ( $remaining_need <= 0 ) {
+                                                continue;
+                                        }
+                                        $take = min( $remaining_need, $available[ $pid ] );
+                                        if ( $take <= 0 ) {
+                                                continue;
+                                        }
+                                        $plan[ $oid ][ $item_id ] = array(
+                                                'qty'        => $existing + $take,
+                                                'product_id' => $pid,
+                                                'eta'        => $item['eta'],
+                                        );
+                                        $available[ $pid ] -= $take;
+                                }
+                        }
+
+                        if ( empty( $plan ) ) {
+                                return array();
+                        }
+
+                        $changes = array();
+                        $qty_sum = 0;
+
+                        foreach ( $plan as $oid => $item_rows ) {
+                                $order = wc_get_order( $oid );
+                                $number = $order instanceof \WC_Order ? $order->get_order_number() : '#' . $oid;
+
+                                foreach ( $item_rows as $iid => $row ) {
+                                        $current = $current_allocs[ $oid ][ $iid ]['qty'] ?? 0;
+                                        $new     = (int) $row['qty'];
+                                        if ( $current === $new ) {
+                                                continue;
+                                        }
+
+                                        $product_label = lpr_allocator_product_option_label( (int) $row['product_id'] );
+
+                                        $changes[] = array(
+                                                'order_id'   => (int) $oid,
+                                                'order'      => $number,
+                                                'item_id'    => (int) $iid,
+                                                'product'    => $product_label,
+                                                'current'    => $current,
+                                                'proposed'   => $new,
+                                                'eta'        => $row['eta'],
+                                                'fully_ready'=> isset( $full_orders[ $oid ] ),
+                                        );
+                                        $qty_sum += abs( $new - $current );
+                                }
+
+                                if ( isset( $current_allocs[ $oid ] ) ) {
+                                        foreach ( $current_allocs[ $oid ] as $iid => $existing_row ) {
+                                                if ( isset( $item_rows[ $iid ] ) ) {
+                                                        continue;
+                                                }
+                                                $current = $existing_row['qty'];
+                                                $changes[] = array(
+                                                        'order_id'   => (int) $oid,
+                                                        'order'      => $number,
+                                                        'item_id'    => (int) $iid,
+                                                        'product'    => lpr_allocator_product_option_label( (int) $existing_row['product_id'] ),
+                                                        'current'    => $current,
+                                                        'proposed'   => 0,
+                                                        'eta'        => $existing_row['eta'],
+                                                        'fully_ready'=> false,
+                                                );
+                                                $qty_sum += $current;
+                                        }
+                                }
+                        }
+
+                        return array(
+                                'changes' => $changes,
+                                'summary' => array(
+                                        'orders'   => count( $plan ),
+                                        'quantity' => $qty_sum,
+                                ),
+                        );
+                }
+
+                /**
+                 * Apply a previously computed plan.
+                 */
+                protected static function apply_plan( int $po_id, array $plan ): bool {
+                        if ( empty( $plan['changes'] ) ) {
+                                return false;
+                        }
+
+                        $meta_key       = defined( __NAMESPACE__ . '\ORDER_ITEM_META_ALLOCATIONS' ) ? ORDER_ITEM_META_ALLOCATIONS : 'lpr_allocations';
+                        $po_number      = (string) get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_PO_NUMBER' ) ? PO_META_PO_NUMBER : '_lpr_po_number', true );
+                        $affected_order = array();
+
+                        $by_item = array();
+                        foreach ( $plan['changes'] as $change ) {
+                                $oid = (int) $change['order_id'];
+                                $iid = (int) $change['item_id'];
+                                $by_item[ $oid ][ $iid ] = $change;
+                        }
+
+                        foreach ( $by_item as $oid => $items ) {
+                                $order = wc_get_order( $oid );
+                                if ( ! ( $order instanceof \WC_Order ) ) {
+                                        continue;
+                                }
+
+                                foreach ( $items as $iid => $change ) {
+                                        $item = $order->get_item( $iid );
+                                        if ( ! ( $item instanceof \WC_Order_Item_Product ) ) {
+                                                continue;
+                                        }
+
+                                        if ( method_exists( $item, 'read_meta_data' ) ) {
+                                                $item->read_meta_data( true );
+                                        }
+
+                                        $allocs = $item->get_meta( $meta_key, true );
+                                        if ( ! is_array( $allocs ) ) {
+                                                $allocs = array();
+                                        }
+
+                                        $filtered = array();
+                                        foreach ( $allocs as $row ) {
+                                                $row_po = isset( $row['po_id'] ) ? (int) $row['po_id'] : 0;
+                                                if ( $row_po === $po_id ) {
+                                                        continue;
+                                                }
+                                                $filtered[] = $row;
+                                        }
+
+                                        $qty = (int) $change['proposed'];
+                                        if ( $qty > 0 ) {
+                                                $filtered[] = array(
+                                                        'po_id'         => $po_id,
+                                                        'po_number'     => $po_number,
+                                                        'qty_allocated' => $qty,
+                                                        'eta'           => lpr_allocator_sanitize_ymd( (string) ( $change['eta'] ?? '' ) ),
+                                                        'status'        => 'reserved',
+                                                        'status_changed_at' => current_time( 'mysql' ),
+                                                        'allocated_at'  => current_time( 'mysql' ),
+                                                );
+                                        }
+
+                                        $item->update_meta_data( $meta_key, $filtered );
+                                        $item->save();
+                                        $affected_order[ $oid ] = true;
+                                }
+                        }
+
+                        lpr_allocator_rebuild_po_alloc_index( $po_id );
+                        $lines = get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', true );
+                        if ( is_array( $lines ) ) {
+                                $updated = lpr_allocator_recalculate_po_lines_from_allocations( $po_id, $lines );
+                                update_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', $updated );
+                        }
+
+                        if ( ! empty( $affected_order ) && class_exists( __NAMESPACE__ . '\ETA' ) ) {
+                                foreach ( array_keys( $affected_order ) as $oid ) {
+                                        ETA::update_line_eta( (int) $oid );
+                                }
+                        }
+
+                        return true;
+                }
+
+                /**
+                 * Gather current allocations for this PO grouped by order and item.
+                 */
+                protected static function collect_current_allocations( int $po_id ): array {
+                        $meta_key = defined( __NAMESPACE__ . '\ORDER_ITEM_META_ALLOCATIONS' ) ? ORDER_ITEM_META_ALLOCATIONS : 'lpr_allocations';
+                        $index    = function_exists( __NAMESPACE__ . '\lpr_allocator_get_po_allocation_index' ) ? lpr_allocator_get_po_allocation_index( $po_id ) : array();
+                        $grouped  = array();
+
+                        foreach ( $index as $row ) {
+                                $oid = isset( $row['order_id'] ) ? (int) $row['order_id'] : 0;
+                                $iid = isset( $row['item_id'] ) ? (int) $row['item_id'] : 0;
+                                if ( $oid <= 0 || $iid <= 0 ) {
+                                        continue;
+                                }
+
+                                $order = wc_get_order( $oid );
+                                if ( ! ( $order instanceof \WC_Order ) ) {
+                                        continue;
+                                }
+                                $item = $order->get_item( $iid );
+                                if ( ! ( $item instanceof \WC_Order_Item_Product ) ) {
+                                        continue;
+                                }
+                                if ( method_exists( $item, 'read_meta_data' ) ) {
+                                        $item->read_meta_data( true );
+                                }
+                                $allocs = $item->get_meta( $meta_key, true );
+                                if ( ! is_array( $allocs ) ) {
+                                        continue;
+                                }
+
+                                foreach ( $allocs as $alloc ) {
+                                        $row_po = isset( $alloc['po_id'] ) ? (int) $alloc['po_id'] : 0;
+                                        $status = isset( $alloc['status'] ) ? sanitize_key( (string) $alloc['status'] ) : 'reserved';
+                                        if ( $row_po !== $po_id || 'released' === $status ) {
+                                                continue;
+                                        }
+                                        $qty = isset( $alloc['qty_allocated'] ) ? (int) $alloc['qty_allocated'] : 0;
+                                        if ( $qty <= 0 ) {
+                                                continue;
+                                        }
+                                        $tid = $item->get_variation_id() > 0 ? (int) $item->get_variation_id() : (int) $item->get_product_id();
+
+                                        $grouped[ $oid ][ $iid ] = array(
+                                                'qty'        => $qty,
+                                                'product_id' => $tid,
+                                                'eta'        => isset( $alloc['eta'] ) ? lpr_allocator_sanitize_ymd( (string) $alloc['eta'] ) : '',
+                                        );
+                                }
+                        }
+
+                        return $grouped;
+                }
+
+                /**
+                 * Identify orders that cannot be fully shipped by this PO because of missing products.
+                 */
+                protected static function identify_blocked_orders( array $order_ids, array $po_products ): array {
+                        $blocked = array();
+
+                        foreach ( $order_ids as $oid ) {
+                                $order = wc_get_order( $oid );
+                                if ( ! ( $order instanceof \WC_Order ) ) {
+                                        continue;
+                                }
+
+                                foreach ( $order->get_items( 'line_item' ) as $item ) {
+                                        if ( ! ( $item instanceof \WC_Order_Item_Product ) ) {
+                                                continue;
+                                        }
+                                        if ( class_exists( __NAMESPACE__ . '\Backorder' ) && ! Backorder::needs_allocation( $item ) ) {
+                                                continue;
+                                        }
+                                        $tid = $item->get_variation_id() > 0 ? (int) $item->get_variation_id() : (int) $item->get_product_id();
+                                        if ( ! in_array( $tid, $po_products, true ) ) {
+                                                $blocked[ $oid ] = true;
+                                                break;
+                                        }
+                                }
+                        }
+
+                        return $blocked;
+                }
+        }
+        PO_Full_Shipment_Reorder::init();
 }
 
 if ( ! class_exists( __NAMESPACE__ . '\Auto_PO_Allocator' ) ) {
@@ -8529,8 +9344,208 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocate_Button_UI' ) ) {
 				echo '<div class="notice notice-success is-dismissible"><p>' . esc_html__( 'PO allocation completed.', 'lpr-backorder-allocator' ) . '</p></div>';
 			}
 		}
-	}
+        }
         PO_Allocate_Button_UI::init();
+}
+
+if ( ! class_exists( __NAMESPACE__ . '\PO_Reorder_Button_UI' ) ) {
+        /**
+         * UI for reordering allocations to prioritise full shipments.
+         */
+        class PO_Reorder_Button_UI {
+
+                public static function init(): void {
+                        add_action( 'post_submitbox_misc_actions', array( __CLASS__, 'render_button' ) );
+                        add_action( 'admin_footer-post.php', array( __CLASS__, 'print_modal' ) );
+                }
+
+                public static function render_button(): void {
+                        global $post;
+                        if ( ! ( $post instanceof \WP_Post ) ) {
+                                return;
+                        }
+                        if ( ( defined( __NAMESPACE__ . '\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po' ) !== $post->post_type ) {
+                                return;
+                        }
+                        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                                return;
+                        }
+
+                        $nonce = wp_create_nonce( 'lpr_reorder_po_' . $post->ID );
+
+                        echo '<div class="misc-pub-section lpr-reorder-fullship">';
+                        echo '<button type="button" class="button lpr-reorder-trigger" data-po="' . esc_attr( (string) $post->ID ) . '" data-nonce="' . esc_attr( $nonce ) . '">' . esc_html__( 'Reorder to prioritise full shipments', 'lpr-backorder-allocator' ) . '</button>';
+                        echo '<span style="margin-left:8px;opacity:.8;">' . esc_html__( 'Keeps FIFO but favours orders that can fully ship on this PO ETA.', 'lpr-backorder-allocator' ) . '</span>';
+                        echo '</div>';
+                }
+
+                /**
+                 * Print modal container + JS on Supplier PO screen.
+                 */
+                public static function print_modal(): void {
+                        $screen = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
+                        if ( ! $screen || ( $screen->post_type ?? '' ) !== ( defined( __NAMESPACE__ . '\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po' ) ) {
+                                return;
+                        }
+                        ?>
+                        <style>
+                                .lpr-reorder-overlay{position:fixed;inset:0;background:rgba(0,0,0,.4);z-index:100000;display:none;align-items:center;justify-content:center;padding:20px;}
+                                .lpr-reorder-modal{background:#fff;max-width:960px;width:100%;border-radius:6px;box-shadow:0 10px 30px rgba(0,0,0,.25);overflow:hidden;}
+                                .lpr-reorder-modal header{padding:14px 16px;border-bottom:1px solid #e5e5e5;display:flex;justify-content:space-between;align-items:center;}
+                                .lpr-reorder-modal .lpr-body{max-height:60vh;overflow:auto;padding:16px;}
+                                .lpr-reorder-modal table{width:100%;border-collapse:collapse;}
+                                .lpr-reorder-modal th,.lpr-reorder-modal td{padding:8px;border-bottom:1px solid #eee;text-align:left;vertical-align:top;}
+                                .lpr-reorder-modal .lpr-chip{display:inline-block;padding:2px 8px;border-radius:999px;background:#e5f5e0;color:#2f855a;font-weight:600;font-size:11px;}
+                                .lpr-reorder-modal .lpr-actions{padding:12px 16px;border-top:1px solid #e5e5e5;text-align:right;}
+                                .lpr-reorder-modal .lpr-status{margin:0 0 10px;font-style:italic;opacity:.8;}
+                                .lpr-order-products{min-width:240px;}
+                        </style>
+                        <div class="lpr-reorder-overlay" aria-modal="true" role="dialog">
+                                <div class="lpr-reorder-modal">
+                                        <header>
+                                                <h3><?php echo esc_html__( 'Reorder allocations for full shipments', 'lpr-backorder-allocator' ); ?></h3>
+                                                <a href="#" class="lpr-reorder-close" aria-label="<?php echo esc_attr__( 'Close', 'lpr-backorder-allocator' ); ?>">&times;</a>
+                                        </header>
+                                        <div class="lpr-body">
+                                                <p class="lpr-status"><?php echo esc_html__( 'Preparing reorder preview…', 'lpr-backorder-allocator' ); ?></p>
+                                                <div class="lpr-reorder-results"></div>
+                                        </div>
+                                        <div class="lpr-actions">
+                                                <button type="button" class="button button-primary lpr-reorder-apply" disabled><?php echo esc_html__( 'Apply reorder', 'lpr-backorder-allocator' ); ?></button>
+                                                <button type="button" class="button lpr-reorder-cancel" style="margin-left:8px;"><?php echo esc_html__( 'Cancel', 'lpr-backorder-allocator' ); ?></button>
+                                        </div>
+                                </div>
+                        </div>
+                        <script>
+                        (function($){
+                                function ensureModal(){
+                                        var $overlay = $('.lpr-reorder-overlay');
+                                        if(!$overlay.length){
+                                                return null;
+                                        }
+                                        return $overlay;
+                                }
+
+                                function groupChanges(changes){
+                                        var grouped = {};
+                                        changes.forEach(function(change){
+                                                if(!grouped[change.order_id]){
+                                                        grouped[change.order_id] = {order: change.order, ready: false, rows: []};
+                                                }
+                                                if(change.fully_ready){
+                                                        grouped[change.order_id].ready = true;
+                                                }
+                                                grouped[change.order_id].rows.push(change);
+                                        });
+                                        return grouped;
+                                }
+
+                                function renderSelect(rows){
+                                        var html = '<select class="lpr-order-products" size="'+Math.min(rows.length,4)+'">';
+                                        rows.forEach(function(row){
+                                                html += '<option>'+row.product+' — '+row.current+' → '+row.proposed+'</option>';
+                                        });
+                                        html += '</select>';
+                                        return html;
+                                }
+
+                                function renderResults(data){
+                                        var changes = data.changes || [];
+                                        if(!changes.length){
+                                                return '<p><?php echo esc_js( __( 'No allocation changes are needed for this PO.', 'lpr-backorder-allocator' ) ); ?></p>';
+                                        }
+                                        var grouped = groupChanges(changes);
+                                        var html = '<table class="widefat striped"><thead><tr>'+
+                                                '<th><?php echo esc_js( __( 'Order', 'lpr-backorder-allocator' ) ); ?></th>'+
+                                                '<th><?php echo esc_js( __( 'Products affected', 'lpr-backorder-allocator' ) ); ?></th>'+
+                                                '<th><?php echo esc_js( __( 'Change', 'lpr-backorder-allocator' ) ); ?></th>'+
+                                        '</tr></thead><tbody>';
+                                        Object.keys(grouped).forEach(function(orderId){
+                                                var row = grouped[orderId];
+                                                var totalDelta = row.rows.reduce(function(sum,r){ return sum + Math.abs((r.proposed||0) - (r.current||0)); }, 0);
+                                                html += '<tr>'+
+                                                        '<td><strong>'+row.order+'</strong>'+(row.ready ? ' <span class="lpr-chip"><?php echo esc_js( __( 'Fully shippable', 'lpr-backorder-allocator' ) ); ?></span>' : '')+'</td>'+
+                                                        '<td>'+renderSelect(row.rows)+'</td>'+
+                                                        '<td>'+totalDelta+'</td>'+
+                                                '</tr>';
+                                        });
+                                        html += '</tbody></table>';
+                                        return html;
+                                }
+
+                                function loadPreview($overlay, poId, nonce){
+                                        var $status = $overlay.find('.lpr-status');
+                                        var $results = $overlay.find('.lpr-reorder-results');
+                                        var $apply = $overlay.find('.lpr-reorder-apply');
+                                        $apply.prop('disabled', true);
+                                        $status.text('<?php echo esc_js( __( 'Calculating reorder that favours full shipments…', 'lpr-backorder-allocator' ) ); ?>');
+                                        $results.html('');
+                                        $.post(ajaxurl, {
+                                                action: 'lpr_preview_po_reorder',
+                                                po_id: poId,
+                                                _wpnonce: nonce
+                                        }).done(function(resp){
+                                                if(resp && resp.success){
+                                                        $status.text('<?php echo esc_js( __( 'Review changes then apply to reorder allocations.', 'lpr-backorder-allocator' ) ); ?>');
+                                                        $results.html(renderResults(resp.data));
+                                                        $apply.prop('disabled', !resp.data || !resp.data.changes || !resp.data.changes.length);
+                                                        $apply.data('po', poId).data('nonce', nonce);
+                                                } else {
+                                                        $status.text(resp && resp.data && resp.data.message ? resp.data.message : '<?php echo esc_js( __( 'Unable to build reorder preview.', 'lpr-backorder-allocator' ) ); ?>');
+                                                }
+                                        }).fail(function(){
+                                                $status.text('<?php echo esc_js( __( 'Unexpected error while building preview.', 'lpr-backorder-allocator' ) ); ?>');
+                                        });
+                                }
+
+                                $(document).on('click', '.lpr-reorder-trigger', function(e){
+                                        e.preventDefault();
+                                        var poId = $(this).data('po');
+                                        var nonce = $(this).data('nonce');
+                                        var $overlay = ensureModal();
+                                        if(!$overlay){ return; }
+                                        $overlay.fadeIn(150);
+                                        loadPreview($overlay, poId, nonce);
+                                });
+
+                                $(document).on('click', '.lpr-reorder-close, .lpr-reorder-cancel', function(e){
+                                        e.preventDefault();
+                                        ensureModal()?.fadeOut(120);
+                                });
+
+                                $(document).on('click', '.lpr-reorder-apply', function(e){
+                                        e.preventDefault();
+                                        var $btn = $(this);
+                                        if($btn.is(':disabled')){ return; }
+                                        var poId = $btn.data('po');
+                                        var nonce = $btn.data('nonce');
+                                        var $overlay = ensureModal();
+                                        var $status = $overlay.find('.lpr-status');
+                                        $btn.prop('disabled', true);
+                                        $status.text('<?php echo esc_js( __( 'Applying reorder…', 'lpr-backorder-allocator' ) ); ?>');
+                                        $.post(ajaxurl, {
+                                                action: 'lpr_apply_po_reorder',
+                                                po_id: poId,
+                                                _wpnonce: nonce
+                                        }).done(function(resp){
+                                                if(resp && resp.success){
+                                                        $status.text(resp.data && resp.data.message ? resp.data.message : '<?php echo esc_js( __( 'Allocations reordered.', 'lpr-backorder-allocator' ) ); ?>');
+                                                        setTimeout(function(){ window.location.reload(); }, 800);
+                                                } else {
+                                                        $btn.prop('disabled', false);
+                                                        $status.text(resp && resp.data && resp.data.message ? resp.data.message : '<?php echo esc_js( __( 'Unable to apply reorder.', 'lpr-backorder-allocator' ) ); ?>');
+                                                }
+                                        }).fail(function(){
+                                                $btn.prop('disabled', false);
+                                                $status.text('<?php echo esc_js( __( 'Unexpected error while applying reorder.', 'lpr-backorder-allocator' ) ); ?>');
+                                        });
+                                });
+                        })(jQuery);
+                        </script>
+                        <?php
+                }
+        }
+        PO_Reorder_Button_UI::init();
 }
 
 if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
@@ -9526,6 +10541,8 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Overview' ) ) {
                                 return array();
                         }
 
+                        lpr_allocator_refresh_po_allocation_state( $po_id );
+
                         $index = lpr_allocator_get_po_allocation_index( $po_id );
                         if ( empty( $index ) ) {
                                 return array();
@@ -10229,6 +11246,8 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Overage_Checker' ) ) {
 if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Integrity_Checker' ) ) {
         class PO_Allocation_Integrity_Checker {
 
+                protected const JOB_LABEL = 'Incoming stock indexer integrity check';
+
                 /**
                  * Entry point (used by other scheduled jobs).
                  */
@@ -10260,6 +11279,10 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Integrity_Checker' ) ) {
                         }
 
                         self::reconcile_orders();
+                }
+
+                protected static function job_label(): string {
+                        return __( self::JOB_LABEL, 'lpr-backorder-allocator' );
                 }
 
                 /**
@@ -10378,14 +11401,20 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Integrity_Checker' ) ) {
                                         continue;
                                 }
 
-                                $order_status       = $order->get_status();
-                                $order_status       = is_string( $order_status ) ? $order_status : '';
-                                $normalized_status  = preg_replace( '/^wc-/', '', sanitize_key( $order_status ) );
-                                $is_completed       = in_array( $normalized_status, array( 'completed', 'fullfort' ), true );
-                                $is_live            = in_array( $normalized_status, $allowed_statuses, true );
+                                $order_status      = $order->get_status();
+                                $order_status      = is_string( $order_status ) ? $order_status : '';
+                                $normalized_status = preg_replace( '/^wc-/', '', sanitize_key( $order_status ) );
+                                $is_completed      = in_array( $normalized_status, array( 'completed', 'fullfort' ), true );
+                                $is_live           = in_array( $normalized_status, $allowed_statuses, true );
 
-                                $changed       = false;
-                                $released_qty  = 0;
+                                $qty_meta_key       = defined( __NAMESPACE__ . '\\ORDER_ITEM_META_ALLOC_QTY_SNAPSHOT' ) ? ORDER_ITEM_META_ALLOC_QTY_SNAPSHOT : '_lpr_alloc_qty_snapshot';
+                                $current_qty        = max( 0, (int) $item->get_quantity() );
+                                $last_qty_raw       = (int) $item->get_meta( $qty_meta_key, true );
+                                $has_qty_snapshot   = $item->meta_exists( $qty_meta_key );
+                                $last_qty           = $last_qty_raw > 0 ? $last_qty_raw : ( $has_qty_snapshot ? $current_qty : 0 );
+                                $quantity_changed   = $has_qty_snapshot ? ( $current_qty !== $last_qty ) : true;
+                                $allocations_changed = false;
+                                $released_qty        = 0;
 
                                 if ( $is_completed ) {
                                         continue;
@@ -10400,7 +11429,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Integrity_Checker' ) ) {
                                                 }
                                                 lpr_allocator_touch_allocation_status( $alloc_row, 'released' );
                                                 $released_qty += $qty;
-                                                $changed = true;
+                                                $allocations_changed = true;
                                         }
                                         unset( $alloc_row );
                                 } else {
@@ -10469,12 +11498,19 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Integrity_Checker' ) ) {
                                                         }
 
                                                         $over    -= $release_qty;
-                                                        $changed = true;
+                                                        $allocations_changed = true;
                                                 }
                                         }
                                 }
 
-                                if ( ! $changed ) {
+                                if ( ! $allocations_changed && ! $quantity_changed ) {
+                                        continue;
+                                }
+
+                                $item->update_meta_data( $qty_meta_key, $current_qty );
+
+                                if ( ! $allocations_changed ) {
+                                        $item->save();
                                         continue;
                                 }
 
@@ -10495,6 +11531,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Integrity_Checker' ) ) {
                                 $item->update_meta_data( $meta_key, array_values( $allocs ) );
                                 $item->save();
                                 $orders_to_refresh[ $order_id ] = true;
+
                         }
 
                         if ( empty( $orders_to_refresh ) ) {
@@ -10510,7 +11547,6 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Allocation_Integrity_Checker' ) ) {
                                 }
                         }
                 }
-
                 /**
                  * Get order item rows containing allocations via direct SQL for performance.
                  */
