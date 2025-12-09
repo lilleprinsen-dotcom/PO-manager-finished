@@ -14561,12 +14561,34 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
                                 'order'    => 'ASC',
                         );
 
-                        if ( '' !== $term ) {
-                                $args['s']   = $term;
-                                $args['sku'] = $term;
-                        }
+                        $products = array();
 
-                        $products = function_exists( 'wc_get_products' ) ? wc_get_products( $args ) : array();
+                        if ( '' !== $term && function_exists( 'wc_get_products' ) ) {
+                                global $wpdb;
+
+                                $search_products = wc_get_products( array_merge( $args, array(
+                                        's' => $term,
+                                ) ) );
+
+                                $sku_like        = '%' . $wpdb->esc_like( $term ) . '%';
+                                $sku_products    = wc_get_products( array_merge( $args, array(
+                                        'meta_query' => array(
+                                                array(
+                                                        'key'     => '_sku',
+                                                        'value'   => $sku_like,
+                                                        'compare' => 'LIKE',
+                                                ),
+                                        ),
+                                ) ) );
+
+                                $products = array_values( array_unique( array_merge( $search_products, $sku_products ) ) );
+
+                                if ( count( $products ) > $args['limit'] ) {
+                                        $products = array_slice( $products, 0, $args['limit'] );
+                                }
+                        } elseif ( function_exists( 'wc_get_products' ) ) {
+                                $products = wc_get_products( $args );
+                        }
                         $results  = array();
 
                         foreach ( $products as $product_id ) {
