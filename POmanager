@@ -3580,11 +3580,11 @@ table.appendChild(tr);
 			<?php
 		}
 
-		public static function save_post( int $post_id, \WP_Post $post ): void {
-			if ( self::$saving ) {
-				return;
-			}
-			if ( CPT_SUPPLIER_PO !== $post->post_type ) {
+                public static function save_post( int $post_id, \WP_Post $post ): void {
+                        if ( self::$saving ) {
+                                return;
+                        }
+                        if ( CPT_SUPPLIER_PO !== $post->post_type ) {
 				return;
 			}
 			// Bail on autosave/revision.
@@ -3651,6 +3651,14 @@ table.appendChild(tr);
                                                 'reason'    => $reason,
                                         )
                                 );
+                        }
+
+                        if ( class_exists( __NAMESPACE__ . '\\Incoming_Stock_Indexer' ) ) {
+                                Incoming_Stock_Indexer::refresh_all();
+                        }
+
+                        if ( function_exists( __NAMESPACE__ . '\\lpr_allocator_maybe_close_po' ) ) {
+                                lpr_allocator_maybe_close_po( $post_id );
                         }
                 }
 
