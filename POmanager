@@ -13721,6 +13721,11 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
 
                 public static function init(): void {
                         add_action( 'template_redirect', array( __CLASS__, 'maybe_render' ), 0 );
+
+                        add_action( 'wp_ajax_lpr_incoming_product_search', array( __CLASS__, 'ajax_product_search' ) );
+                        add_action( 'wp_ajax_nopriv_lpr_incoming_product_search', array( __CLASS__, 'ajax_product_search' ) );
+                        add_action( 'wp_ajax_lpr_incoming_product_details', array( __CLASS__, 'ajax_product_details' ) );
+                        add_action( 'wp_ajax_nopriv_lpr_incoming_product_details', array( __CLASS__, 'ajax_product_details' ) );
                 }
 
                 /**
@@ -13807,6 +13812,20 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
                         self::$active_user = (string) $map[ $key ]['user'];
 
                         return true;
+                }
+
+                protected static function authorize_token_request(): bool {
+                        $token = isset( $_POST['incoming_token'] ) ? (string) wp_unslash( $_POST['incoming_token'] ) : '';
+
+                        if ( $token && self::validate_token( $token ) ) {
+                                return true;
+                        }
+
+                        if ( isset( $_COOKIE[ self::COOKIE_KEY ] ) && self::validate_token( (string) wp_unslash( $_COOKIE[ self::COOKIE_KEY ] ) ) ) {
+                                return true;
+                        }
+
+                        return false;
                 }
 
                 protected static function format_eta_label( string $eta ): string {
@@ -13911,7 +13930,17 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
                                 exit;
                         }
 
-                        self::render_dashboard( $user, $token );
+                        if ( 'receiving' === $view ) {
+                                self::render_dashboard( $user, $token );
+                                exit;
+                        }
+
+                        if ( 'products' === $view ) {
+                                self::render_product_lookup( $user, $token );
+                                exit;
+                        }
+
+                        self::render_start_menu( $user, $token );
                         exit;
                 }
 
@@ -13953,6 +13982,64 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
                                                 <button type="submit"><?php echo esc_html__( 'Enter Incoming', 'lpr-backorder-allocator' ); ?></button>
                                         </form>
                                         <div class="lpr-login-foot"><?php echo esc_html__( 'Configured in WooCommerce → Settings → Backorders.', 'lpr-backorder-allocator' ); ?></div>
+                                </div>
+                        </body>
+                        </html>
+                        <?php
+                }
+
+                protected static function render_start_menu( string $user, string $token ): void {
+                        $ajax_url = admin_url( 'admin-ajax.php' );
+                        $receive_url = add_query_arg( 'view', 'receiving', home_url( '/incoming' ) );
+                        $product_url = add_query_arg( 'view', 'products', home_url( '/incoming' ) );
+                        $rows = class_exists( __NAMESPACE__ . '\Incoming_Purchase_Orders_Page' ) ? Incoming_Purchase_Orders_Page::collect_rows() : array();
+                        $open_count = count( $rows );
+                        ?>
+                        <!DOCTYPE html>
+                        <html <?php language_attributes(); ?>>
+                        <head>
+                                <meta charset="<?php bloginfo( 'charset' ); ?>" />
+                                <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+                                <title><?php echo esc_html__( 'Incoming', 'lpr-backorder-allocator' ); ?></title>
+                                <style>
+                                        body { margin:0; padding:0; font-family:-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif; background:#0b1120; color:#e2e8f0; }
+                                        a { color:inherit; text-decoration:none; }
+                                        .lpr-shell { padding:22px 16px 60px; max-width:1080px; margin:0 auto; }
+                                        .lpr-top { display:flex; justify-content:space-between; align-items:center; gap:12px; margin-bottom:18px; }
+                                        h1 { margin:0; font-size:24px; }
+                                        .lpr-user { font-size:14px; color:#cbd5e1; }
+                                        .lpr-menu { display:grid; grid-template-columns:repeat(auto-fit,minmax(260px,1fr)); gap:14px; }
+                                        .lpr-card { padding:18px; border-radius:18px; background:linear-gradient(180deg,rgba(255,255,255,0.06),rgba(255,255,255,0.02)); border:1px solid rgba(255,255,255,0.08); box-shadow:0 16px 34px rgba(0,0,0,0.28); position:relative; overflow:hidden; }
+                                        .lpr-card.primary { background:linear-gradient(140deg,#22d3ee 0%, #6366f1 60%, #4338ca 100%); color:#0f172a; border-color:rgba(255,255,255,0.16); box-shadow:0 18px 40px rgba(99,102,241,0.4); }
+                                        .lpr-card h2 { margin:0 0 8px; font-size:18px; }
+                                        .lpr-card p { margin:0 0 14px; color:#cbd5e1; line-height:1.5; }
+                                        .lpr-card.primary p { color:#0f172a; }
+                                        .lpr-cta { display:inline-flex; align-items:center; gap:8px; padding:12px 14px; border-radius:12px; background:rgba(255,255,255,0.14); color:#0f172a; font-weight:700; box-shadow:0 12px 30px rgba(15,23,42,0.25); }
+                                        .lpr-card.primary .lpr-cta { background:#0f172a; color:#e0f2fe; }
+                                        .lpr-pill { display:inline-flex; align-items:center; gap:6px; padding:6px 10px; border-radius:999px; background:rgba(255,255,255,0.1); color:#e2e8f0; font-size:12px; margin-bottom:10px; }
+                                        .lpr-card.primary .lpr-pill { background:rgba(15,23,42,0.14); color:#0f172a; }
+                                </style>
+                        </head>
+                        <body>
+                                <div class="lpr-shell" data-token="<?php echo esc_attr( $token ); ?>" data-ajax="<?php echo esc_url( $ajax_url ); ?>">
+                                        <div class="lpr-top">
+                                                <h1><?php echo esc_html__( 'Start', 'lpr-backorder-allocator' ); ?></h1>
+                                                <span class="lpr-user"><?php echo esc_html( sprintf( __( 'Signed in as %s', 'lpr-backorder-allocator' ), $user ) ); ?></span>
+                                        </div>
+                                        <div class="lpr-menu">
+                                                <a class="lpr-card primary" href="<?php echo esc_url( $receive_url ); ?>">
+                                                        <span class="lpr-pill"><?php echo esc_html( sprintf( _n( '%d open arrival', '%d open arrivals', $open_count, 'lpr-backorder-allocator' ), $open_count ) ); ?></span>
+                                                        <h2><?php echo esc_html__( 'Receive incoming POs', 'lpr-backorder-allocator' ); ?></h2>
+                                                        <p><?php echo esc_html__( 'Open arrivals, scan PO lines, and queue receipts with the fastest mobile workflow.', 'lpr-backorder-allocator' ); ?></p>
+                                                        <span class="lpr-cta"><?php echo esc_html__( 'Open receiving', 'lpr-backorder-allocator' ); ?> →</span>
+                                                </a>
+                                                <a class="lpr-card" href="<?php echo esc_url( $product_url ); ?>">
+                                                        <span class="lpr-pill"><?php echo esc_html__( 'New', 'lpr-backorder-allocator' ); ?></span>
+                                                        <h2><?php echo esc_html__( 'Product lookup', 'lpr-backorder-allocator' ); ?></h2>
+                                                        <p><?php echo esc_html__( 'Lightning-fast SKU search with live stock, incoming, and PO timelines in one place.', 'lpr-backorder-allocator' ); ?></p>
+                                                        <span class="lpr-cta"><?php echo esc_html__( 'Search products', 'lpr-backorder-allocator' ); ?> →</span>
+                                                </a>
+                                        </div>
                                 </div>
                         </body>
                         </html>
@@ -14240,6 +14327,334 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
                         </html>
                         <?php
                 }
+
+                protected static function render_product_lookup( string $user, string $token ): void {
+                        $ajax_url = admin_url( 'admin-ajax.php' );
+                        ?>
+                        <!DOCTYPE html>
+                        <html <?php language_attributes(); ?>>
+                        <head>
+                                <meta charset="<?php bloginfo( 'charset' ); ?>" />
+                                <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+                                <title><?php echo esc_html__( 'Product lookup', 'lpr-backorder-allocator' ); ?></title>
+                                <style>
+                                        body { margin:0; padding:0; font-family:-apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', sans-serif; background:#0b1120; color:#e2e8f0; }
+                                        .lpr-shell { padding:18px 14px 60px; max-width:1100px; margin:0 auto; }
+                                        .lpr-top { display:flex; justify-content:space-between; align-items:center; gap:10px; margin-bottom:10px; }
+                                        .lpr-back { color:#cbd5e1; text-decoration:none; font-weight:600; }
+                                        h1 { margin:6px 0 14px; font-size:22px; }
+                                        .lpr-user { font-size:14px; color:#cbd5e1; }
+                                        .lpr-search { position:sticky; top:0; padding:6px 0 12px; background:#0b1120; z-index:2; }
+                                        .lpr-search input { width:100%; padding:14px 16px; border-radius:14px; border:1px solid rgba(255,255,255,0.08); background:#0f172a; color:#e2e8f0; font-size:16px; box-shadow:0 12px 30px rgba(0,0,0,0.25); }
+                                        .lpr-search input:focus { outline:2px solid #38bdf8; border-color:#38bdf8; }
+                                        .lpr-product-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(190px,1fr)); gap:10px; margin:10px 0 16px; }
+                                        .lpr-product-card { background:#0f172a; border:1px solid rgba(255,255,255,0.08); border-radius:14px; padding:10px; text-align:left; color:#e2e8f0; display:flex; flex-direction:column; gap:8px; box-shadow:0 14px 28px rgba(0,0,0,0.22); cursor:pointer; transition:transform .08s ease, border-color .08s ease; }
+                                        .lpr-product-card:hover { transform:translateY(-2px); border-color:#38bdf8; }
+                                        .lpr-product-card img { width:100%; aspect-ratio:4/3; object-fit:cover; border-radius:10px; background:#111827; }
+                                        .lpr-product-name { font-weight:700; font-size:15px; }
+                                        .lpr-product-sku { color:#94a3b8; font-size:12px; }
+                                        .lpr-product-meta { display:flex; justify-content:space-between; align-items:center; font-size:12px; color:#cbd5e1; }
+                                        .lpr-pill { display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:10px; background:rgba(56,189,248,0.14); color:#e0f2fe; font-size:12px; }
+                                        .lpr-detail { background:#0f172a; border:1px solid rgba(255,255,255,0.08); border-radius:16px; padding:16px; box-shadow:0 16px 34px rgba(0,0,0,0.26); }
+                                        .lpr-detail h2 { margin:0 0 6px; font-size:18px; }
+                                        .lpr-detail .sku { color:#94a3b8; font-size:13px; margin-bottom:10px; }
+                                        .lpr-detail-stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(140px,1fr)); gap:10px; margin:12px 0; }
+                                        .lpr-stat { padding:12px; border-radius:12px; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); }
+                                        .lpr-stat .label { display:block; color:#94a3b8; font-size:12px; }
+                                        .lpr-stat .value { font-size:18px; font-weight:700; }
+                                        .lpr-incoming-list { list-style:none; margin:12px 0 0; padding:0; display:flex; flex-direction:column; gap:10px; }
+                                        .lpr-incoming-row { border:1px solid rgba(255,255,255,0.08); border-radius:12px; padding:10px 12px; background:rgba(255,255,255,0.02); display:flex; justify-content:space-between; gap:10px; align-items:center; }
+                                        .lpr-incoming-meta { display:flex; flex-direction:column; gap:4px; }
+                                        .lpr-incoming-meta .eta { color:#cbd5e1; font-size:13px; }
+                                        .lpr-incoming-meta .po { color:#94a3b8; font-size:12px; }
+                                        .lpr-incoming-qty { text-align:right; }
+                                        .lpr-empty { text-align:center; padding:32px 10px; color:#94a3b8; }
+                                        .lpr-note { color:#cbd5e1; font-size:13px; margin-top:8px; }
+                                        @media (max-width:560px) {
+                                                .lpr-product-grid { grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); }
+                                        }
+                                </style>
+                        </head>
+                        <body>
+                                <div class="lpr-shell" data-token="<?php echo esc_attr( $token ); ?>" data-ajax="<?php echo esc_url( $ajax_url ); ?>">
+                                        <div class="lpr-top">
+                                                <a class="lpr-back" href="<?php echo esc_url( home_url( '/incoming' ) ); ?>">&larr; <?php echo esc_html__( 'Start', 'lpr-backorder-allocator' ); ?></a>
+                                                <span class="lpr-user"><?php echo esc_html( sprintf( __( 'Signed in as %s', 'lpr-backorder-allocator' ), $user ) ); ?></span>
+                                        </div>
+                                        <h1><?php echo esc_html__( 'Product lookup', 'lpr-backorder-allocator' ); ?></h1>
+                                        <div class="lpr-search">
+                                                <label class="screen-reader-text" for="lpr-product-search"><?php echo esc_html__( 'Search products', 'lpr-backorder-allocator' ); ?></label>
+                                                <input id="lpr-product-search" type="search" placeholder="<?php echo esc_attr__( 'Search SKU or name…', 'lpr-backorder-allocator' ); ?>" autocomplete="off" />
+                                        </div>
+                                        <div id="lpr-product-results" class="lpr-product-grid" aria-live="polite"></div>
+                                        <div id="lpr-product-empty" class="lpr-empty" style="display:none;"><?php echo esc_html__( 'No products found.', 'lpr-backorder-allocator' ); ?></div>
+                                        <div id="lpr-product-detail" class="lpr-detail" aria-live="polite" role="status"></div>
+                                </div>
+
+                                <script>
+                                (function(){
+                                        var shell = document.querySelector('.lpr-shell');
+                                        if(!shell){ return; }
+                                        var ajaxUrl = shell.getAttribute('data-ajax');
+                                        var token = shell.getAttribute('data-token') || '';
+                                        var searchInput = document.getElementById('lpr-product-search');
+                                        var resultsEl = document.getElementById('lpr-product-results');
+                                        var emptyEl = document.getElementById('lpr-product-empty');
+                                        var detailEl = document.getElementById('lpr-product-detail');
+                                        var searchTimer = null;
+                                        var controller = null;
+
+                                        function numberFmt(val){
+                                                return new Intl.NumberFormat().format(val || 0);
+                                        }
+
+                                        function renderResults(items){
+                                                resultsEl.innerHTML = '';
+                                                if(!items.length){
+                                                        emptyEl.style.display = 'block';
+                                                        return;
+                                                }
+                                                emptyEl.style.display = 'none';
+                                                items.forEach(function(item){
+                                                        var btn = document.createElement('button');
+                                                        btn.type = 'button';
+                                                        btn.className = 'lpr-product-card';
+                                                        btn.setAttribute('data-id', item.id);
+                                                        btn.innerHTML = '<img src="'+(item.image || '')+'" alt="" loading="lazy" />' +
+                                                                '<div class="lpr-product-name">'+item.name+'</div>' +
+                                                                '<div class="lpr-product-sku">'+(item.sku || '<?php echo esc_js( __( 'No SKU', 'lpr-backorder-allocator' ) ); ?>')+'</div>' +
+                                                                '<div class="lpr-product-meta">'+
+                                                                        '<span class="lpr-pill">'+(item.next_eta || '<?php echo esc_js( __( 'No ETA', 'lpr-backorder-allocator' ) ); ?>')+'</span>'+
+                                                                        '<span>'+numberFmt(item.incoming_total || 0)+' <?php echo esc_js( __( 'incoming', 'lpr-backorder-allocator' ) ); ?></span>'+
+                                                                '</div>';
+                                                        btn.addEventListener('click', function(){ loadDetail(item.id); });
+                                                        resultsEl.appendChild(btn);
+                                                });
+                                        }
+
+                                        function renderDetail(data){
+                                                if(!data){
+                                                        detailEl.innerHTML = '';
+                                                        return;
+                                                }
+                                                var incomingRows = '';
+                                                if(data.incoming_pos && data.incoming_pos.length){
+                                                        data.incoming_pos.forEach(function(row){
+                                                                incomingRows += '<li class="lpr-incoming-row">' +
+                                                                        '<div class="lpr-incoming-meta">'+
+                                                                                '<span class="eta">'+(row.eta_label || '<?php echo esc_js( __( 'No ETA', 'lpr-backorder-allocator' ) ); ?>')+'</span>'+
+                                                                                '<span class="po">'+(row.po_label || '')+'</span>'+
+                                                                        '</div>'+
+                                                                        '<div class="lpr-incoming-qty">'+
+                                                                                '<div class="label">'+numberFmt(row.qty_free)+' <?php echo esc_js( __( 'free', 'lpr-backorder-allocator' ) ); ?></div>'+
+                                                                                '<div class="label" style="color:#94a3b8;font-size:12px;">'+numberFmt(row.qty_ordered)+' <?php echo esc_js( __( 'ordered', 'lpr-backorder-allocator' ) ); ?></div>'+
+                                                                        '</div>'+
+                                                                '</li>';
+                                                        });
+                                                } else {
+                                                        incomingRows = '<li class="lpr-empty" style="padding:14px 0;"><?php echo esc_js( __( 'No open incoming POs for this product.', 'lpr-backorder-allocator' ) ); ?></li>';
+                                                }
+
+                                                var nextNote = '';
+                                                if(data.next_free_eta && data.next_free_qty){
+                                                        nextNote = '<div class="lpr-note">'+ '<?php echo esc_js( __( 'Next free stock arrives', 'lpr-backorder-allocator' ) ); ?>' + ' ' + data.next_free_eta + ' · ' + numberFmt(data.next_free_qty) + '</div>';
+                                                }
+
+                                                detailEl.innerHTML = '<div class="lpr-detail-card">'+
+                                                        '<h2>'+data.name+'</h2>'+
+                                                        '<div class="sku">'+(data.sku || '<?php echo esc_js( __( 'No SKU available', 'lpr-backorder-allocator' ) ); ?>')+'</div>'+
+                                                        '<div class="lpr-detail-stats">'+
+                                                                '<div class="lpr-stat"><span class="label"><?php echo esc_js( __( 'On hand', 'lpr-backorder-allocator' ) ); ?></span><span class="value">'+numberFmt(data.stock)+'</span></div>'+
+                                                                '<div class="lpr-stat"><span class="label"><?php echo esc_js( __( 'Total incoming', 'lpr-backorder-allocator' ) ); ?></span><span class="value">'+numberFmt(data.incoming_total)+'</span></div>'+
+                                                                '<div class="lpr-stat"><span class="label"><?php echo esc_js( __( 'Allocated', 'lpr-backorder-allocator' ) ); ?></span><span class="value">'+numberFmt(data.allocated_total)+'</span></div>'+
+                                                        '</div>'+
+                                                        nextNote +
+                                                        '<ul class="lpr-incoming-list">'+incomingRows+'</ul>'+
+                                                '</div>';
+                                        }
+
+                                        function loadDetail(id){
+                                                if(!ajaxUrl){ return; }
+                                                var body = new URLSearchParams();
+                                                body.append('action','lpr_incoming_product_details');
+                                                body.append('product_id', id);
+                                                body.append('incoming_token', token);
+                                                fetch(ajaxUrl,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body.toString()})
+                                                        .then(function(r){ return r.json(); })
+                                                        .then(function(resp){
+                                                                if(!resp || !resp.success){ return; }
+                                                                renderDetail(resp.data);
+                                                        }).catch(function(){});
+                                        }
+
+                                        function performSearch(term){
+                                                if(!ajaxUrl){ return; }
+                                                if(controller){ controller.abort(); }
+                                                controller = new AbortController();
+                                                var body = new URLSearchParams();
+                                                body.append('action','lpr_incoming_product_search');
+                                                body.append('term', term || '');
+                                                body.append('incoming_token', token);
+                                                fetch(ajaxUrl,{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:body.toString(),signal:controller.signal})
+                                                        .then(function(r){ return r.json(); })
+                                                        .then(function(resp){
+                                                                if(!resp || !resp.success){ return; }
+                                                                renderResults(resp.data && resp.data.results ? resp.data.results : []);
+                                                        }).catch(function(err){ if(err && err.name === 'AbortError'){ return; } });
+                                        }
+
+                                        if(searchInput){
+                                                searchInput.addEventListener('input', function(){
+                                                        var term = this.value || '';
+                                                        if(searchTimer){ window.clearTimeout(searchTimer); }
+                                                        searchTimer = window.setTimeout(function(){ performSearch(term); }, 120);
+                                                });
+                                                performSearch('');
+                                        }
+                                })();
+                                </script>
+                        </body>
+                        </html>
+                        <?php
+                }
+
+                protected static function product_image_url( \WC_Product $product ): string {
+                        $image_id = $product->get_image_id();
+                        if ( $product->is_type( 'variation' ) && ! $image_id ) {
+                                $parent = wc_get_product( $product->get_parent_id() );
+                                $image_id = $parent instanceof \WC_Product ? $parent->get_image_id() : 0;
+                        }
+
+                        $src = $image_id ? wp_get_attachment_image_url( $image_id, 'medium' ) : '';
+                        if ( ! $src ) {
+                                $src = wc_placeholder_img_src();
+                        }
+
+                        return (string) $src;
+                }
+
+                protected static function next_eta_for_product( int $product_id ): string {
+                        $details = class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ? Incoming_Stock_Indexer::get_product_details( $product_id ) : array();
+                        foreach ( $details as $row ) {
+                                $eta = isset( $row['eta'] ) ? (string) $row['eta'] : '';
+                                if ( '' !== $eta ) {
+                                        return self::format_eta_label( $eta );
+                                }
+                        }
+
+                        return __( 'No ETA', 'lpr-backorder-allocator' );
+                }
+
+                public static function ajax_product_search(): void {
+                        if ( ! self::authorize_token_request() ) {
+                                wp_send_json_error( array( 'message' => __( 'Unauthorized.', 'lpr-backorder-allocator' ) ) );
+                        }
+
+                        $term = isset( $_POST['term'] ) ? sanitize_text_field( wp_unslash( $_POST['term'] ) ) : '';
+
+                        $args = array(
+                                'status'   => array( 'publish', 'private' ),
+                                'limit'    => 24,
+                                'paginate' => false,
+                                'return'   => 'ids',
+                                'orderby'  => 'title',
+                                'order'    => 'ASC',
+                        );
+
+                        if ( '' !== $term ) {
+                                $args['s']   = $term;
+                                $args['sku'] = $term;
+                        }
+
+                        $products = function_exists( 'wc_get_products' ) ? wc_get_products( $args ) : array();
+                        $results  = array();
+
+                        foreach ( $products as $product_id ) {
+                                $product = function_exists( 'wc_get_product' ) ? wc_get_product( $product_id ) : null;
+                                if ( ! ( $product instanceof \WC_Product ) ) {
+                                        continue;
+                                }
+
+                                $incoming_total = (int) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_INCOMING_TOTAL' ) ? PRODUCT_META_INCOMING_TOTAL : '_lpr_incoming_po_total', true );
+
+                                $results[] = array(
+                                        'id'             => (int) $product_id,
+                                        'name'           => $product->get_name(),
+                                        'sku'            => (string) $product->get_sku(),
+                                        'image'          => self::product_image_url( $product ),
+                                        'incoming_total' => $incoming_total,
+                                        'next_eta'       => self::next_eta_for_product( (int) $product_id ),
+                                );
+                        }
+
+                        wp_send_json_success( array( 'results' => $results ) );
+                }
+
+                public static function ajax_product_details(): void {
+                        if ( ! self::authorize_token_request() ) {
+                                wp_send_json_error( array( 'message' => __( 'Unauthorized.', 'lpr-backorder-allocator' ) ) );
+                        }
+
+                        $product_id = isset( $_POST['product_id'] ) ? absint( $_POST['product_id'] ) : 0;
+                        if ( $product_id <= 0 ) {
+                                wp_send_json_error( array( 'message' => __( 'Product not found.', 'lpr-backorder-allocator' ) ) );
+                        }
+
+                        $product = function_exists( 'wc_get_product' ) ? wc_get_product( $product_id ) : null;
+                        if ( ! ( $product instanceof \WC_Product ) ) {
+                                wp_send_json_error( array( 'message' => __( 'Product not found.', 'lpr-backorder-allocator' ) ) );
+                        }
+
+                        $incoming_total = (int) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_INCOMING_TOTAL' ) ? PRODUCT_META_INCOMING_TOTAL : '_lpr_incoming_po_total', true );
+                        $details        = class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ? Incoming_Stock_Indexer::get_product_details( $product_id ) : array();
+
+                        $incoming_pos   = array();
+                        $total_free     = 0;
+                        $next_free_eta  = '';
+                        $next_free_qty  = 0;
+
+                        foreach ( $details as $row ) {
+                                $eta        = isset( $row['eta'] ) ? (string) $row['eta'] : '';
+                                $qty_free   = max( 0, (int) ( $row['qty_free'] ?? 0 ) );
+                                $qty_order  = max( 0, (int) ( $row['qty_ordered'] ?? 0 ) );
+                                $po_number  = isset( $row['po_number'] ) && '' !== (string) $row['po_number'] ? (string) $row['po_number'] : (string) ( $row['po_id'] ?? '' );
+
+                                $incoming_pos[] = array(
+                                        'po_id'       => (int) ( $row['po_id'] ?? 0 ),
+                                        'po_label'    => sprintf( __( 'PO #%s', 'lpr-backorder-allocator' ), $po_number ),
+                                        'eta'         => $eta,
+                                        'eta_label'   => $eta ? self::format_eta_label( $eta ) : __( 'No ETA', 'lpr-backorder-allocator' ),
+                                        'qty_free'    => $qty_free,
+                                        'qty_ordered' => $qty_order,
+                                );
+
+                                $total_free += $qty_free;
+                                if ( $qty_free > 0 && ( '' === $next_free_eta || ( $eta && lpr_allocator_compare_dates( $eta, $next_free_eta ) < 0 ) ) ) {
+                                        $next_free_eta = $eta;
+                                        $next_free_qty = $qty_free;
+                                }
+                        }
+
+                        $allocated_total = max( 0, $incoming_total - $total_free );
+                        $stock_qty       = $product->get_stock_quantity();
+
+                        wp_send_json_success(
+                                array(
+                                        'product_id'      => $product_id,
+                                        'name'            => $product->get_name(),
+                                        'sku'             => (string) $product->get_sku(),
+                                        'image'           => self::product_image_url( $product ),
+                                        'stock'           => function_exists( 'wc_stock_amount' ) ? wc_stock_amount( $stock_qty ) : (int) $stock_qty,
+                                        'stock_status'    => (string) $product->get_stock_status(),
+                                        'incoming_total'  => $incoming_total,
+                                        'allocated_total' => $allocated_total,
+                                        'incoming_pos'    => $incoming_pos,
+                                        'next_free_eta'   => $next_free_eta ? self::format_eta_label( $next_free_eta ) : '',
+                                        'next_free_qty'   => (int) $next_free_qty,
+                                )
+                        );
+                }
+
 
                 protected static function render_allocations_page( string $user, string $token, int $po_id ): void {
                         $raw_rows = class_exists( __NAMESPACE__ . '\PO_Allocation_Overview' ) ? PO_Allocation_Overview::collect_rows( $po_id ) : array();
