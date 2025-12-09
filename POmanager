@@ -2478,6 +2478,25 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_parse_date' ) ) {
                         return null;
                 }
 
+                // Normalize separators and force day-month-year ordering for ambiguous inputs
+                // such as "10-12-2025". Some environments interpret those as month-day-year,
+                // which would turn 10 December into 12 October. We standardize the pieces to
+                // avoid that drift before attempting to parse.
+                $value = str_replace( array( '/', '.' ), '-', $value );
+
+                if ( preg_match( '/^(\d{1,2})-(\d{1,2})-(\d{2,4})$/', $value, $parts ) ) {
+                        $day   = str_pad( $parts[1], 2, '0', STR_PAD_LEFT );
+                        $month = str_pad( $parts[2], 2, '0', STR_PAD_LEFT );
+                        $year  = (int) $parts[3];
+
+                        // Assume 2000-based dates for 2-digit years to maintain existing behavior.
+                        if ( $year < 100 ) {
+                                $year += 2000;
+                        }
+
+                        $value = sprintf( '%s-%s-%04d', $day, $month, $year );
+                }
+
                 $tz      = function_exists( 'wp_timezone' ) ? wp_timezone() : new \DateTimeZone( 'UTC' );
                 $formats = array( '!d-m-Y H:i:s', '!d-m-Y H:i', '!d-m-Y', '!d-m-y H:i:s', '!d-m-y H:i', '!d-m-y', '!Y-m-d H:i:s', '!Y-m-d H:i', '!Y-m-d' );
 
