@@ -6772,10 +6772,13 @@ if ( ! class_exists( __NAMESPACE__ . '\Supplier_PO_Live_Product_UI' ) ) {
 		/**
 		 * Render the enhanced PO lines box with live product search.
 		 */
-		public static function render_lines_metabox_live( \WP_Post $post ): void {
-			if ( ! current_user_can( 'manage_woocommerce' ) ) {
-				return;
-			}
+                public static function render_lines_metabox_live( ?\WP_Post $post = null ): void {
+                        if ( ! ( $post instanceof \WP_Post ) ) {
+                                return;
+                        }
+                        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                                return;
+                        }
 			wp_nonce_field( 'lpr_po_lines_action', 'lpr_po_lines_nonce' );
                         $lines = lpr_allocator_refresh_po_allocation_state( (int) $post->ID );
                         if ( ! is_array( $lines ) ) {
