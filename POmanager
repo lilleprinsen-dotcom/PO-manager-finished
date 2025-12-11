@@ -3439,20 +3439,35 @@ if ( ! class_exists( __NAMESPACE__ . '\Supplier_PO_CPT' ) ) {
 				</div>
                                 <div class="field">
                                         <?php
-                                        woocommerce_wp_text_input(
-                                                array(
-                                                        'id'                => 'lpr_eta_date',
-                                                        'name'              => 'lpr_eta_date',
-                                                        'type'              => 'text',
-                                                        'label'             => __( 'Default ETA (dd-mm-yyyy)', 'lpr-backorder-allocator' ),
-                                                        'class'             => 'short',
-                                                        'value'             => $eta,
-                                                        'custom_attributes' => array(
-                                                                'pattern'     => '\\d{2}-\\d{2}-\\d{4}',
-                                                                'placeholder' => 'DD-MM-YYYY',
-                                                        ),
-                                                )
-                                        );
+                                        if ( function_exists( 'woocommerce_wp_text_input' ) ) {
+                                                woocommerce_wp_text_input(
+                                                        array(
+                                                                'id'                => 'lpr_eta_date',
+                                                                'name'              => 'lpr_eta_date',
+                                                                'type'              => 'text',
+                                                                'label'             => __( 'Default ETA (dd-mm-yyyy)', 'lpr-backorder-allocator' ),
+                                                                'class'             => 'short',
+                                                                'value'             => $eta,
+                                                                'custom_attributes' => array(
+                                                                        'pattern'     => '\\d{2}-\\d{2}-\\d{4}',
+                                                                        'placeholder' => 'DD-MM-YYYY',
+                                                                ),
+                                                        )
+                                                );
+                                        } else {
+                                                ?>
+                                                <label for="lpr_eta_date"><strong><?php echo esc_html__( 'Default ETA (dd-mm-yyyy)', 'lpr-backorder-allocator' ); ?></strong></label>
+                                                <input
+                                                        type="text"
+                                                        class="short"
+                                                        id="lpr_eta_date"
+                                                        name="lpr_eta_date"
+                                                        value="<?php echo esc_attr( $eta ); ?>"
+                                                        pattern="\d{2}-\d{2}-\d{4}"
+                                                        placeholder="DD-MM-YYYY"
+                                                />
+                                                <?php
+                                        }
                                         ?>
                                 </div>
 				<div class="field">
