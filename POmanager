@@ -3018,6 +3018,10 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_recalculate_po_lines_fro
                         return $lines;
                 }
 
+                if ( ! function_exists( 'wc_get_order' ) ) {
+                        return $lines;
+                }
+
                 $index    = lpr_allocator_get_po_allocation_index( $po_id );
                 $meta_key = ORDER_ITEM_META_ALLOCATIONS;
                 $active   = array(); // target_id => qty
