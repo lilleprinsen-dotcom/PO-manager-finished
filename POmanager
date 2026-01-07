@@ -9355,10 +9355,24 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                         }
 
                         if ( null === $receipt_index ) {
+                                lpr_allocator_log_event(
+                                        'receipt_missing',
+                                        array(
+                                                'po_id'      => $po_id,
+                                                'receipt_id' => $receipt_id,
+                                        )
+                                );
                                 return;
                         }
 
                         if ( defined( __NAMESPACE__ . '\PO_STATUS_CLOSED' ) && PO_STATUS_CLOSED === get_post_status( $po_id ) ) {
+                                lpr_allocator_log_event(
+                                        'receipt_canceled_po_closed',
+                                        array(
+                                                'po_id'      => $po_id,
+                                                'receipt_id' => $receipt_id,
+                                        )
+                                );
                                 $receipts[ $receipt_index ]['status']  = 'canceled';
                                 $receipts[ $receipt_index ]['message'] = isset( $receipts[ $receipt_index ]['message'] ) ? (string) $receipts[ $receipt_index ]['message'] : '';
                                 $receipts[ $receipt_index ]['logs']    = isset( $receipts[ $receipt_index ]['logs'] ) && is_array( $receipts[ $receipt_index ]['logs'] ) ? $receipts[ $receipt_index ]['logs'] : array();
@@ -9366,6 +9380,16 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                 self::save_receipts( $po_id, $receipts );
                                 return;
                         }
+
+                        lpr_allocator_log_event(
+                                'receipt_processing_start',
+                                array(
+                                        'po_id'       => $po_id,
+                                        'receipt_id'  => $receipt_id,
+                                        'line_count'  => count( $receipt_lines ),
+                                        'action_id'   => $receipts[ $receipt_index ]['action_id'] ?? null,
+                                )
+                        );
 
                         $po_lines = get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', true );
                         if ( ! is_array( $po_lines ) ) {
@@ -9441,6 +9465,14 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                         }
 
                         if ( ! empty( $errors ) ) {
+                                lpr_allocator_log_event(
+                                        'receipt_validation_failed',
+                                        array(
+                                                'po_id'      => $po_id,
+                                                'receipt_id' => $receipt_id,
+                                                'errors'     => $errors,
+                                        )
+                                );
                                 self::mark_receipt_failed( $po_id, $receipts, $receipt_index, $errors, $revert_lines, $po_lines );
                                 return;
                         }
@@ -9460,19 +9492,116 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                         'after'  => $after,
                                         'qty'    => $data['qty_total'],
                                 );
+
+                                lpr_allocator_log_event(
+                                        'receipt_stock_applied',
+                                        array(
+                                                'po_id'      => $po_id,
+                                                'receipt_id' => $receipt_id,
+                                                'product_id' => $target,
+                                                'qty'        => $data['qty_total'],
+                                                'before'     => $data['before'],
+                                                'after'      => $after,
+                                        )
+                                );
                         }
 
                         if ( ! empty( $errors ) ) {
                                 foreach ( $applied as $target => $data ) {
                                         try {
                                                 if ( function_exists( 'wc_update_product_stock' ) ) {
-                                                        wc_update_product_stock( $targets[ $target ]['product'], $data['qty'], 'decrease' );
-                                                }
-                                        } catch ( \Exception $e ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
+                                                wc_update_product_stock( $targets[ $target ]['product'], $data['qty'], 'decrease' );
+                                        }
+                                } catch ( \Exception $e ) { // phpcs:ignore Generic.CodeAnalysis.EmptyStatement.DetectedCatch
                                                 // Best-effort revert.
                                         }
                                 }
 
+                                lpr_allocator_log_event(
+                                        'receipt_apply_failed',
+                                        array(
+                                                'po_id'      => $po_id,
+                                                'receipt_id' => $receipt_id,
+                                                'errors'     => $errors,
+                                        )
+                                );
+                                self::mark_receipt_failed( $po_id, $receipts, $receipt_index, $errors, $revert_lines, $po_lines );
+                                return;
+                        }
+
+                        foreach ( $applied as $target => $data ) {
+                                $expected = $data['before'] + $data['qty'];
+                                $product  = function_exists( 'wc_get_product' ) ? wc_get_product( $target ) : null;
+                                if ( ! ( $product instanceof \WC_Product ) ) {
+                                        $errors[] = sprintf( __( 'Unable to reload product %d for stock verification.', 'lpr-backorder-allocator' ), $target );
+                                        continue;
+                                }
+
+                                $live = function_exists( 'wc_stock_amount' ) ? wc_stock_amount( $product->get_stock_quantity() ) : (int) $product->get_stock_quantity();
+                                if ( $live !== $expected ) {
+                                        lpr_allocator_log_event(
+                                                'receipt_stock_mismatch',
+                                                array(
+                                                        'po_id'      => $po_id,
+                                                        'receipt_id' => $receipt_id,
+                                                        'product_id' => $target,
+                                                        'expected'   => $expected,
+                                                        'live'       => $live,
+                                                )
+                                        );
+
+                                        try {
+                                                if ( function_exists( 'wc_update_product_stock' ) ) {
+                                                        $corrected_raw = wc_update_product_stock( $product, $expected, 'set' );
+                                                        $corrected     = function_exists( 'wc_stock_amount' ) ? wc_stock_amount( $corrected_raw ) : (int) $corrected_raw;
+                                                        $live          = $corrected;
+                                                }
+                                        } catch ( \Exception $e ) {
+                                                $errors[] = $e->getMessage();
+                                        }
+
+                                        if ( $live !== $expected ) {
+                                                $errors[] = sprintf(
+                                                        __( 'Product %1$d stock mismatch after receipt. Expected %2$d, got %3$d.', 'lpr-backorder-allocator' ),
+                                                        $target,
+                                                        $expected,
+                                                        $live
+                                                );
+                                        } else {
+                                                lpr_allocator_log_event(
+                                                        'receipt_stock_corrected',
+                                                        array(
+                                                                'po_id'      => $po_id,
+                                                                'receipt_id' => $receipt_id,
+                                                                'product_id' => $target,
+                                                                'expected'   => $expected,
+                                                                'live'       => $live,
+                                                        )
+                                                );
+                                        }
+                                } else {
+                                        lpr_allocator_log_event(
+                                                'receipt_stock_verified',
+                                                array(
+                                                        'po_id'      => $po_id,
+                                                        'receipt_id' => $receipt_id,
+                                                        'product_id' => $target,
+                                                        'expected'   => $expected,
+                                                        'live'       => $live,
+                                                )
+                                        );
+                                }
+                        }
+
+                        if ( ! empty( $errors ) ) {
+                                lpr_allocator_log_event(
+                                        'receipt_verification_failed',
+                                        array(
+                                                'po_id'      => $po_id,
+                                                'receipt_id' => $receipt_id,
+                                                'errors'     => $errors,
+                                        )
+                                );
                                 self::mark_receipt_failed( $po_id, $receipts, $receipt_index, $errors, $revert_lines, $po_lines );
                                 return;
                         }
@@ -9500,6 +9629,15 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                         $receipts[ $receipt_index ]['completed_at'] = current_time( 'mysql' );
                         $receipts[ $receipt_index ]['message']      = (string) ( $receipts[ $receipt_index ]['message'] ?? '' );
                         self::save_receipts( $po_id, $receipts );
+
+                        lpr_allocator_log_event(
+                                'receipt_processing_completed',
+                                array(
+                                        'po_id'      => $po_id,
+                                        'receipt_id' => $receipt_id,
+                                        'action_id'  => $receipts[ $receipt_index ]['action_id'] ?? null,
+                                )
+                        );
 
                         if ( class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ) {
                                 Incoming_Stock_Indexer::refresh_all();
@@ -9766,6 +9904,16 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                         $receipts[] = $receipt;
                         self::save_receipts( $po_id, $receipts );
 
+                        lpr_allocator_log_event(
+                                'receipt_queued',
+                                array(
+                                        'po_id'      => $po_id,
+                                        'receipt_id' => $receipt_id,
+                                        'action_id'  => $action_id,
+                                        'line_count' => count( $receipt_lines ),
+                                )
+                        );
+
                         if ( class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ) {
                                 Incoming_Stock_Indexer::refresh_all();
                         }
@@ -9782,6 +9930,15 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                 if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
                                         error_log( sprintf( 'LPR allocator receipt sync failure: %s', $e->getMessage() ) );
                                 }
+
+                                lpr_allocator_log_event(
+                                        'receipt_sync_exception',
+                                        array(
+                                                'po_id'      => $po_id,
+                                                'receipt_id' => $receipt_id,
+                                                'message'    => $e->getMessage(),
+                                        )
+                                );
                         }
 
                         $message = __( 'Job scheduled. Stock will update asynchronously.', 'lpr-backorder-allocator' );
