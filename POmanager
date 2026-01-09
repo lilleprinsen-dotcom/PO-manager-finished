@@ -2022,11 +2022,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                                 return '';
                         }
 
-                        if ( $product->is_in_stock() ) {
-                                return '';
-                        }
-
-                        if ( ! $product->is_on_backorder( 1 ) ) {
+                        if ( 'instock' === $product->get_stock_status() ) {
                                 return '';
                         }
 
