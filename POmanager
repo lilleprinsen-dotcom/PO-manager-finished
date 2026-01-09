@@ -9193,8 +9193,28 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                 $status   = self::resolve_receipt_status( $receipt );
                                 $datetime = ! empty( $receipt['created_at'] ) ? mysql2date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), $receipt['created_at'] ) : '';
                                 $job      = ! empty( $receipt['action_id'] ) ? '#' . absint( $receipt['action_id'] ) : __( 'n/a', 'lpr-backorder-allocator' );
+                                $verification = isset( $receipt['verification'] ) && is_array( $receipt['verification'] ) ? $receipt['verification'] : array();
                                 echo '<div class="lpr-po-receipt-entry">';
                                 echo '<p><strong>' . esc_html( $datetime ) . '</strong> — ' . esc_html( ucfirst( $status ) ) . ' (' . esc_html__( 'Job', 'lpr-backorder-allocator' ) . ' ' . esc_html( $job ) . ')</p>';
+                                $verification_label = '';
+                                if ( 'completed' === $status ) {
+                                        if ( ! empty( $verification ) ) {
+                                                $corrections = (int) ( $verification['corrections'] ?? 0 );
+                                                if ( $corrections > 0 ) {
+                                                        /* translators: %d: number of corrections applied */
+                                                        $verification_label = sprintf( __( 'Verified with %d correction(s).', 'lpr-backorder-allocator' ), $corrections );
+                                                } else {
+                                                        $verification_label = __( 'Verified.', 'lpr-backorder-allocator' );
+                                                }
+                                        } else {
+                                                $verification_label = __( 'Not recorded.', 'lpr-backorder-allocator' );
+                                        }
+                                } elseif ( 'failed' === $status || 'canceled' === $status ) {
+                                        $verification_label = __( 'Not verified.', 'lpr-backorder-allocator' );
+                                } else {
+                                        $verification_label = __( 'Pending.', 'lpr-backorder-allocator' );
+                                }
+                                echo '<p><strong>' . esc_html__( 'Stock verification', 'lpr-backorder-allocator' ) . ':</strong> ' . esc_html( $verification_label ) . '</p>';
                                 if ( ! empty( $receipt['message'] ) ) {
                                         echo '<p><em>' . esc_html( (string) $receipt['message'] ) . '</em></p>';
                                 }
@@ -9208,21 +9228,31 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                                         'qty'          => (int) ( $line['qty'] ?? 0 ),
                                                         'stock_before' => null,
                                                         'stock_after'  => null,
+                                                        'verification' => null,
                                                 );
                                         }
                                 }
 
                                 echo '<table class="widefat fixed striped" style="margin-top:8px;">';
-                                echo '<thead><tr><th>' . esc_html__( 'Product', 'lpr-backorder-allocator' ) . '</th><th>' . esc_html__( 'Qty received', 'lpr-backorder-allocator' ) . '</th><th>' . esc_html__( 'Stock before', 'lpr-backorder-allocator' ) . '</th><th>' . esc_html__( 'Stock after', 'lpr-backorder-allocator' ) . '</th></tr></thead>';
+                                echo '<thead><tr><th>' . esc_html__( 'Product', 'lpr-backorder-allocator' ) . '</th><th>' . esc_html__( 'Qty received', 'lpr-backorder-allocator' ) . '</th><th>' . esc_html__( 'Stock before', 'lpr-backorder-allocator' ) . '</th><th>' . esc_html__( 'Stock after', 'lpr-backorder-allocator' ) . '</th><th>' . esc_html__( 'Verification', 'lpr-backorder-allocator' ) . '</th></tr></thead>';
                                 echo '<tbody>';
                                 foreach ( $rows as $row ) {
                                         $before = isset( $row['stock_before'] ) ? (string) $row['stock_before'] : '—';
                                         $after  = isset( $row['stock_after'] ) ? (string) $row['stock_after'] : '—';
+                                        $verification_state = isset( $row['verification'] ) ? (string) $row['verification'] : '';
+                                        if ( 'corrected' === $verification_state ) {
+                                                $verification_label = __( 'Corrected', 'lpr-backorder-allocator' );
+                                        } elseif ( 'verified' === $verification_state ) {
+                                                $verification_label = __( 'Verified', 'lpr-backorder-allocator' );
+                                        } else {
+                                                $verification_label = '—';
+                                        }
                                         echo '<tr>';
                                         echo '<td>' . esc_html( $get_label( (int) ( $row['product_id'] ?? 0 ), (int) ( $row['variation_id'] ?? 0 ) ) ) . '</td>';
                                         echo '<td>' . esc_html( (string) max( 0, (int) ( $row['qty'] ?? 0 ) ) ) . '</td>';
                                         echo '<td>' . esc_html( $before ) . '</td>';
                                         echo '<td>' . esc_html( $after ) . '</td>';
+                                        echo '<td>' . esc_html( $verification_label ) . '</td>';
                                         echo '</tr>';
                                 }
                                 echo '</tbody>';
@@ -9490,6 +9520,14 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                 return;
                         }
 
+                        $verification     = array(
+                                'status'      => 'verified',
+                                'checked_at'  => current_time( 'mysql' ),
+                                'corrections' => 0,
+                                'details'     => array(),
+                        );
+                        $verification_map = array();
+
                         foreach ( $applied as $target => $data ) {
                                 $expected = $data['before'] + $data['qty'];
                                 $product  = function_exists( 'wc_get_product' ) ? wc_get_product( $target ) : null;
@@ -9499,6 +9537,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                 }
 
                                 $live = function_exists( 'wc_stock_amount' ) ? wc_stock_amount( $product->get_stock_quantity() ) : (int) $product->get_stock_quantity();
+                                $verification_state = 'verified';
                                 if ( $live !== $expected ) {
                                         lpr_allocator_log_event(
                                                 'receipt_stock_mismatch',
@@ -9529,6 +9568,8 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                                         $live
                                                 );
                                         } else {
+                                                $verification_state = 'corrected';
+                                                $verification['corrections']++;
                                                 lpr_allocator_log_event(
                                                         'receipt_stock_corrected',
                                                         array(
@@ -9552,6 +9593,14 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                                 )
                                         );
                                 }
+
+                                $verification_map[ $target ] = $verification_state;
+                                $verification['details'][]   = array(
+                                        'product_id' => $target,
+                                        'expected'   => $expected,
+                                        'live'       => $live,
+                                        'status'     => $verification_state,
+                                );
                         }
 
                         if ( ! empty( $errors ) ) {
@@ -9576,12 +9625,14 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                 $before              = isset( $running[ $target ] ) ? $running[ $target ] : $applied[ $target ]['before'];
                                 $after               = $before + $line['qty'];
                                 $running[ $target ]  = $after;
+                                $verification_state  = $verification_map[ $target ] ?? 'verified';
                                 $line_logs[]         = array(
                                         'product_id'   => $line['product_id'],
                                         'variation_id' => $line['variation_id'],
                                         'qty'          => $line['qty'],
                                         'stock_before' => $before,
                                         'stock_after'  => $after,
+                                        'verification' => $verification_state,
                                 );
                         }
 
@@ -9589,6 +9640,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                         $receipts[ $receipt_index ]['logs']         = $line_logs;
                         $receipts[ $receipt_index ]['completed_at'] = current_time( 'mysql' );
                         $receipts[ $receipt_index ]['message']      = (string) ( $receipts[ $receipt_index ]['message'] ?? '' );
+                        $receipts[ $receipt_index ]['verification'] = $verification;
                         self::save_receipts( $po_id, $receipts );
 
                         lpr_allocator_log_event(
