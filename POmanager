@@ -2398,6 +2398,593 @@ if ( ! class_exists( __NAMESPACE__ . '\\Supplier_PO_Print_PDF' ) ) {
         Supplier_PO_Print_PDF::init();
 }
 
+if ( ! class_exists( __NAMESPACE__ . '\\Supplier_PO_Customer_Notifier' ) ) {
+        /**
+         * Adds an admin UI to notify customers linked to a Supplier PO.
+         */
+        class Supplier_PO_Customer_Notifier {
+
+                public static function init(): void {
+                        add_action( 'add_meta_boxes', array( __CLASS__, 'add_metabox' ) );
+                        add_action( 'admin_footer', array( __CLASS__, 'render_footer_assets' ) );
+                        add_action( 'wp_ajax_lpr_po_notify_preview', array( __CLASS__, 'ajax_preview' ) );
+                        add_action( 'wp_ajax_lpr_po_notify_send', array( __CLASS__, 'ajax_send' ) );
+                }
+
+                public static function add_metabox(): void {
+                        add_meta_box(
+                                'lpr_po_customer_notify',
+                                __( 'Inform Customers', 'lpr-backorder-allocator' ),
+                                array( __CLASS__, 'render_metabox' ),
+                                defined( __NAMESPACE__ . '\\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po',
+                                'normal',
+                                'default'
+                        );
+                }
+
+                public static function render_metabox( \WP_Post $post ): void {
+                        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                                return;
+                        }
+
+                        $orders        = self::collect_po_orders( (int) $post->ID );
+                        $total_orders  = count( $orders );
+                        $preview_nonce = wp_create_nonce( 'lpr_po_notify_preview' );
+                        $send_nonce    = wp_create_nonce( 'lpr_po_notify_send' );
+                        $po_number     = (string) get_post_meta( $post->ID, PO_META_PO_NUMBER, true );
+                        $po_label      = $po_number ? '#' . $po_number : '#' . $post->ID;
+                        ?>
+                        <div class="lpr-po-notify" data-po-id="<?php echo esc_attr( (string) $post->ID ); ?>" data-preview-nonce="<?php echo esc_attr( $preview_nonce ); ?>" data-send-nonce="<?php echo esc_attr( $send_nonce ); ?>">
+                                <div class="lpr-po-notify__intro">
+                                        <div>
+                                                <h4><?php echo esc_html__( 'Send a bulk update to customers tied to this PO', 'lpr-backorder-allocator' ); ?></h4>
+                                                <p class="description"><?php echo esc_html__( 'Write a message once and deliver it with the ETA overview email automatically appended below.', 'lpr-backorder-allocator' ); ?></p>
+                                        </div>
+                                        <div class="lpr-po-notify__summary">
+                                                <div class="lpr-po-notify__count">
+                                                        <span><?php echo esc_html__( 'PO', 'lpr-backorder-allocator' ); ?> <?php echo esc_html( $po_label ); ?></span>
+                                                        <strong><?php echo esc_html( (string) $total_orders ); ?> <?php echo esc_html__( 'receivers', 'lpr-backorder-allocator' ); ?></strong>
+                                                </div>
+                                                <div class="lpr-po-notify__selected">
+                                                        <span><?php echo esc_html__( 'Selected', 'lpr-backorder-allocator' ); ?></span>
+                                                        <strong id="lpr-po-notify-selected-count">0</strong>
+                                                </div>
+                                        </div>
+                                </div>
+
+                                <div class="lpr-po-notify__composer">
+                                        <label for="lpr-po-notify-message"><strong><?php echo esc_html__( 'Message to customers', 'lpr-backorder-allocator' ); ?></strong></label>
+                                        <textarea id="lpr-po-notify-message" rows="5" placeholder="<?php echo esc_attr__( 'Share the update you want customers to see…', 'lpr-backorder-allocator' ); ?>"></textarea>
+                                        <p class="description">
+                                                <?php echo esc_html__( 'Tip: Use %order_number% or %customer_name% placeholders to personalize the opening message.', 'lpr-backorder-allocator' ); ?>
+                                        </p>
+                                </div>
+
+                                <div class="lpr-po-notify__recipients">
+                                        <div class="lpr-po-notify__recipients-head">
+                                                <label class="lpr-po-notify__select-all">
+                                                        <input type="checkbox" id="lpr-po-notify-select-all" checked />
+                                                        <?php echo esc_html__( 'Select all customers', 'lpr-backorder-allocator' ); ?>
+                                                </label>
+                                                <span class="lpr-po-notify__hint"><?php echo esc_html__( 'Uncheck any customers who should not receive this update.', 'lpr-backorder-allocator' ); ?></span>
+                                        </div>
+                                        <?php if ( empty( $orders ) ) : ?>
+                                                <div class="lpr-po-notify__empty">
+                                                        <?php echo esc_html__( 'No customer orders are allocated to this PO yet.', 'lpr-backorder-allocator' ); ?>
+                                                </div>
+                                        <?php else : ?>
+                                                <div class="lpr-po-notify__table-wrap">
+                                                        <table class="widefat striped lpr-po-notify__table">
+                                                                <thead>
+                                                                        <tr>
+                                                                                <th class="lpr-col-select"><?php echo esc_html__( 'Send', 'lpr-backorder-allocator' ); ?></th>
+                                                                                <th><?php echo esc_html__( 'Order', 'lpr-backorder-allocator' ); ?></th>
+                                                                                <th><?php echo esc_html__( 'Customer', 'lpr-backorder-allocator' ); ?></th>
+                                                                                <th><?php echo esc_html__( 'Email', 'lpr-backorder-allocator' ); ?></th>
+                                                                                <th><?php echo esc_html__( 'Allocated items', 'lpr-backorder-allocator' ); ?></th>
+                                                                        </tr>
+                                                                </thead>
+                                                                <tbody>
+                                                                        <?php foreach ( $orders as $order_row ) : ?>
+                                                                                <?php
+                                                                                $order_id   = $order_row['order_id'];
+                                                                                $label      = $order_row['label'];
+                                                                                $customer   = $order_row['customer'];
+                                                                                $email      = $order_row['email'];
+                                                                                $items_html = $order_row['items_html'];
+                                                                                $has_email  = '' !== $email;
+                                                                                $disabled   = $has_email ? '' : 'disabled';
+                                                                                ?>
+                                                                                <tr>
+                                                                                        <td class="lpr-col-select">
+                                                                                                <label class="screen-reader-text" for="lpr-po-notify-order-<?php echo esc_attr( (string) $order_id ); ?>"><?php echo esc_html__( 'Email order', 'lpr-backorder-allocator' ); ?></label>
+                                                                                                <input type="checkbox" class="lpr-po-notify-order" id="lpr-po-notify-order-<?php echo esc_attr( (string) $order_id ); ?>" value="<?php echo esc_attr( (string) $order_id ); ?>" data-order-label="<?php echo esc_attr( $label ); ?>" <?php echo $has_email ? 'checked' : ''; ?> <?php echo $disabled; ?> />
+                                                                                        </td>
+                                                                                        <td><strong><?php echo esc_html( $label ); ?></strong></td>
+                                                                                        <td><?php echo esc_html( $customer ); ?></td>
+                                                                                        <td>
+                                                                                                <?php if ( $email ) : ?>
+                                                                                                        <span class="lpr-po-notify__email"><?php echo esc_html( $email ); ?></span>
+                                                                                                <?php else : ?>
+                                                                                                        <span class="lpr-po-notify__missing"><?php echo esc_html__( 'Missing email', 'lpr-backorder-allocator' ); ?></span>
+                                                                                                <?php endif; ?>
+                                                                                        </td>
+                                                                                        <td><?php echo $items_html; ?></td>
+                                                                                </tr>
+                                                                        <?php endforeach; ?>
+                                                                </tbody>
+                                                        </table>
+                                                </div>
+                                        <?php endif; ?>
+                                </div>
+
+                                <div class="lpr-po-notify__actions">
+                                        <button type="button" class="button lpr-po-notify-preview"><?php echo esc_html__( 'Preview email', 'lpr-backorder-allocator' ); ?></button>
+                                        <button type="button" class="button button-primary lpr-po-notify-send"><?php echo esc_html__( 'Send to selected customers', 'lpr-backorder-allocator' ); ?></button>
+                                        <span class="lpr-po-notify__status" id="lpr-po-notify-status"></span>
+                                </div>
+                        </div>
+                        <div id="lpr-po-notify-preview-modal" style="display:none;"></div>
+                        <?php
+                }
+
+                public static function render_footer_assets(): void {
+                        if ( ! self::is_po_screen() ) {
+                                return;
+                        }
+                        ?>
+                        <style id="lpr-po-notify-styles">
+                                .lpr-po-notify { display:flex; flex-direction:column; gap:18px; }
+                                .lpr-po-notify__intro { display:flex; justify-content:space-between; gap:16px; flex-wrap:wrap; background:#f8fafc; border:1px solid #e2e8f0; border-radius:10px; padding:14px 16px; }
+                                .lpr-po-notify__intro h4 { margin:0 0 6px; font-size:15px; }
+                                .lpr-po-notify__summary { display:flex; gap:16px; flex-wrap:wrap; }
+                                .lpr-po-notify__count, .lpr-po-notify__selected { display:flex; flex-direction:column; justify-content:center; padding:8px 12px; background:#fff; border-radius:8px; border:1px solid #e2e8f0; min-width:120px; }
+                                .lpr-po-notify__count strong, .lpr-po-notify__selected strong { font-size:18px; }
+                                .lpr-po-notify__composer textarea { width:100%; max-width:100%; }
+                                .lpr-po-notify__recipients { display:flex; flex-direction:column; gap:10px; }
+                                .lpr-po-notify__recipients-head { display:flex; justify-content:space-between; gap:12px; align-items:center; flex-wrap:wrap; }
+                                .lpr-po-notify__hint { color:#64748b; font-size:12px; }
+                                .lpr-po-notify__table-wrap { max-height:320px; overflow:auto; border:1px solid #e2e8f0; border-radius:8px; background:#fff; }
+                                .lpr-po-notify__table th, .lpr-po-notify__table td { vertical-align:top; }
+                                .lpr-po-notify__table .lpr-col-select { width:70px; }
+                                .lpr-po-notify__email { font-weight:600; color:#0f172a; }
+                                .lpr-po-notify__missing { color:#dc2626; font-weight:600; }
+                                .lpr-po-notify__items { display:flex; flex-wrap:wrap; gap:6px; }
+                                .lpr-po-notify__pill { background:#eff6ff; color:#1d4ed8; border-radius:999px; padding:2px 8px; font-size:12px; font-weight:600; }
+                                .lpr-po-notify__actions { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+                                .lpr-po-notify__status { font-size:13px; color:#475569; }
+                                .lpr-po-notify__empty { padding:14px; border:1px dashed #cbd5f5; border-radius:8px; background:#f8fafc; color:#475569; }
+                                .lpr-po-notify__overlay { position:fixed; inset:0; background:rgba(15,23,42,0.45); z-index:100000; display:flex; align-items:center; justify-content:center; padding:20px; }
+                                .lpr-po-notify__modal { background:#fff; max-width:860px; width:100%; border-radius:12px; box-shadow:0 20px 60px rgba(15,23,42,0.25); overflow:hidden; display:flex; flex-direction:column; }
+                                .lpr-po-notify__modal header { padding:14px 16px; border-bottom:1px solid #e2e8f0; display:flex; justify-content:space-between; gap:12px; align-items:flex-start; }
+                                .lpr-po-notify__modal h3 { margin:0 0 4px; font-size:16px; }
+                                .lpr-po-notify__modal .lpr-po-notify__meta { font-size:12px; color:#64748b; }
+                                .lpr-po-notify__modal .lpr-po-notify__body { max-height:70vh; overflow:auto; padding:16px; background:#f8fafc; }
+                                .lpr-po-notify__modal .lpr-po-notify__close { text-decoration:none; font-size:22px; line-height:1; color:#94a3b8; }
+                                @media (max-width: 782px) {
+                                        .lpr-po-notify__intro { padding:12px; }
+                                        .lpr-po-notify__summary { width:100%; }
+                                        .lpr-po-notify__count, .lpr-po-notify__selected { flex:1 1 140px; }
+                                        .lpr-po-notify__table-wrap { max-height:none; }
+                                }
+                        </style>
+                        <script>
+                                (function($){
+                                        const root = $('.lpr-po-notify');
+                                        if(!root.length){ return; }
+                                        const $selectAll = $('#lpr-po-notify-select-all');
+                                        const $status = $('#lpr-po-notify-status');
+
+                                        function updateSelectedCount(){
+                                                const selected = $('.lpr-po-notify-order:checked').length;
+                                                $('#lpr-po-notify-selected-count').text(selected);
+                                                return selected;
+                                        }
+
+                                        function selectedOrders(){
+                                                return $('.lpr-po-notify-order:checked').map(function(){
+                                                        return {
+                                                                id: $(this).val(),
+                                                                label: $(this).data('orderLabel') || '#' + $(this).val()
+                                                        };
+                                                }).get();
+                                        }
+
+                                        updateSelectedCount();
+                                        (function syncSelectAll(){
+                                                const enabled = $('.lpr-po-notify-order:not(:disabled)').length;
+                                                const selected = $('.lpr-po-notify-order:not(:disabled):checked').length;
+                                                $selectAll.prop('checked', enabled > 0 && enabled === selected);
+                                        })();
+
+                                        $selectAll.on('change', function(){
+                                                const checked = $(this).is(':checked');
+                                                $('.lpr-po-notify-order:not(:disabled)').prop('checked', checked);
+                                                updateSelectedCount();
+                                        });
+
+                                        $(document).on('change', '.lpr-po-notify-order', function(){
+                                                const enabled = $('.lpr-po-notify-order:not(:disabled)').length;
+                                                const selected = $('.lpr-po-notify-order:not(:disabled):checked').length;
+                                                $selectAll.prop('checked', enabled > 0 && enabled === selected);
+                                                updateSelectedCount();
+                                        });
+
+                                        function ensureMessage(){
+                                                const message = ($('#lpr-po-notify-message').val() || '').trim();
+                                                if(!message){
+                                                        window.alert('<?php echo esc_js( __( 'Please enter a message before sending.', 'lpr-backorder-allocator' ) ); ?>');
+                                                        return '';
+                                                }
+                                                return message;
+                                        }
+
+                                        function showPreviewModal(html, subject, recipients){
+                                                const list = recipients.map(function(row){ return row.label; }).join(', ');
+                                                const countLabel = recipients.length + ' <?php echo esc_js( __( 'recipients', 'lpr-backorder-allocator' ) ); ?>';
+                                                const previewHtml = '<div class="lpr-po-notify__overlay"><div class="lpr-po-notify__modal"><header><div><h3>'+subject+'</h3><div class="lpr-po-notify__meta">'+countLabel+(list ? ' · '+list : '')+'</div></div><a href="#" class="lpr-po-notify__close">&times;</a></header><div class="lpr-po-notify__body">'+html+'</div></div></div>';
+                                                $('#lpr-po-notify-preview-modal').html(previewHtml).show();
+                                        }
+
+                                        $(document).on('click', '.lpr-po-notify-preview', function(e){
+                                                e.preventDefault();
+                                                const message = ensureMessage();
+                                                if(!message){ return; }
+
+                                                const queue = selectedOrders();
+                                                if(queue.length === 0){
+                                                        window.alert('<?php echo esc_js( __( 'Select at least one customer to preview the email.', 'lpr-backorder-allocator' ) ); ?>');
+                                                        return;
+                                                }
+
+                                                const orderId = queue[0].id;
+                                                const poId = root.data('poId');
+                                                const nonce = root.data('previewNonce');
+
+                                                $.post(ajaxurl, { action: 'lpr_po_notify_preview', _wpnonce: nonce, order_id: orderId, po_id: poId, message: message }, function(resp){
+                                                        if(resp && resp.success && resp.data){
+                                                                showPreviewModal(resp.data.html || '', resp.data.subject || '<?php echo esc_js( __( 'Email preview', 'lpr-backorder-allocator' ) ); ?>', queue);
+                                                        }else{
+                                                                const msg = resp && resp.data && resp.data.message ? resp.data.message : '<?php echo esc_js( __( 'Unable to load the preview.', 'lpr-backorder-allocator' ) ); ?>';
+                                                                window.alert(msg);
+                                                        }
+                                                }).fail(function(){
+                                                        window.alert('<?php echo esc_js( __( 'Unable to load the preview.', 'lpr-backorder-allocator' ) ); ?>');
+                                                });
+                                        });
+
+                                        $(document).on('click', '.lpr-po-notify-send', function(e){
+                                                e.preventDefault();
+                                                const message = ensureMessage();
+                                                if(!message){ return; }
+
+                                                const queue = selectedOrders();
+                                                if(queue.length === 0){
+                                                        window.alert('<?php echo esc_js( __( 'Select at least one customer to email.', 'lpr-backorder-allocator' ) ); ?>');
+                                                        return;
+                                                }
+
+                                                const poId = root.data('poId');
+                                                const nonce = root.data('sendNonce');
+                                                const $btn = $(this);
+                                                $btn.prop('disabled', true);
+                                                $status.empty();
+
+                                                function sendNext(idx){
+                                                        if(idx >= queue.length){
+                                                                $status.append('<div><?php echo esc_js( __( 'Finished sending updates.', 'lpr-backorder-allocator' ) ); ?></div>');
+                                                                $btn.prop('disabled', false);
+                                                                return;
+                                                        }
+
+                                                        const current = queue[idx];
+                                                        $status.append('<div>'+current.label+': <?php echo esc_js( __( 'Sending...', 'lpr-backorder-allocator' ) ); ?></div>');
+
+                                                        $.post(ajaxurl, { action: 'lpr_po_notify_send', _wpnonce: nonce, order_id: current.id, po_id: poId, message: message }, function(resp){
+                                                                if(resp && resp.success){
+                                                                        const msg = resp.data && resp.data.message ? resp.data.message : '<?php echo esc_js( __( 'Email sent.', 'lpr-backorder-allocator' ) ); ?>';
+                                                                        $status.append('<div>'+current.label+': '+msg+'</div>');
+                                                                }else{
+                                                                        const err = resp && resp.data && resp.data.message ? resp.data.message : '<?php echo esc_js( __( 'Unable to send the update.', 'lpr-backorder-allocator' ) ); ?>';
+                                                                        $status.append('<div>'+current.label+': '+err+'</div>');
+                                                                }
+                                                        }).fail(function(){
+                                                                $status.append('<div>'+current.label+': <?php echo esc_js( __( 'Unable to send the update.', 'lpr-backorder-allocator' ) ); ?></div>');
+                                                        }).always(function(){
+                                                                setTimeout(function(){
+                                                                        sendNext(idx + 1);
+                                                                }, 2000);
+                                                        });
+                                                }
+
+                                                sendNext(0);
+                                        });
+
+                                        $(document).on('click', '.lpr-po-notify__close', function(e){
+                                                e.preventDefault();
+                                                $('#lpr-po-notify-preview-modal').empty().hide();
+                                        });
+                                })(jQuery);
+                        </script>
+                        <?php
+                }
+
+                protected static function collect_po_orders( int $po_id ): array {
+                        if ( $po_id <= 0 || ! function_exists( __NAMESPACE__ . '\\lpr_allocator_get_po_allocation_index' ) ) {
+                                return array();
+                        }
+
+                        $index = lpr_allocator_get_po_allocation_index( $po_id );
+                        $ids   = array();
+                        foreach ( $index as $row ) {
+                                if ( ! empty( $row['order_id'] ) ) {
+                                        $ids[] = (int) $row['order_id'];
+                                }
+                        }
+                        $ids = array_values( array_unique( array_filter( $ids ) ) );
+                        sort( $ids );
+
+                        $orders = array();
+                        foreach ( $ids as $order_id ) {
+                                $order = wc_get_order( $order_id );
+                                if ( ! $order instanceof \WC_Order ) {
+                                        continue;
+                                }
+
+                                $order_number = method_exists( $order, 'get_order_number' ) ? (string) $order->get_order_number() : (string) $order_id;
+                                $customer     = trim( $order->get_formatted_billing_full_name() ?: '' );
+                                if ( '' === $customer ) {
+                                        $customer = trim( $order->get_formatted_shipping_full_name() ?: '' );
+                                }
+                                if ( '' === $customer ) {
+                                        $customer = __( 'Guest', 'lpr-backorder-allocator' );
+                                }
+                                $email = sanitize_email( (string) $order->get_billing_email() );
+
+                                $items = self::collect_order_items_for_po( $order, $po_id );
+                                $pill  = self::format_items_pills( $items );
+
+                                $orders[] = array(
+                                        'order_id'   => $order_id,
+                                        'label'      => '#' . $order_number,
+                                        'customer'   => $customer,
+                                        'email'      => $email,
+                                        'items'      => $items,
+                                        'items_html' => $pill,
+                                );
+                        }
+
+                        return $orders;
+                }
+
+                protected static function collect_order_items_for_po( \WC_Order $order, int $po_id ): array {
+                        $items = array();
+                        foreach ( $order->get_items( 'line_item' ) as $item ) {
+                                if ( ! $item instanceof \WC_Order_Item_Product ) {
+                                        continue;
+                                }
+                                $allocs = $item->get_meta( defined( __NAMESPACE__ . '\\ORDER_ITEM_META_ALLOCATIONS' ) ? ORDER_ITEM_META_ALLOCATIONS : 'lpr_allocations', true );
+                                if ( ! is_array( $allocs ) ) {
+                                        continue;
+                                }
+                                $allocated_qty = 0;
+                                foreach ( $allocs as $alloc_row ) {
+                                        $row_po_id  = isset( $alloc_row['po_id'] ) ? (int) $alloc_row['po_id'] : 0;
+                                        $row_status = isset( $alloc_row['status'] ) ? sanitize_key( (string) $alloc_row['status'] ) : 'reserved';
+                                        $row_qty    = isset( $alloc_row['qty_allocated'] ) ? (int) $alloc_row['qty_allocated'] : 0;
+                                        if ( $row_po_id === $po_id && 'released' !== $row_status && $row_qty > 0 ) {
+                                                $allocated_qty += $row_qty;
+                                        }
+                                }
+                                if ( $allocated_qty > 0 ) {
+                                        $items[] = array(
+                                                'name' => $item->get_name(),
+                                                'qty'  => $allocated_qty,
+                                        );
+                                }
+                        }
+                        return $items;
+                }
+
+                protected static function format_items_pills( array $items ): string {
+                        if ( empty( $items ) ) {
+                                return '<span class="lpr-po-notify__missing">' . esc_html__( 'No linked items', 'lpr-backorder-allocator' ) . '</span>';
+                        }
+                        $html = '<div class="lpr-po-notify__items">';
+                        foreach ( $items as $row ) {
+                                $name = isset( $row['name'] ) ? (string) $row['name'] : '';
+                                $qty  = isset( $row['qty'] ) ? (int) $row['qty'] : 0;
+                                $html .= '<span class="lpr-po-notify__pill">' . esc_html( $name ) . ' ×' . esc_html( (string) $qty ) . '</span>';
+                        }
+                        $html .= '</div>';
+                        return $html;
+                }
+
+                protected static function sanitize_message( string $message ): string {
+                        $message = wp_kses_post( $message );
+                        $message = trim( $message );
+                        if ( '' === $message ) {
+                                return '';
+                        }
+                        $message = nl2br( $message );
+                        return $message;
+                }
+
+                protected static function build_tokens_for_order( \WC_Order $order ): array {
+                        $order_number = method_exists( $order, 'get_order_number' ) ? (string) $order->get_order_number() : (string) $order->get_id();
+                        $customer     = trim( $order->get_formatted_billing_full_name() ?: '' );
+                        if ( '' === $customer ) {
+                                $customer = trim( $order->get_formatted_shipping_full_name() ?: '' );
+                        }
+                        if ( '' === $customer ) {
+                                $customer = (string) $order->get_billing_email();
+                        }
+                        if ( '' === $customer ) {
+                                $customer = __( 'Customer', 'lpr-backorder-allocator' );
+                        }
+                        return array(
+                                '%order_number%'  => $order_number,
+                                '%customer_name%' => $customer,
+                        );
+                }
+
+                protected static function build_email_content( \WC_Order $order, string $message, array $overview_rows ): array {
+                        if ( ! class_exists( __NAMESPACE__ . '\\ETA' ) ) {
+                                return array();
+                        }
+
+                        $settings = class_exists( __NAMESPACE__ . '\\Settings' ) ? Settings::get() : array();
+                        $message  = self::sanitize_message( $message );
+                        if ( '' === $message ) {
+                                return array();
+                        }
+
+                        $settings['eta_email_intro'] = $message;
+                        $tokens = self::build_tokens_for_order( $order );
+
+                        return ETA::build_eta_email_content( array(), $settings, $tokens, $overview_rows, $order );
+                }
+
+                protected static function validate_order_for_po( int $order_id, int $po_id ): bool {
+                        $orders = self::collect_po_orders( $po_id );
+                        foreach ( $orders as $row ) {
+                                if ( (int) $row['order_id'] === $order_id ) {
+                                        return true;
+                                }
+                        }
+                        return false;
+                }
+
+                public static function ajax_preview(): void {
+                        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                                wp_send_json_error( array( 'message' => __( 'Insufficient permissions.', 'lpr-backorder-allocator' ) ) );
+                        }
+
+                        check_ajax_referer( 'lpr_po_notify_preview' );
+
+                        $order_id = isset( $_POST['order_id'] ) ? absint( $_POST['order_id'] ) : 0; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $po_id    = isset( $_POST['po_id'] ) ? absint( $_POST['po_id'] ) : 0; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $message  = isset( $_POST['message'] ) ? (string) wp_unslash( $_POST['message'] ) : '';
+
+                        if ( $order_id <= 0 || $po_id <= 0 ) {
+                                wp_send_json_error( array( 'message' => __( 'Invalid order or PO.', 'lpr-backorder-allocator' ) ) );
+                        }
+
+                        if ( ! self::validate_order_for_po( $order_id, $po_id ) ) {
+                                wp_send_json_error( array( 'message' => __( 'Order is not linked to this PO.', 'lpr-backorder-allocator' ) ) );
+                        }
+
+                        $order = wc_get_order( $order_id );
+                        if ( ! $order instanceof \WC_Order ) {
+                                wp_send_json_error( array( 'message' => __( 'Order not found.', 'lpr-backorder-allocator' ) ) );
+                        }
+
+                        $overview_rows = class_exists( __NAMESPACE__ . '\\Order_Allocations_Metabox' ) ? Order_Allocations_Metabox::build_eta_email_rows( $order ) : array();
+                        if ( empty( $overview_rows ) ) {
+                                wp_send_json_error( array( 'message' => __( 'No backordered items found for this order.', 'lpr-backorder-allocator' ) ) );
+                        }
+
+                        $compiled = self::build_email_content( $order, $message, $overview_rows );
+                        if ( empty( $compiled['subject'] ) || empty( $compiled['body'] ) ) {
+                                wp_send_json_error( array( 'message' => __( 'Unable to build email preview.', 'lpr-backorder-allocator' ) ) );
+                        }
+
+                        wp_send_json_success(
+                                array(
+                                        'subject' => (string) $compiled['subject'],
+                                        'html'    => (string) $compiled['body'],
+                                )
+                        );
+                }
+
+                public static function ajax_send(): void {
+                        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                                wp_send_json_error( array( 'message' => __( 'Insufficient permissions.', 'lpr-backorder-allocator' ) ) );
+                        }
+
+                        check_ajax_referer( 'lpr_po_notify_send' );
+
+                        $order_id = isset( $_POST['order_id'] ) ? absint( $_POST['order_id'] ) : 0; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $po_id    = isset( $_POST['po_id'] ) ? absint( $_POST['po_id'] ) : 0; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $message  = isset( $_POST['message'] ) ? (string) wp_unslash( $_POST['message'] ) : '';
+
+                        if ( $order_id <= 0 || $po_id <= 0 ) {
+                                wp_send_json_error( array( 'message' => __( 'Invalid order or PO.', 'lpr-backorder-allocator' ) ) );
+                        }
+
+                        if ( ! self::validate_order_for_po( $order_id, $po_id ) ) {
+                                wp_send_json_error( array( 'message' => __( 'Order is not linked to this PO.', 'lpr-backorder-allocator' ) ) );
+                        }
+
+                        $order = wc_get_order( $order_id );
+                        if ( ! $order instanceof \WC_Order ) {
+                                wp_send_json_error( array( 'message' => __( 'Order not found.', 'lpr-backorder-allocator' ) ) );
+                        }
+
+                        if ( class_exists( __NAMESPACE__ . '\\ETA' ) ) {
+                                ETA::update_line_eta( $order_id );
+                                $order = wc_get_order( $order_id );
+                        }
+
+                        $overview_rows = class_exists( __NAMESPACE__ . '\\Order_Allocations_Metabox' ) ? Order_Allocations_Metabox::build_eta_email_rows( $order ) : array();
+                        if ( empty( $overview_rows ) ) {
+                                wp_send_json_error( array( 'message' => __( 'No backordered items found for this order.', 'lpr-backorder-allocator' ) ) );
+                        }
+
+                        $compiled = self::build_email_content( $order, $message, $overview_rows );
+                        $subject  = $compiled['subject'] ?? '';
+                        $body     = $compiled['body'] ?? '';
+
+                        if ( '' === trim( (string) $subject ) || '' === trim( (string) $body ) ) {
+                                wp_send_json_error( array( 'message' => __( 'Unable to build the email.', 'lpr-backorder-allocator' ) ) );
+                        }
+
+                        $email = $order->get_billing_email();
+                        if ( ! $email ) {
+                                wp_send_json_error( array( 'message' => __( 'Customer email is missing.', 'lpr-backorder-allocator' ) ) );
+                        }
+
+                        if ( function_exists( 'wc_mail' ) ) {
+                                wc_mail( $email, $subject, $body, array( 'Content-Type: text/html; charset=UTF-8' ) );
+                        } else {
+                                wp_mail( $email, $subject, $body, array( 'Content-Type: text/html; charset=UTF-8' ) );
+                        }
+
+                        $po_number = (string) get_post_meta( $po_id, PO_META_PO_NUMBER, true );
+                        $po_label  = $po_number ? '#' . $po_number : '#' . $po_id;
+                        $message_plain = wp_strip_all_tags( self::sanitize_message( $message ) );
+                        $order->add_order_note(
+                                sprintf(
+                                        /* translators: 1: PO label, 2: email, 3: message */
+                                        __( 'PO update email sent (%1$s) to %2$s. Message: %3$s', 'lpr-backorder-allocator' ),
+                                        $po_label,
+                                        $email,
+                                        $message_plain
+                                ),
+                                false,
+                                true
+                        );
+                        $order->save();
+
+                        wp_send_json_success(
+                                array(
+                                        'message' => __( 'Update sent.', 'lpr-backorder-allocator' ),
+                                )
+                        );
+                }
+
+                protected static function is_po_screen(): bool {
+                        $screen = function_exists( 'get_current_screen' ) ? get_current_screen() : null;
+                        if ( ! $screen || ! isset( $screen->post_type ) ) {
+                                return false;
+                        }
+                        $post_type = defined( __NAMESPACE__ . '\\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po';
+                        return $screen->post_type === $post_type;
+                }
+        }
+        Supplier_PO_Customer_Notifier::init();
+}
+
 /**
  * Constants for Supplier PO CPT and meta keys (guarded).
  */
