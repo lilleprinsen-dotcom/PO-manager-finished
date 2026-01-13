@@ -1908,7 +1908,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                  * @param \WC_Product $product  Product instance.
                  */
                 public static function append_incoming_notice( string $text, $product ): string {
-                        if ( ! is_product() ) {
+                        if ( ! self::is_product_context() ) {
                                 return $text;
                         }
 
@@ -1929,7 +1929,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                  * @return array
                  */
                 public static function inject_notice_into_availability( array $availability, $product ): array {
-                        if ( ! is_product() ) {
+                        if ( ! self::is_product_context() ) {
                                 return $availability;
                         }
 
@@ -1959,6 +1959,17 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                         }
 
                         echo '<div class="lpr-incoming-single-product" style="margin-bottom:10px;">' . $notice . '</div>';
+                }
+
+                /**
+                 * Allow notices on single product pages and AJAX-rendered bundle parts.
+                 */
+                protected static function is_product_context(): bool {
+                        if ( is_product() ) {
+                                return true;
+                        }
+
+                        return wp_doing_ajax();
                 }
 
                 /**
