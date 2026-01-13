@@ -1969,7 +1969,11 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                                 return true;
                         }
 
-                        return wp_doing_ajax();
+                        if ( wp_doing_ajax() ) {
+                                return true;
+                        }
+
+                        return defined( 'REST_REQUEST' ) && REST_REQUEST;
                 }
 
                 /**
