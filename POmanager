@@ -1876,6 +1876,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                                 add_filter( 'woocommerce_get_availability', array( __CLASS__, 'inject_notice_into_availability' ), 25, 2 );
                         }
 
+                        if ( ! has_filter( 'woocommerce_get_stock_html', array( __CLASS__, 'append_notice_to_stock_html' ) ) ) {
+                                add_filter( 'woocommerce_get_stock_html', array( __CLASS__, 'append_notice_to_stock_html' ), 25, 2 );
+                        }
+
                         // Surface a dedicated notice block directly below the short description on single product pages (tested with Flatsome).
                         if ( ! has_action( 'woocommerce_single_product_summary', array( __CLASS__, 'output_above_price' ) ) ) {
                                 add_action( 'woocommerce_single_product_summary', array( __CLASS__, 'output_above_price' ), 21 );
@@ -1908,7 +1912,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                  * @param \WC_Product $product  Product instance.
                  */
                 public static function append_incoming_notice( string $text, $product ): string {
-                        if ( ! is_product() ) {
+                        if ( ! self::is_product_context() ) {
                                 return $text;
                         }
 
@@ -1929,7 +1933,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                  * @return array
                  */
                 public static function inject_notice_into_availability( array $availability, $product ): array {
-                        if ( ! is_product() ) {
+                        if ( ! self::is_product_context() ) {
                                 return $availability;
                         }
 
@@ -1959,6 +1963,38 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                         }
 
                         echo '<div class="lpr-incoming-single-product" style="margin-bottom:10px;">' . $notice . '</div>';
+                }
+
+                /**
+                 * Append incoming PO availability to stock HTML blocks.
+                 *
+                 * @param string      $html    Existing stock HTML.
+                 * @param \WC_Product $product Product instance.
+                 * @return string
+                 */
+                public static function append_notice_to_stock_html( string $html, $product ): string {
+                        if ( ! self::is_product_context() ) {
+                                return $html;
+                        }
+
+                        $notice = self::notice_for_product( $product, 'frontend_notice_template', 'frontend_notice_emoji', 'frontend_notice_template' );
+
+                        if ( '' === $notice ) {
+                                return $html;
+                        }
+
+                        return $html ? trim( $html . '<br />' . $notice ) : $notice;
+                }
+
+                /**
+                 * Allow notices on single product pages and AJAX-rendered bundle parts.
+                 */
+                protected static function is_product_context(): bool {
+                        if ( is_product() ) {
+                                return true;
+                        }
+
+                        return wp_doing_ajax();
                 }
 
                 /**
