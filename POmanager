@@ -3479,6 +3479,75 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_get_po_allocation_index'
         }
 }
 
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_extract_po_line_eta_overrides' ) ) {
+        /**
+         * Extract normalized line-level ETA overrides for comparisons.
+         *
+         * @param mixed $lines Raw PO lines meta.
+         * @return array
+         */
+        function lpr_allocator_extract_po_line_eta_overrides( $lines ): array {
+                $rows = array();
+                if ( ! is_array( $lines ) ) {
+                        return $rows;
+                }
+
+                foreach ( $lines as $line ) {
+                        if ( ! is_array( $line ) ) {
+                                continue;
+                        }
+                        $vid = isset( $line['variation_id'] ) ? absint( $line['variation_id'] ) : 0;
+                        $pid = isset( $line['product_id'] ) ? absint( $line['product_id'] ) : 0;
+                        $tid = $vid > 0 ? $vid : $pid;
+                        if ( $tid <= 0 ) {
+                                continue;
+                        }
+                        $eta_override = isset( $line['eta_override'] ) ? lpr_allocator_sanitize_ymd( (string) $line['eta_override'] ) : '';
+                        $rows[]       = array(
+                                'target' => $tid,
+                                'eta'    => $eta_override,
+                        );
+                }
+
+                usort(
+                        $rows,
+                        static function ( array $a, array $b ): int {
+                                if ( $a['target'] === $b['target'] ) {
+                                        return $a['eta'] <=> $b['eta'];
+                                }
+                                return $a['target'] <=> $b['target'];
+                        }
+                );
+
+                return $rows;
+        }
+}
+
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_update_order_line_etas_for_po' ) ) {
+        /**
+         * Recompute order line ETAs for orders linked to a PO.
+         */
+        function lpr_allocator_update_order_line_etas_for_po( int $po_id ): void {
+                if ( $po_id <= 0 || ! class_exists( __NAMESPACE__ . '\ETA' ) || ! function_exists( __NAMESPACE__ . '\lpr_allocator_get_po_allocation_index' ) ) {
+                        return;
+                }
+
+                $index     = lpr_allocator_get_po_allocation_index( $po_id );
+                $order_ids = array();
+
+                foreach ( $index as $row ) {
+                        if ( ! empty( $row['order_id'] ) ) {
+                                $order_ids[] = (int) $row['order_id'];
+                        }
+                }
+
+                $order_ids = array_values( array_unique( array_filter( $order_ids ) ) );
+                foreach ( $order_ids as $order_id ) {
+                        ETA::update_line_eta( (int) $order_id );
+                }
+        }
+}
+
 if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_rebuild_po_alloc_index' ) ) {
         /**
          * Rebuild the allocation index for a PO by scanning order item meta for allocations pointing to it.
@@ -4174,6 +4243,12 @@ table.appendChild(tr);
 				return;
 			}
 
+                        $prev_eta      = lpr_allocator_sanitize_ymd( (string) get_post_meta( $post_id, PO_META_ETA_DATE, true ) );
+                        $prev_lines    = get_post_meta( $post_id, PO_META_LINES, true );
+                        $prev_line_map = lpr_allocator_extract_po_line_eta_overrides( $prev_lines );
+                        $eta_changed   = false;
+                        $line_changed  = false;
+
 			// Header save.
 			if ( isset( $_POST['lpr_po_header_nonce'] ) && wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['lpr_po_header_nonce'] ) ), 'lpr_po_header_action' ) ) {
                                 $supplier  = isset( $_POST['lpr_supplier_name'] ) ? sanitize_text_field( wp_unslash( $_POST['lpr_supplier_name'] ) ) : '';
@@ -4186,6 +4261,7 @@ table.appendChild(tr);
                                 update_post_meta( $post_id, PO_META_PO_NUMBER, $po_number );
                                 update_post_meta( $post_id, PO_META_ETA_DATE, $eta );
                                 update_post_meta( $post_id, PO_META_NOTE, $note );
+                                $eta_changed = $eta !== $prev_eta;
 
 				$allowed_status = array( PO_STATUS_OPEN, PO_STATUS_PARTIAL, PO_STATUS_CLOSED );
 				if ( in_array( $status, $allowed_status, true ) && $post->post_status !== $status ) {
@@ -4208,6 +4284,7 @@ table.appendChild(tr);
                                 $clean     = lpr_allocator_sanitize_po_lines_input( $raw_lines );
                                 $clean     = lpr_allocator_recalculate_po_lines_from_allocations( $post_id, $clean );
                                 update_post_meta( $post_id, PO_META_LINES, $clean );
+                                $line_changed = lpr_allocator_extract_po_line_eta_overrides( $clean ) !== $prev_line_map;
                         }
 
                         $po_number_for_log = (string) get_post_meta( $post_id, PO_META_PO_NUMBER, true );
@@ -4227,6 +4304,10 @@ table.appendChild(tr);
                                                 'reason'    => $reason,
                                         )
                                 );
+                        }
+
+                        if ( ( $eta_changed || $line_changed ) && function_exists( __NAMESPACE__ . '\lpr_allocator_update_order_line_etas_for_po' ) ) {
+                                lpr_allocator_update_order_line_etas_for_po( $post_id );
                         }
                 }
 
@@ -13574,6 +13655,10 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
                         continue;
                     }
 
+                    $prev_eta      = lpr_allocator_sanitize_ymd( (string) get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_ETA_DATE' ) ? PO_META_ETA_DATE : '_lpr_eta_date', true ) );
+                    $prev_lines    = get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', true );
+                    $prev_line_map = lpr_allocator_extract_po_line_eta_overrides( $prev_lines );
+
                     $header = self::sanitize_header( (array) $payload, $post->post_status );
                     update_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_SUPPLIER_NAME' ) ? PO_META_SUPPLIER_NAME : '_lpr_supplier_name', $header['supplier'] );
                     update_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_PO_NUMBER' ) ? PO_META_PO_NUMBER : '_lpr_po_number', $header['po_number'] );
@@ -13598,6 +13683,12 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
                     $lines     = lpr_allocator_sanitize_po_lines_input( $lines_raw );
                     $lines     = lpr_allocator_recalculate_po_lines_from_allocations( $po_id, $lines );
                     update_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', $lines );
+
+                    $eta_changed  = $header['eta'] !== $prev_eta;
+                    $line_changed = lpr_allocator_extract_po_line_eta_overrides( $lines ) !== $prev_line_map;
+                    if ( ( $eta_changed || $line_changed ) && function_exists( __NAMESPACE__ . '\lpr_allocator_update_order_line_etas_for_po' ) ) {
+                        lpr_allocator_update_order_line_etas_for_po( $po_id );
+                    }
                     $updated++;
                 }
             }
