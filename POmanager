@@ -14060,6 +14060,642 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
 }
 
 /**
+ * Admin page: import supplier POs from CSV/XLSX with preview.
+ */
+if ( ! class_exists( __NAMESPACE__ . '\PO_Import_Page' ) ) {
+    class PO_Import_Page {
+        protected const PREVIEW_TRANSIENT = 'lpr_po_import_preview_';
+
+        public static function init(): void {
+            add_action( 'admin_menu', array( __CLASS__, 'register_page' ) );
+            add_action( 'admin_post_lpr_po_import_template', array( __CLASS__, 'download_template' ) );
+        }
+
+        public static function register_page(): void {
+            add_submenu_page(
+                ADMIN_MENU_SLUG,
+                __( 'Import POs', 'lpr-backorder-allocator' ),
+                __( 'Import POs', 'lpr-backorder-allocator' ),
+                'manage_woocommerce',
+                'lpr-po-import',
+                array( __CLASS__, 'render' ),
+                5
+            );
+        }
+
+        protected static function allowed_statuses(): array {
+            return array( PO_STATUS_OPEN, PO_STATUS_PARTIAL, PO_STATUS_CLOSED );
+        }
+
+        protected static function normalize_header( string $header ): string {
+            $header = strtolower( trim( $header ) );
+            $header = preg_replace( '/[^a-z0-9]+/', '_', $header );
+            $header = trim( (string) $header, '_' );
+            return $header;
+        }
+
+        protected static function map_headers( array $headers ): array {
+            $map = array();
+
+            $synonyms = array(
+                'po_number'       => array( 'po_number', 'po_no', 'po', 'purchase_order', 'purchase_order_number' ),
+                'po_group'        => array( 'po_group', 'po_ref', 'po_reference' ),
+                'supplier'        => array( 'supplier', 'supplier_name', 'vendor', 'vendor_name' ),
+                'po_eta'          => array( 'po_eta', 'po_eta_date', 'eta', 'po_eta_ymd' ),
+                'po_status'       => array( 'po_status', 'status' ),
+                'line_product_id' => array( 'line_product_id', 'product_id', 'product' ),
+                'line_sku'        => array( 'line_sku', 'sku', 'product_sku' ),
+                'line_qty'        => array( 'line_qty', 'qty', 'quantity', 'ordered_qty' ),
+                'line_eta'        => array( 'line_eta', 'eta_line', 'line_eta_date' ),
+                'line_notes'      => array( 'line_notes', 'line_note', 'notes', 'note' ),
+            );
+
+            foreach ( $headers as $index => $header ) {
+                $normalized = self::normalize_header( (string) $header );
+                if ( '' === $normalized ) {
+                    continue;
+                }
+
+                foreach ( $synonyms as $target => $options ) {
+                    if ( in_array( $normalized, $options, true ) ) {
+                        $map[ $index ] = $target;
+                        break;
+                    }
+                }
+            }
+
+            return $map;
+        }
+
+        protected static function parse_csv_rows( string $path ): array {
+            $rows   = array();
+            $handle = fopen( $path, 'r' );
+            if ( false === $handle ) {
+                return $rows;
+            }
+
+            while ( ( $data = fgetcsv( $handle ) ) !== false ) {
+                if ( ! empty( $data[0] ) ) {
+                    $data[0] = preg_replace( '/^\xEF\xBB\xBF/', '', (string) $data[0] );
+                }
+                $rows[] = $data;
+            }
+            fclose( $handle );
+
+            return $rows;
+        }
+
+        protected static function column_letter_to_index( string $column ): int {
+            $column = strtoupper( $column );
+            $length = strlen( $column );
+            $index  = 0;
+
+            for ( $i = 0; $i < $length; $i++ ) {
+                $index = $index * 26 + ( ord( $column[ $i ] ) - 64 );
+            }
+
+            return $index - 1;
+        }
+
+        protected static function parse_xlsx_rows( string $path ): array {
+            if ( ! class_exists( 'ZipArchive' ) ) {
+                return array();
+            }
+
+            $zip = new \ZipArchive();
+            if ( true !== $zip->open( $path ) ) {
+                return array();
+            }
+
+            $shared_strings = array();
+            $shared_xml     = $zip->getFromName( 'xl/sharedStrings.xml' );
+            if ( false !== $shared_xml ) {
+                $shared_doc = simplexml_load_string( $shared_xml );
+                if ( $shared_doc && isset( $shared_doc->si ) ) {
+                    foreach ( $shared_doc->si as $item ) {
+                        $text = '';
+                        if ( isset( $item->t ) ) {
+                            $text = (string) $item->t;
+                        } elseif ( isset( $item->r ) ) {
+                            foreach ( $item->r as $run ) {
+                                $text .= (string) $run->t;
+                            }
+                        }
+                        $shared_strings[] = $text;
+                    }
+                }
+            }
+
+            $sheet_xml = $zip->getFromName( 'xl/worksheets/sheet1.xml' );
+            if ( false === $sheet_xml ) {
+                for ( $i = 0; $i < $zip->numFiles; $i++ ) {
+                    $name = $zip->getNameIndex( $i );
+                    if ( 0 === strpos( $name, 'xl/worksheets/' ) && substr( $name, -4 ) === '.xml' ) {
+                        $sheet_xml = $zip->getFromName( $name );
+                        break;
+                    }
+                }
+            }
+            $zip->close();
+
+            if ( false === $sheet_xml ) {
+                return array();
+            }
+
+            $doc = simplexml_load_string( $sheet_xml );
+            if ( ! $doc || ! isset( $doc->sheetData ) ) {
+                return array();
+            }
+
+            $rows = array();
+
+            foreach ( $doc->sheetData->row as $row ) {
+                $cells = array();
+                foreach ( $row->c as $cell ) {
+                    $ref = (string) $cell['r'];
+                    if ( '' === $ref ) {
+                        continue;
+                    }
+                    $column = preg_replace( '/[^A-Z]/', '', strtoupper( $ref ) );
+                    $index  = self::column_letter_to_index( $column );
+
+                    $value = '';
+                    if ( isset( $cell->v ) ) {
+                        $value = (string) $cell->v;
+                        if ( isset( $cell['t'] ) && 's' === (string) $cell['t'] ) {
+                            $value = $shared_strings[ (int) $value ] ?? '';
+                        }
+                    } elseif ( isset( $cell->is ) && isset( $cell->is->t ) ) {
+                        $value = (string) $cell->is->t;
+                    }
+
+                    $cells[ $index ] = $value;
+                }
+
+                if ( ! empty( $cells ) ) {
+                    ksort( $cells );
+                    $row_values = array();
+                    $max_index  = max( array_keys( $cells ) );
+                    for ( $i = 0; $i <= $max_index; $i++ ) {
+                        $row_values[ $i ] = isset( $cells[ $i ] ) ? (string) $cells[ $i ] : '';
+                    }
+                    $rows[] = $row_values;
+                }
+            }
+
+            return $rows;
+        }
+
+        protected static function parse_file_rows( array $file, array &$errors ): array {
+            if ( empty( $file['tmp_name'] ) ) {
+                $errors[] = __( 'Please upload a CSV or XLSX file.', 'lpr-backorder-allocator' );
+                return array();
+            }
+
+            if ( ! empty( $file['error'] ) ) {
+                $errors[] = __( 'Upload failed. Please try again.', 'lpr-backorder-allocator' );
+                return array();
+            }
+
+            $extension = strtolower( pathinfo( $file['name'] ?? '', PATHINFO_EXTENSION ) );
+            if ( 'csv' === $extension ) {
+                return self::parse_csv_rows( $file['tmp_name'] );
+            }
+            if ( 'xlsx' === $extension ) {
+                return self::parse_xlsx_rows( $file['tmp_name'] );
+            }
+
+            $errors[] = __( 'Unsupported file type. Please upload a CSV or XLSX file.', 'lpr-backorder-allocator' );
+            return array();
+        }
+
+        protected static function parse_rows( array $rows ): array {
+            $result = array(
+                'pos'    => array(),
+                'errors' => array(),
+            );
+
+            if ( empty( $rows ) ) {
+                $result['errors'][] = __( 'No rows found in the file.', 'lpr-backorder-allocator' );
+                return $result;
+            }
+
+            $headers = array_shift( $rows );
+            $map     = self::map_headers( $headers );
+
+            if ( empty( $map ) ) {
+                $result['errors'][] = __( 'Header row is missing required columns. Please use the provided template.', 'lpr-backorder-allocator' );
+                return $result;
+            }
+
+            $row_index = 1;
+            foreach ( $rows as $row ) {
+                $row_index++;
+                if ( ! is_array( $row ) ) {
+                    continue;
+                }
+
+                $is_empty = true;
+                foreach ( $row as $value ) {
+                    if ( '' !== trim( (string) $value ) ) {
+                        $is_empty = false;
+                        break;
+                    }
+                }
+                if ( $is_empty ) {
+                    continue;
+                }
+
+                $data = array();
+                foreach ( $map as $index => $field ) {
+                    $data[ $field ] = isset( $row[ $index ] ) ? (string) $row[ $index ] : '';
+                }
+
+                $po_number = sanitize_text_field( $data['po_number'] ?? '' );
+                $po_group  = sanitize_text_field( $data['po_group'] ?? '' );
+                $po_key    = '' !== $po_number ? $po_number : $po_group;
+
+                if ( '' === $po_key ) {
+                    $result['errors'][] = sprintf(
+                        __( 'Row %d: missing PO number or PO group.', 'lpr-backorder-allocator' ),
+                        $row_index
+                    );
+                    continue;
+                }
+
+                $po_eta_raw = isset( $data['po_eta'] ) ? (string) $data['po_eta'] : '';
+                $po_eta     = '' !== trim( $po_eta_raw ) ? lpr_allocator_sanitize_ymd( $po_eta_raw ) : '';
+                if ( '' !== trim( $po_eta_raw ) && '' === $po_eta ) {
+                    $result['errors'][] = sprintf(
+                        __( 'Row %d: invalid PO ETA date format.', 'lpr-backorder-allocator' ),
+                        $row_index
+                    );
+                }
+
+                $status = isset( $data['po_status'] ) ? sanitize_key( $data['po_status'] ) : PO_STATUS_OPEN;
+                if ( ! in_array( $status, self::allowed_statuses(), true ) ) {
+                    $status = PO_STATUS_OPEN;
+                }
+
+                $product_id = absint( $data['line_product_id'] ?? 0 );
+                $sku        = sanitize_text_field( $data['line_sku'] ?? '' );
+                if ( $product_id <= 0 && '' !== $sku && function_exists( 'wc_get_product_id_by_sku' ) ) {
+                    $product_id = (int) wc_get_product_id_by_sku( $sku );
+                }
+
+                $qty_raw = $data['line_qty'] ?? '';
+                $qty     = max( 0, (int) $qty_raw );
+                if ( $qty <= 0 ) {
+                    $result['errors'][] = sprintf(
+                        __( 'Row %d: line quantity must be greater than zero.', 'lpr-backorder-allocator' ),
+                        $row_index
+                    );
+                    continue;
+                }
+
+                if ( $product_id <= 0 || ! lpr_allocator_product_exists( $product_id ) ) {
+                    $result['errors'][] = sprintf(
+                        __( 'Row %d: invalid product ID or SKU.', 'lpr-backorder-allocator' ),
+                        $row_index
+                    );
+                    continue;
+                }
+
+                $line_eta_raw = isset( $data['line_eta'] ) ? (string) $data['line_eta'] : '';
+                $line_eta     = '' !== trim( $line_eta_raw ) ? lpr_allocator_sanitize_ymd( $line_eta_raw ) : '';
+                if ( '' !== trim( $line_eta_raw ) && '' === $line_eta ) {
+                    $result['errors'][] = sprintf(
+                        __( 'Row %d: invalid line ETA date format.', 'lpr-backorder-allocator' ),
+                        $row_index
+                    );
+                }
+
+                $supplier = sanitize_text_field( $data['supplier'] ?? '' );
+                $title    = $po_number ? sprintf( __( 'PO #%s', 'lpr-backorder-allocator' ), $po_number ) : '';
+
+                if ( ! isset( $result['pos'][ $po_key ] ) ) {
+                    $result['pos'][ $po_key ] = array(
+                        'header' => array(
+                            'supplier'  => $supplier,
+                            'po_number' => $po_number,
+                            'eta'       => $po_eta,
+                            'status'    => $status,
+                            'title'     => $title,
+                        ),
+                        'lines'  => array(),
+                        'notes'  => array(),
+                    );
+                }
+
+                if ( '' === $result['pos'][ $po_key ]['header']['supplier'] ) {
+                    $result['pos'][ $po_key ]['header']['supplier'] = $supplier;
+                }
+                if ( '' === $result['pos'][ $po_key ]['header']['po_number'] ) {
+                    $result['pos'][ $po_key ]['header']['po_number'] = $po_number;
+                }
+                if ( '' === $result['pos'][ $po_key ]['header']['eta'] ) {
+                    $result['pos'][ $po_key ]['header']['eta'] = $po_eta;
+                }
+
+                $product = wc_get_product( $product_id );
+                $sku_val = $product instanceof \WC_Product ? $product->get_sku() : $sku;
+                $line    = array(
+                    'qty_ordered'   => $qty,
+                    'qty_allocated' => 0,
+                    'eta_override'  => $line_eta,
+                    'qty_received'  => 0,
+                );
+
+                if ( $product instanceof \WC_Product && $product->is_type( 'variation' ) ) {
+                    $line['variation_id'] = $product_id;
+                } else {
+                    $line['product_id'] = $product_id;
+                }
+
+                $result['pos'][ $po_key ]['lines'][] = array(
+                    'product_id'   => $product_id,
+                    'product_name' => $product instanceof \WC_Product ? $product->get_name() : '',
+                    'sku'          => $sku_val,
+                    'qty'          => $qty,
+                    'eta'          => $line_eta,
+                    'line'         => $line,
+                );
+
+                $note = sanitize_text_field( $data['line_notes'] ?? '' );
+                if ( '' !== $note ) {
+                    $result['pos'][ $po_key ]['notes'][] = $note;
+                }
+            }
+
+            return $result;
+        }
+
+        protected static function build_preview( array $parsed ): array {
+            $preview = array();
+            foreach ( $parsed['pos'] as $key => $po ) {
+                $lines = array();
+                foreach ( $po['lines'] as $row ) {
+                    $lines[] = $row;
+                }
+                $preview[ $key ] = array(
+                    'header' => $po['header'],
+                    'lines'  => $lines,
+                    'notes'  => $po['notes'],
+                );
+            }
+
+            return $preview;
+        }
+
+        protected static function store_preview( array $parsed ): string {
+            $user_id = get_current_user_id();
+            $key     = self::PREVIEW_TRANSIENT . $user_id . '_' . wp_generate_password( 6, false, false );
+            set_transient( $key, $parsed, HOUR_IN_SECONDS );
+            return $key;
+        }
+
+        protected static function load_preview( string $key ): ?array {
+            $data = get_transient( $key );
+            if ( ! is_array( $data ) ) {
+                return null;
+            }
+            return $data;
+        }
+
+        protected static function handle_import( array $parsed, array &$messages, array &$errors ): void {
+            $po_type = defined( __NAMESPACE__ . '\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po';
+            $created = 0;
+
+            foreach ( $parsed['pos'] as $po_key => $po ) {
+                $header = $po['header'];
+                $lines  = array();
+
+                foreach ( $po['lines'] as $row ) {
+                    if ( isset( $row['line'] ) && is_array( $row['line'] ) ) {
+                        $lines[] = $row['line'];
+                    }
+                }
+
+                $lines = lpr_allocator_sanitize_po_lines_input( $lines );
+                if ( empty( $lines ) ) {
+                    $errors[] = sprintf(
+                        __( 'PO %s has no valid lines and was skipped.', 'lpr-backorder-allocator' ),
+                        $po_key
+                    );
+                    continue;
+                }
+
+                $title = $header['title'] ?: sprintf( __( 'PO Import %s', 'lpr-backorder-allocator' ), wp_date( 'd-m-Y H:i' ) );
+                $post_id = wp_insert_post(
+                    array(
+                        'post_type'   => $po_type,
+                        'post_status' => $header['status'] ?? PO_STATUS_OPEN,
+                        'post_title'  => $title,
+                    ),
+                    true
+                );
+
+                if ( is_wp_error( $post_id ) ) {
+                    $errors[] = $post_id->get_error_message();
+                    continue;
+                }
+
+                $lines = lpr_allocator_recalculate_po_lines_from_allocations( (int) $post_id, $lines );
+
+                update_post_meta( $post_id, defined( __NAMESPACE__ . '\PO_META_SUPPLIER_NAME' ) ? PO_META_SUPPLIER_NAME : '_lpr_supplier_name', $header['supplier'] );
+                update_post_meta( $post_id, defined( __NAMESPACE__ . '\PO_META_PO_NUMBER' ) ? PO_META_PO_NUMBER : '_lpr_po_number', $header['po_number'] );
+                update_post_meta( $post_id, defined( __NAMESPACE__ . '\PO_META_ETA_DATE' ) ? PO_META_ETA_DATE : '_lpr_eta_date', $header['eta'] );
+                update_post_meta( $post_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', $lines );
+
+                $created++;
+            }
+
+            if ( $created > 0 ) {
+                $messages[] = sprintf(
+                    _n( 'Imported %d purchase order.', 'Imported %d purchase orders.', $created, 'lpr-backorder-allocator' ),
+                    $created
+                );
+            }
+        }
+
+        public static function download_template(): void {
+            if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                wp_die( esc_html__( 'Sorry, you are not allowed to access this resource.', 'lpr-backorder-allocator' ) );
+            }
+
+            check_admin_referer( 'lpr_po_import_template' );
+
+            $headers = array(
+                'po_number',
+                'supplier',
+                'po_eta',
+                'po_status',
+                'line_product_id',
+                'line_sku',
+                'line_qty',
+                'line_eta',
+                'line_notes',
+            );
+
+            $sample = array(
+                'PO-1001',
+                'Sample Supplier',
+                wp_date( 'Y-m-d' ),
+                'open',
+                '123',
+                'SKU-EXAMPLE',
+                '10',
+                wp_date( 'Y-m-d', strtotime( '+14 days' ) ),
+                'Optional line notes',
+            );
+
+            nocache_headers();
+            header( 'Content-Type: text/csv; charset=utf-8' );
+            header( 'Content-Disposition: attachment; filename=po-import-template.csv' );
+            $output = fopen( 'php://output', 'w' );
+            fputcsv( $output, $headers );
+            fputcsv( $output, $sample );
+            fclose( $output );
+            exit;
+        }
+
+        public static function render(): void {
+            if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                return;
+            }
+
+            $messages = array();
+            $errors   = array();
+            $preview  = array();
+            $preview_key = '';
+
+            if ( 'POST' === strtoupper( $_SERVER['REQUEST_METHOD'] ?? '' ) ) {
+                $action = isset( $_POST['lpr_po_import_action'] ) ? sanitize_key( wp_unslash( $_POST['lpr_po_import_action'] ) ) : '';
+                if ( 'preview' === $action ) {
+                    check_admin_referer( 'lpr_po_import_preview', 'lpr_po_import_nonce' );
+                    $rows = self::parse_file_rows( $_FILES['lpr_po_import_file'] ?? array(), $errors );
+                    if ( ! empty( $rows ) ) {
+                        $parsed = self::parse_rows( $rows );
+                        $errors = array_merge( $errors, $parsed['errors'] );
+                        $preview = self::build_preview( $parsed );
+                        if ( ! empty( $preview ) ) {
+                            $preview_key = self::store_preview( $parsed );
+                        }
+                    }
+                } elseif ( 'confirm' === $action ) {
+                    check_admin_referer( 'lpr_po_import_confirm', 'lpr_po_import_nonce' );
+                    $preview_key = isset( $_POST['lpr_po_import_key'] ) ? sanitize_text_field( wp_unslash( $_POST['lpr_po_import_key'] ) ) : '';
+                    $parsed      = '' !== $preview_key ? self::load_preview( $preview_key ) : null;
+                    if ( ! $parsed ) {
+                        $errors[] = __( 'Preview data expired. Please upload the file again.', 'lpr-backorder-allocator' );
+                    } else {
+                        self::handle_import( $parsed, $messages, $errors );
+                        delete_transient( $preview_key );
+                    }
+                }
+            }
+
+            $template_url = wp_nonce_url(
+                admin_url( 'admin-post.php?action=lpr_po_import_template' ),
+                'lpr_po_import_template'
+            );
+            ?>
+            <div class="wrap">
+                <h1><?php esc_html_e( 'Import Purchase Orders', 'lpr-backorder-allocator' ); ?></h1>
+                <p class="description">
+                    <?php esc_html_e( 'Upload a CSV/XLSX file containing multiple POs and line items. Each row represents one line item; repeat the PO number to add multiple lines.', 'lpr-backorder-allocator' ); ?>
+                </p>
+                <p>
+                    <a class="button" href="<?php echo esc_url( $template_url ); ?>"><?php esc_html_e( 'Download CSV template', 'lpr-backorder-allocator' ); ?></a>
+                </p>
+
+                <?php if ( ! empty( $messages ) ) : ?>
+                    <div class="notice notice-success">
+                        <?php foreach ( $messages as $message ) : ?>
+                            <p><?php echo esc_html( $message ); ?></p>
+                        <?php endforeach; ?>
+                    </div>
+                <?php endif; ?>
+
+                <?php if ( ! empty( $errors ) ) : ?>
+                    <div class="notice notice-error">
+                        <?php foreach ( $errors as $error ) : ?>
+                            <p><?php echo esc_html( $error ); ?></p>
+                        <?php endforeach; ?>
+                    </div>
+                <?php endif; ?>
+
+                <form method="post" enctype="multipart/form-data">
+                    <?php wp_nonce_field( 'lpr_po_import_preview', 'lpr_po_import_nonce' ); ?>
+                    <input type="hidden" name="lpr_po_import_action" value="preview" />
+                    <table class="form-table">
+                        <tr>
+                            <th scope="row"><label for="lpr_po_import_file"><?php esc_html_e( 'CSV/XLSX file', 'lpr-backorder-allocator' ); ?></label></th>
+                            <td><input type="file" id="lpr_po_import_file" name="lpr_po_import_file" accept=".csv,.xlsx" required /></td>
+                        </tr>
+                    </table>
+                    <p><button type="submit" class="button button-primary"><?php esc_html_e( 'Preview import', 'lpr-backorder-allocator' ); ?></button></p>
+                </form>
+
+                <?php if ( ! empty( $preview ) && '' !== $preview_key ) : ?>
+                    <hr />
+                    <h2><?php esc_html_e( 'Preview', 'lpr-backorder-allocator' ); ?></h2>
+                    <p class="description"><?php esc_html_e( 'Review the purchase orders below before confirming the import.', 'lpr-backorder-allocator' ); ?></p>
+                    <?php foreach ( $preview as $po_key => $po ) : ?>
+                        <?php $header = $po['header']; ?>
+                        <div style="margin-bottom:24px;border:1px solid #ccd0d4;padding:16px;background:#fff;">
+                            <h3><?php echo esc_html( $header['po_number'] ? sprintf( __( 'PO %s', 'lpr-backorder-allocator' ), $header['po_number'] ) : $po_key ); ?></h3>
+                            <p>
+                                <?php esc_html_e( 'Supplier', 'lpr-backorder-allocator' ); ?>:
+                                <strong><?php echo esc_html( $header['supplier'] ?: __( 'Not set', 'lpr-backorder-allocator' ) ); ?></strong>
+                                &nbsp;|&nbsp;
+                                <?php esc_html_e( 'ETA', 'lpr-backorder-allocator' ); ?>:
+                                <strong><?php echo esc_html( $header['eta'] ?: __( 'Not set', 'lpr-backorder-allocator' ) ); ?></strong>
+                                &nbsp;|&nbsp;
+                                <?php esc_html_e( 'Status', 'lpr-backorder-allocator' ); ?>:
+                                <strong><?php echo esc_html( $header['status'] ?: PO_STATUS_OPEN ); ?></strong>
+                            </p>
+                            <table class="widefat striped">
+                                <thead>
+                                    <tr>
+                                        <th><?php esc_html_e( 'Product', 'lpr-backorder-allocator' ); ?></th>
+                                        <th><?php esc_html_e( 'SKU', 'lpr-backorder-allocator' ); ?></th>
+                                        <th><?php esc_html_e( 'Quantity', 'lpr-backorder-allocator' ); ?></th>
+                                        <th><?php esc_html_e( 'Line ETA', 'lpr-backorder-allocator' ); ?></th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    <?php foreach ( $po['lines'] as $line ) : ?>
+                                        <tr>
+                                            <td><?php echo esc_html( $line['product_name'] ?: $line['product_id'] ); ?></td>
+                                            <td><?php echo esc_html( $line['sku'] ); ?></td>
+                                            <td><?php echo esc_html( $line['qty'] ); ?></td>
+                                            <td><?php echo esc_html( $line['eta'] ?: __( '—', 'lpr-backorder-allocator' ) ); ?></td>
+                                        </tr>
+                                    <?php endforeach; ?>
+                                </tbody>
+                            </table>
+                            <?php if ( ! empty( $po['notes'] ) ) : ?>
+                                <p><em><?php echo esc_html( implode( ' | ', $po['notes'] ) ); ?></em></p>
+                            <?php endif; ?>
+                        </div>
+                    <?php endforeach; ?>
+
+                    <form method="post">
+                        <?php wp_nonce_field( 'lpr_po_import_confirm', 'lpr_po_import_nonce' ); ?>
+                        <input type="hidden" name="lpr_po_import_action" value="confirm" />
+                        <input type="hidden" name="lpr_po_import_key" value="<?php echo esc_attr( $preview_key ); ?>" />
+                        <p><button type="submit" class="button button-primary"><?php esc_html_e( 'Import purchase orders', 'lpr-backorder-allocator' ); ?></button></p>
+                    </form>
+                <?php endif; ?>
+            </div>
+            <?php
+        }
+    }
+    PO_Import_Page::init();
+}
+
+/**
  * Admin page: "Backordered Products" with quick add-to-PO actions.
  */
 if ( ! class_exists( __NAMESPACE__ . '\Backordered_Products_Page' ) ) {
