@@ -423,6 +423,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                         add_action( 'admin_post_lpr_allocator_force_auto_allocation', array( __CLASS__, 'handle_force_auto_allocation' ) );
                         add_action( 'woocommerce_admin_field_lpr_po_index_rebuild', array( __CLASS__, 'render_po_index_rebuild_field' ) );
                         add_action( 'admin_post_lpr_allocator_force_po_index_rebuild', array( __CLASS__, 'handle_force_po_index_rebuild' ) );
+                        add_action( 'woocommerce_admin_field_lpr_po_receipt_overview', array( __CLASS__, 'render_po_receipt_overview_field' ) );
+                        add_action( 'admin_post_lpr_allocator_dismiss_receipt_notice', array( __CLASS__, 'handle_dismiss_receipt_notice' ) );
                 }
 
 		/**
@@ -898,6 +900,22 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                         'type'  => 'sectionend',
                                         'id'    => 'lpr_allocator_section_brand',
                                 ),
+
+                                array(
+                                        'title' => __( 'Receiving job alerts', 'lpr-backorder-allocator' ),
+                                        'type'  => 'title',
+                                        'desc'  => __( 'Failed and unverified PO receipt jobs.', 'lpr-backorder-allocator' ),
+                                        'id'    => 'lpr_allocator_section_receipt_alerts',
+                                ),
+                                array(
+                                        'title' => __( 'Receipt log overview', 'lpr-backorder-allocator' ),
+                                        'type'  => 'lpr_po_receipt_overview',
+                                        'id'    => 'lpr_allocator_po_receipt_overview',
+                                ),
+                                array(
+                                        'type'  => 'sectionend',
+                                        'id'    => 'lpr_allocator_section_receipt_alerts',
+                                ),
                         );
                 }
 
@@ -1094,6 +1112,95 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                         <?php
                 }
 
+                public static function render_po_receipt_overview_field( array $field ): void {
+                        if ( ! class_exists( __NAMESPACE__ . '\\PO_Receive_Stock_UI' ) ) {
+                                return;
+                        }
+                        $user_id   = get_current_user_id();
+                        $dismissed = get_user_meta( $user_id, 'lpr_allocator_dismissed_receipt_notices', true );
+                        if ( ! is_array( $dismissed ) ) {
+                                $dismissed = array();
+                        }
+                        $items = PO_Receive_Stock_UI::get_receipt_overview_items( $dismissed );
+                        ?>
+                        <tr valign="top">
+                                <th scope="row" class="titledesc">
+                                        <label><?php echo esc_html( $field['title'] ); ?></label>
+                                </th>
+                                <td class="forminp">
+                                        <fieldset>
+                                                <legend class="screen-reader-text"><span><?php echo esc_html( $field['title'] ); ?></span></legend>
+                                                <?php if ( empty( $items ) ) : ?>
+                                                        <p class="description"><?php esc_html_e( 'No failed or unverified receipt jobs found.', 'lpr-backorder-allocator' ); ?></p>
+                                                <?php else : ?>
+                                                        <table class="widefat striped" style="max-width:1000px;">
+                                                                <thead>
+                                                                        <tr>
+                                                                                <th><?php esc_html_e( 'PO', 'lpr-backorder-allocator' ); ?></th>
+                                                                                <th><?php esc_html_e( 'Receipt date', 'lpr-backorder-allocator' ); ?></th>
+                                                                                <th><?php esc_html_e( 'Job', 'lpr-backorder-allocator' ); ?></th>
+                                                                                <th><?php esc_html_e( 'Status', 'lpr-backorder-allocator' ); ?></th>
+                                                                                <th><?php esc_html_e( 'Verification', 'lpr-backorder-allocator' ); ?></th>
+                                                                                <th><?php esc_html_e( 'Message', 'lpr-backorder-allocator' ); ?></th>
+                                                                                <th><?php esc_html_e( 'Actions', 'lpr-backorder-allocator' ); ?></th>
+                                                                        </tr>
+                                                                </thead>
+                                                                <tbody>
+                                                                        <?php foreach ( $items as $item ) : ?>
+                                                                                <tr>
+                                                                                        <td>
+                                                                                                <a href="<?php echo esc_url( $item['po_link'] ); ?>">
+                                                                                                        <?php echo esc_html( $item['po_label'] ); ?>
+                                                                                                </a>
+                                                                                        </td>
+                                                                                        <td><?php echo esc_html( $item['date'] ); ?></td>
+                                                                                        <td><?php echo esc_html( $item['job'] ); ?></td>
+                                                                                        <td><?php echo esc_html( $item['status'] ); ?></td>
+                                                                                        <td><?php echo esc_html( $item['verification'] ); ?></td>
+                                                                                        <td><?php echo esc_html( $item['message'] ); ?></td>
+                                                                                        <td>
+                                                                                                <a class="button" href="<?php echo esc_url( $item['dismiss_url'] ); ?>">
+                                                                                                        <?php esc_html_e( 'Dismiss', 'lpr-backorder-allocator' ); ?>
+                                                                                                </a>
+                                                                                        </td>
+                                                                                </tr>
+                                                                        <?php endforeach; ?>
+                                                                </tbody>
+                                                        </table>
+                                                <?php endif; ?>
+                                        </fieldset>
+                                </td>
+                        </tr>
+                        <?php
+                }
+
+                public static function handle_dismiss_receipt_notice(): void {
+                        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                                wp_die( esc_html__( 'Insufficient permissions.', 'lpr-backorder-allocator' ) );
+                        }
+                        $nonce      = isset( $_GET['_wpnonce'] ) ? (string) $_GET['_wpnonce'] : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $receipt_id = isset( $_GET['receipt_id'] ) ? sanitize_key( wp_unslash( $_GET['receipt_id'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+
+                        if ( ! wp_verify_nonce( $nonce, 'lpr_allocator_dismiss_receipt_notice' ) || '' === $receipt_id ) {
+                                wp_die( esc_html__( 'Invalid request.', 'lpr-backorder-allocator' ) );
+                        }
+
+                        $user_id   = get_current_user_id();
+                        $dismissed = get_user_meta( $user_id, 'lpr_allocator_dismissed_receipt_notices', true );
+                        if ( ! is_array( $dismissed ) ) {
+                                $dismissed = array();
+                        }
+                        if ( ! in_array( $receipt_id, $dismissed, true ) ) {
+                                $dismissed[] = $receipt_id;
+                                update_user_meta( $user_id, 'lpr_allocator_dismissed_receipt_notices', $dismissed );
+                        }
+
+                        $redirect = admin_url( 'admin.php?page=wc-settings&tab=' . self::TAB_ID );
+                        $redirect = add_query_arg( 'lpr_receipt_notice', 'dismissed', $redirect );
+                        wp_safe_redirect( $redirect );
+                        exit;
+                }
+
                 public static function handle_force_auto_allocation(): void {
                         if ( ! current_user_can( 'manage_woocommerce' ) ) {
                                 wp_die( esc_html__( 'Insufficient permissions.', 'lpr-backorder-allocator' ) );
@@ -1210,6 +1317,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                 if ( '' !== $message ) {
                                         echo '<div class="notice ' . esc_attr( $class ) . ' is-dismissible"><p>' . esc_html( $message ) . '</p></div>';
                                 }
+                        }
+                        $dismissed_notice = isset( $_GET['lpr_receipt_notice'] ) ? sanitize_key( wp_unslash( $_GET['lpr_receipt_notice'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        if ( 'dismissed' === $dismissed_notice ) {
+                                echo '<div class="notice notice-success is-dismissible"><p>' . esc_html__( 'Receipt notification dismissed.', 'lpr-backorder-allocator' ) . '</p></div>';
                         }
                         $settings = Settings::get();
                         self::prime_field_values( $settings );
@@ -9971,6 +10082,128 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                         }
 
                         return $status;
+                }
+
+                public static function get_receipt_overview_items( array $dismissed = array(), int $limit = 50 ): array {
+                        $items = array();
+                        $po_ids = get_posts(
+                                array(
+                                        'post_type'      => defined( __NAMESPACE__ . '\\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po',
+                                        'post_status'    => 'any',
+                                        'fields'         => 'ids',
+                                        'posts_per_page' => 200,
+                                        'orderby'        => 'date',
+                                        'order'          => 'DESC',
+                                        'meta_query'     => array(
+                                                array(
+                                                        'key'     => defined( __NAMESPACE__ . '\\PO_META_RECEIPTS' ) ? PO_META_RECEIPTS : '_lpr_po_receipts',
+                                                        'compare' => 'EXISTS',
+                                                ),
+                                        ),
+                                )
+                        );
+
+                        if ( empty( $po_ids ) ) {
+                                return $items;
+                        }
+
+                        foreach ( $po_ids as $po_id ) {
+                                $receipts = self::get_receipts( (int) $po_id );
+                                if ( empty( $receipts ) ) {
+                                        continue;
+                                }
+                                usort(
+                                        $receipts,
+                                        static function ( $a, $b ) {
+                                                return strcmp( $b['created_at'] ?? '', $a['created_at'] ?? '' );
+                                        }
+                                );
+
+                                foreach ( $receipts as $index => $receipt ) {
+                                        $status       = self::resolve_receipt_status( $receipt );
+                                        $verification = isset( $receipt['verification'] ) && is_array( $receipt['verification'] ) ? $receipt['verification'] : array();
+                                        $has_verification = ! empty( $verification );
+                                        $is_failed    = in_array( $status, array( 'failed', 'canceled', 'cancelled' ), true );
+                                        $is_completed = 'completed' === $status;
+                                        $is_pending   = ! $is_completed;
+                                        $is_problem   = $is_failed || ( $is_completed && ! $has_verification ) || $is_pending;
+
+                                        if ( ! $is_problem ) {
+                                                continue;
+                                        }
+
+                                        $notice_id = self::build_receipt_notice_id( (int) $po_id, $receipt, (int) $index );
+                                        if ( in_array( $notice_id, $dismissed, true ) ) {
+                                                continue;
+                                        }
+
+                                        $datetime = ! empty( $receipt['created_at'] ) ? mysql2date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), $receipt['created_at'] ) : '';
+                                        $job      = ! empty( $receipt['action_id'] ) ? '#' . absint( $receipt['action_id'] ) : __( 'n/a', 'lpr-backorder-allocator' );
+                                        $message  = isset( $receipt['message'] ) ? (string) $receipt['message'] : '';
+                                        if ( '' === $message ) {
+                                                $message = __( 'No details recorded.', 'lpr-backorder-allocator' );
+                                        }
+
+                                        $verification_label = '';
+                                        if ( $is_completed ) {
+                                                if ( $has_verification ) {
+                                                        $corrections = (int) ( $verification['corrections'] ?? 0 );
+                                                        if ( $corrections > 0 ) {
+                                                                /* translators: %d: number of corrections applied */
+                                                                $verification_label = sprintf( __( 'Verified with %d correction(s).', 'lpr-backorder-allocator' ), $corrections );
+                                                        } else {
+                                                                $verification_label = __( 'Verified.', 'lpr-backorder-allocator' );
+                                                        }
+                                                } else {
+                                                        $verification_label = __( 'Not recorded.', 'lpr-backorder-allocator' );
+                                                }
+                                        } elseif ( $is_failed ) {
+                                                $verification_label = __( 'Not verified.', 'lpr-backorder-allocator' );
+                                        } else {
+                                                $verification_label = __( 'Pending.', 'lpr-backorder-allocator' );
+                                        }
+
+                                        $po_number = (string) get_post_meta( (int) $po_id, defined( __NAMESPACE__ . '\\PO_META_PO_NUMBER' ) ? PO_META_PO_NUMBER : '_lpr_po_number', true );
+                                        $po_label  = $po_number ? sprintf( __( 'PO #%s', 'lpr-backorder-allocator' ), $po_number ) : sprintf( __( 'PO #%s', 'lpr-backorder-allocator' ), (string) $po_id );
+                                        $po_link   = admin_url( 'post.php?post=' . (int) $po_id . '&action=edit' );
+
+                                        $dismiss_url = wp_nonce_url(
+                                                add_query_arg(
+                                                        array(
+                                                                'action'     => 'lpr_allocator_dismiss_receipt_notice',
+                                                                'receipt_id' => $notice_id,
+                                                        ),
+                                                        admin_url( 'admin-post.php' )
+                                                ),
+                                                'lpr_allocator_dismiss_receipt_notice'
+                                        );
+
+                                        $items[] = array(
+                                                'po_id'        => (int) $po_id,
+                                                'po_label'     => $po_label,
+                                                'po_link'      => $po_link,
+                                                'date'         => $datetime,
+                                                'job'          => $job,
+                                                'status'       => ucfirst( $status ),
+                                                'verification' => $verification_label,
+                                                'message'      => $message,
+                                                'dismiss_url'  => $dismiss_url,
+                                        );
+
+                                        if ( count( $items ) >= $limit ) {
+                                                return $items;
+                                        }
+                                }
+                        }
+
+                        return $items;
+                }
+
+                protected static function build_receipt_notice_id( int $po_id, array $receipt, int $index ): string {
+                        $created   = isset( $receipt['created_at'] ) ? (string) $receipt['created_at'] : '';
+                        $action_id = isset( $receipt['action_id'] ) ? (string) $receipt['action_id'] : '';
+                        $status    = isset( $receipt['status'] ) ? (string) $receipt['status'] : '';
+                        return md5( $po_id . '|' . $index . '|' . $created . '|' . $action_id . '|' . $status );
                 }
 
                 /**
