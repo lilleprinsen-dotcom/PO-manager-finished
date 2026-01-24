@@ -10614,10 +10614,6 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                 Incoming_Stock_Indexer::refresh_all();
                         }
 
-                        if ( function_exists( __NAMESPACE__ . '\lpr_allocator_maybe_close_po' ) ) {
-                                lpr_allocator_maybe_close_po( $po_id );
-                        }
-
                         // Run the receipt immediately to ensure inventory is updated even before the async worker runs.
                         try {
                                 self::process_receipt( $po_id, $receipt_id );
