@@ -9729,7 +9729,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                         return $('<div>').text(str || '').html();
                                 }
 
-                                function renderRows(lines){
+                                function renderRows(lines, selectedEta){
                                         if(!lines || !lines.length){
                                                 return '<p><?php echo esc_js( __( 'No PO lines found.', 'lpr-backorder-allocator' ) ); ?></p>';
                                         }
@@ -9738,30 +9738,39 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                                 '<th><?php echo esc_js( __( 'Ordered', 'lpr-backorder-allocator' ) ); ?></th>'+
                                                 '<th><?php echo esc_js( __( 'Live stock', 'lpr-backorder-allocator' ) ); ?></th>'+
                                                 '<th><?php echo esc_js( __( 'Already received', 'lpr-backorder-allocator' ) ); ?></th>'+
+                                                '<th><?php echo esc_js( __( 'ETA', 'lpr-backorder-allocator' ) ); ?></th>'+
                                                 '<th><?php echo esc_js( __( 'Qty to receive now', 'lpr-backorder-allocator' ) ); ?></th>'+
                                         '</tr></thead><tbody>';
                                         lines.forEach(function(line){
                                                 var stock = (line.stock === null || typeof line.stock === 'undefined') ? '<?php echo esc_js( '—' ); ?>' : line.stock;
                                                 var remaining = typeof line.remaining === 'number' ? line.remaining : 0;
                                                 var disable = remaining <= 0;
+                                                var lineEta = line.eta || '';
+                                                var lineEtaLabel = lineEta ? lineEta : '<?php echo esc_js( __( 'No ETA', 'lpr-backorder-allocator' ) ); ?>';
+                                                var normalizedSelectedEta = selectedEta || '';
+                                                var autoQty = (!disable && normalizedSelectedEta && lineEta === normalizedSelectedEta) ? remaining : 0;
+                                                if(!normalizedSelectedEta && !disable){
+                                                        autoQty = remaining;
+                                                }
                                                 var desc = disable ? '<div class="description"><?php echo esc_js( __( 'Fully received', 'lpr-backorder-allocator' ) ); ?></div>' : '<div class="description">'+remaining+' <?php echo esc_js( __( 'remaining', 'lpr-backorder-allocator' ) ); ?></div>';
                                                 html += '<tr>'+
                                                         '<td>'+line.product+'</td>'+
                                                         '<td>'+line.ordered+'</td>'+
                                                         '<td>'+stock+'</td>'+
                                                         '<td>'+line.received+'</td>'+
-                                                        '<td><input type="number" min="0" step="1" class="lpr-receive-input" data-idx="'+line.idx+'" data-stock="'+stock+'" data-ordered="'+line.ordered+'" data-received="'+line.received+'" data-remaining="'+remaining+'" value="0" '+(disable ? 'disabled' : '')+' max="'+remaining+'" style="width:120px;" />'+desc+'</td>'+
+                                                        '<td>'+lineEtaLabel+'</td>'+
+                                                        '<td><input type="number" min="0" step="1" class="lpr-receive-input" data-idx="'+line.idx+'" data-stock="'+stock+'" data-ordered="'+line.ordered+'" data-received="'+line.received+'" data-remaining="'+remaining+'" data-eta="'+lineEta+'" value="'+autoQty+'" '+(disable ? 'disabled' : '')+' max="'+remaining+'" style="width:120px;" />'+desc+'</td>'+
                                                 '</tr>';
                                         });
                                         html += '</tbody></table>';
                                         return html;
                                 }
 
-                                function openModal(poId, nonce, lines){
+                                function openModal(poId, nonce, lines, selectedEta){
                                         $('.lpr-po-receive-overlay').remove();
-                                        var bodyHtml = renderRows(lines);
+                                        var bodyHtml = renderRows(lines, selectedEta || '');
                                         var tpl = '<div class="lpr-po-receive-overlay">'+
-                                                '<div class="lpr-po-receive-modal" data-po="'+poId+'" data-nonce="'+nonce+'">'+
+                                                '<div class="lpr-po-receive-modal" data-po="'+poId+'" data-nonce="'+nonce+'" data-selected-eta="'+(selectedEta || '')+'">'+
                                                         '<header><h3><?php echo esc_js( __( 'Receive stock', 'lpr-backorder-allocator' ) ); ?></h3><a href="#" class="lpr-po-receive-close">&times;</a></header>'+
                                                         '<div class="lpr-body">'+
                                                                 '<p class="lpr-status"></p>'+
@@ -9842,11 +9851,12 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                         var $btn = $(this);
                                         var poId = $btn.data('po');
                                         var nonce = $btn.data('nonce');
+                                        var selectedEta = $btn.data('eta') || '';
                                         if(!poId || !nonce){ return; }
                                         $btn.prop('disabled', true);
                                         fetchLines(poId, nonce).done(function(resp){
                                                 if(resp && resp.success && resp.data && resp.data.lines){
-                                                        openModal(poId, nonce, resp.data.lines);
+                                                        openModal(poId, nonce, resp.data.lines, selectedEta);
                                                 }else{
                                                         window.alert((resp && resp.data && resp.data.message) ? resp.data.message : '<?php echo esc_js( __( 'Unable to load PO lines.', 'lpr-backorder-allocator' ) ); ?>');
                                                 }
@@ -9935,7 +9945,8 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
 
                                                 if(resp && resp.success){
                                                         if(data.lines){
-                                                                var newTable = renderRows(data.lines);
+                                                                var selectedEta = $modal.data('selectedEta') || '';
+                                                                var newTable = renderRows(data.lines, selectedEta);
                                                                 $modal.find('.lpr-entry-rows').html(newTable);
                                                                 $modal.find('.lpr-receive-note').val('');
                                                                 $modal.removeData('receiptNote');
@@ -9950,7 +9961,8 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                                         msg += ' ' + data.details.join(' ');
                                                 }
                                                 if(data.lines){
-                                                        $modal.find('.lpr-entry-rows').html(renderRows(data.lines));
+                                                        var selectedEta = $modal.data('selectedEta') || '';
+                                                        $modal.find('.lpr-entry-rows').html(renderRows(data.lines, selectedEta));
                                                         showEntry($modal);
                                                 }
                                                 $modal.find('.lpr-status').text(msg);
@@ -10591,6 +10603,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                         'received'  => $received,
                                         'stock'     => $stock,
                                         'remaining' => max( 0, $ordered - $received ),
+                                        'eta'       => lpr_allocator_resolve_line_eta( $po_id, $line ),
                                 );
                         }
 
@@ -13493,7 +13506,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Purchase_Orders_Page' ) ) {
                                                                                         $nonce = wp_create_nonce( 'lpr_receive_po_' . $row['po_id'] );
                                                                                         ?>
                                                                                         <p class="lpr-incoming-card__actions">
-                                                                                                <button type="button" class="button lpr-open-receive" data-po="<?php echo esc_attr( (string) $row['po_id'] ); ?>" data-nonce="<?php echo esc_attr( $nonce ); ?>"><?php esc_html_e( 'Receive', 'lpr-backorder-allocator' ); ?></button>
+                                                                                                <button type="button" class="button lpr-open-receive" data-po="<?php echo esc_attr( (string) $row['po_id'] ); ?>" data-nonce="<?php echo esc_attr( $nonce ); ?>" data-eta="<?php echo esc_attr( (string) ( $row['eta'] ?? '' ) ); ?>"><?php esc_html_e( 'Receive', 'lpr-backorder-allocator' ); ?></button>
                                                                                         </p>
                                                                                 <?php endif; ?>
                                                                         </div>
