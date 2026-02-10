@@ -2273,6 +2273,7 @@ if ( ! class_exists( __NAMESPACE__ . '\\Supplier_PO_Print_PDF' ) ) {
                                                 return {
                                                         title: ($('#title').val() || '').trim() || '<?php echo esc_js( __( 'Supplier Purchase Order', 'lpr-backorder-allocator' ) ); ?>',
                                                         supplier: ($('#lpr_supplier_name').val() || '').trim(),
+                                                        supplierContact: ($('#lpr_supplier_contact').val() || '').trim(),
                                                         poNumber: ($('#lpr_po_number').val() || '').trim(),
                                                         eta: ($('#lpr_eta_date').val() || '').trim(),
                                                         note: ($('#lpr_po_note').val() || '').trim(),
@@ -2283,17 +2284,18 @@ if ( ! class_exists( __NAMESPACE__ . '\\Supplier_PO_Print_PDF' ) ) {
                                         function renderPrintable(data){
                                                 const lineRows = data.lines.map(function(line){
                                                         return '<tr>' +
-                                                                '<td>'+ escapeHtml(line.product || '<?php echo esc_js( __( 'Product', 'lpr-backorder-allocator' ) ); ?>') +'</td>' +
+                                                                '<td class="product">'+ escapeHtml(line.product || '<?php echo esc_js( __( 'Product', 'lpr-backorder-allocator' ) ); ?>') +'</td>' +
                                                                 '<td class="num">'+ line.qtyIncoming +'</td>' +
+                                                                '<td class="num">'+ line.qtyReceived +'</td>' +
                                                                 '<td class="num">'+ line.qtyAllocated +'</td>' +
                                                                 '<td class="num">'+ line.qtyStock +'</td>' +
                                                                 '<td>'+ escapeHtml(line.etaOverride) +'</td>' +
-                                                                '<td class="num">'+ line.qtyReceived +'</td>' +
                                                         '</tr>';
                                                 }).join('');
 
                                                 const noteBlock = data.note ? '<div class="lpr-po-print-note"><strong><?php echo esc_js( __( 'Note', 'lpr-backorder-allocator' ) ); ?>:</strong><p>'+ escapeHtml(data.note) +'</p></div>' : '';
                                                 const linesHtml = lineRows || '<tr><td class="empty" colspan="6"><?php echo esc_js( __( 'No PO lines available.', 'lpr-backorder-allocator' ) ); ?></td></tr>';
+                                                const statusText = (data.status || '<?php echo esc_js( __( 'Open', 'lpr-backorder-allocator' ) ); ?>').toUpperCase();
 
                                                 return `<!doctype html>
                                                 <html>
@@ -2303,20 +2305,23 @@ if ( ! class_exists( __NAMESPACE__ . '\\Supplier_PO_Print_PDF' ) ) {
                                                 <style>
                                                         @page { size: A4; margin: 14mm; }
                                                         body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; color: #111; margin: 0; padding: 0; background: #f5f5f7; }
-                                                        .lpr-po-print-shell { max-width: 210mm; margin: 0 auto; padding: 18px 20px 28px; background: #fff; box-shadow: 0 2px 10px rgba(0,0,0,0.08); }
-                                                        .lpr-po-print-header { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 14px; }
-                                                        .lpr-po-print-header .item { padding: 10px 12px; background: #f3f6fb; border: 1px solid #d8e2f1; border-radius: 6px; }
-                                                        .lpr-po-print-header .label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; color: #4a5a6a; margin-bottom: 4px; }
-                                                        .lpr-po-print-header .value { font-size: 15px; font-weight: 600; color: #1d1d1f; word-break: break-word; }
-                                                        h1 { margin: 0 0 12px; font-size: 24px; letter-spacing: -0.02em; color: #111; }
-                                                        .lpr-po-summary { display: flex; flex-wrap: wrap; gap: 12px; margin: 10px 0 6px; }
-                                                        .lpr-po-summary .pill { padding: 10px 14px; background: #f0f7ff; border: 1px solid #d0e4ff; border-radius: 999px; font-weight: 600; color: #0b5394; }
+                                                        .lpr-po-print-shell { max-width: 210mm; margin: 0 auto; padding: 14px 16px 18px; background: #fff; box-shadow: 0 2px 10px rgba(0,0,0,0.08); }
+                                                        .lpr-po-print-top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 8px; }
+                                                        .lpr-po-status-badge { padding: 8px 12px; border-radius: 999px; background: #0b5394; color: #fff; font-weight: 700; letter-spacing: 0.8px; font-size: 12px; text-transform: uppercase; }
+                                                        .lpr-po-print-header { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 8px; margin-bottom: 10px; }
+                                                        .lpr-po-print-header .item { padding: 8px 10px; background: #f3f6fb; border: 1px solid #d8e2f1; border-radius: 6px; }
+                                                        .lpr-po-print-header .label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.6px; color: #4a5a6a; margin-bottom: 3px; }
+                                                        .lpr-po-print-header .value { font-size: 13px; font-weight: 600; color: #1d1d1f; word-break: break-word; }
+                                                        h1 { margin: 0; font-size: 22px; letter-spacing: -0.02em; color: #111; }
+                                                        .lpr-po-summary { display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 4px; }
+                                                        .lpr-po-summary .pill { padding: 6px 10px; background: #f0f7ff; border: 1px solid #d0e4ff; border-radius: 999px; font-weight: 600; color: #0b5394; font-size: 12px; }
                                                         .lpr-po-print-note { margin: 12px 0 6px; padding: 10px 12px; background: #fff7e6; border: 1px solid #f4d9a8; border-radius: 6px; }
                                                         .lpr-po-print-note p { margin: 6px 0 0; white-space: pre-wrap; }
-                                                        table { width: 100%; border-collapse: collapse; margin-top: 14px; }
-                                                        table th { text-align: left; background: #0b5394; color: #fff; padding: 10px 8px; font-size: 13px; letter-spacing: 0.3px; }
-                                                        table td { padding: 9px 8px; border-bottom: 1px solid #e2e8f0; font-size: 13px; }
-                                                        table td.num { text-align: right; font-variant-numeric: tabular-nums; }
+                                                        table { width: 100%; border-collapse: collapse; margin-top: 10px; table-layout: fixed; }
+                                                        table th { text-align: left; background: #0b5394; color: #fff; padding: 6px 6px; font-size: 11px; letter-spacing: 0.2px; }
+                                                        table td { padding: 6px 6px; border-bottom: 1px solid #e2e8f0; font-size: 12px; }
+                                                        table td.product { font-size: 11px; line-height: 1.25; }
+                                                        table td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; }
                                                         table td.empty { text-align: center; color: #555; font-style: italic; }
                                                         .lpr-po-totals { margin-top: 14px; display: flex; gap: 12px; flex-wrap: wrap; }
                                                         .lpr-po-totals .card { flex: 1 1 180px; background: #0b5394; color: #fff; padding: 12px 14px; border-radius: 8px; }
@@ -2331,12 +2336,15 @@ if ( ! class_exists( __NAMESPACE__ . '\\Supplier_PO_Print_PDF' ) ) {
                                                 </head>
                                                 <body>
                                                         <div class="lpr-po-print-shell">
-                                                                <h1>${escapeHtml(data.title)}</h1>
+                                                                <div class="lpr-po-print-top">
+                                                                        <h1>${escapeHtml(data.title)}</h1>
+                                                                        <div class="lpr-po-status-badge">${escapeHtml(statusText)}</div>
+                                                                </div>
                                                                 <div class="lpr-po-print-header">
                                                                         <div class="item"><div class="label"><?php echo esc_js( __( 'Supplier', 'lpr-backorder-allocator' ) ); ?></div><div class="value">${escapeHtml(data.supplier || '<?php echo esc_js( __( 'Not set', 'lpr-backorder-allocator' ) ); ?>')}</div></div>
+                                                                        <div class="item"><div class="label"><?php echo esc_js( __( 'Supplier Contact', 'lpr-backorder-allocator' ) ); ?></div><div class="value">${escapeHtml(data.supplierContact || '<?php echo esc_js( __( 'Not set', 'lpr-backorder-allocator' ) ); ?>')}</div></div>
                                                                         <div class="item"><div class="label"><?php echo esc_js( __( 'PO Number', 'lpr-backorder-allocator' ) ); ?></div><div class="value">${escapeHtml(data.poNumber || '<?php echo esc_js( __( 'Not set', 'lpr-backorder-allocator' ) ); ?>')}</div></div>
                                                                         <div class="item"><div class="label"><?php echo esc_js( __( 'ETA', 'lpr-backorder-allocator' ) ); ?></div><div class="value">${escapeHtml(data.eta || '<?php echo esc_js( __( 'Not provided', 'lpr-backorder-allocator' ) ); ?>')}</div></div>
-                                                                        <div class="item"><div class="label"><?php echo esc_js( __( 'Status', 'lpr-backorder-allocator' ) ); ?></div><div class="value">${escapeHtml(data.status || '<?php echo esc_js( __( 'Open', 'lpr-backorder-allocator' ) ); ?>')}</div></div>
                                                                 </div>
 
                                                                 <div class="lpr-po-summary">
@@ -2349,11 +2357,11 @@ if ( ! class_exists( __NAMESPACE__ . '\\Supplier_PO_Print_PDF' ) ) {
                                                                         <thead>
                                                                                 <tr>
                                                                                         <th><?php echo esc_js( __( 'Product line', 'lpr-backorder-allocator' ) ); ?></th>
-                                                                                        <th><?php echo esc_js( __( 'Incoming', 'lpr-backorder-allocator' ) ); ?></th>
-                                                                                        <th><?php echo esc_js( __( 'Allocated to orders', 'lpr-backorder-allocator' ) ); ?></th>
-                                                                                        <th><?php echo esc_js( __( 'For stock', 'lpr-backorder-allocator' ) ); ?></th>
-                                                                                        <th><?php echo esc_js( __( 'ETA Override', 'lpr-backorder-allocator' ) ); ?></th>
+                                                                                        <th><?php echo esc_js( __( 'Ordered', 'lpr-backorder-allocator' ) ); ?></th>
                                                                                         <th><?php echo esc_js( __( 'Received', 'lpr-backorder-allocator' ) ); ?></th>
+                                                                                        <th><?php echo esc_js( __( 'Allocated', 'lpr-backorder-allocator' ) ); ?></th>
+                                                                                        <th><?php echo esc_js( __( 'For stock', 'lpr-backorder-allocator' ) ); ?></th>
+                                                                                        <th><?php echo esc_js( __( 'ETA', 'lpr-backorder-allocator' ) ); ?></th>
                                                                                 </tr>
                                                                         </thead>
                                                                         <tbody>${linesHtml}</tbody>
@@ -3012,6 +3020,9 @@ if ( ! defined( __NAMESPACE__ . '\CPT_SUPPLIER_PO' ) ) {
 }
 if ( ! defined( __NAMESPACE__ . '\PO_META_SUPPLIER_NAME' ) ) {
 	define( __NAMESPACE__ . '\PO_META_SUPPLIER_NAME', '_lpr_supplier_name' );
+}
+if ( ! defined( __NAMESPACE__ . '\PO_META_SUPPLIER_CONTACT' ) ) {
+	define( __NAMESPACE__ . '\PO_META_SUPPLIER_CONTACT', '_lpr_supplier_contact' );
 }
 if ( ! defined( __NAMESPACE__ . '\PO_META_PO_NUMBER' ) ) {
         define( __NAMESPACE__ . '\PO_META_PO_NUMBER', '_lpr_po_number' );
@@ -4221,8 +4232,9 @@ if ( ! class_exists( __NAMESPACE__ . '\Supplier_PO_CPT' ) ) {
 			}
 			wp_nonce_field( 'lpr_po_header_action', 'lpr_po_header_nonce' );
 
-                        $supplier  = get_post_meta( $post->ID, PO_META_SUPPLIER_NAME, true );
-                        $po_number = get_post_meta( $post->ID, PO_META_PO_NUMBER, true );
+                        $supplier         = get_post_meta( $post->ID, PO_META_SUPPLIER_NAME, true );
+                        $supplier_contact = get_post_meta( $post->ID, defined( __NAMESPACE__ . '\PO_META_SUPPLIER_CONTACT' ) ? PO_META_SUPPLIER_CONTACT : '_lpr_supplier_contact', true );
+                        $po_number        = get_post_meta( $post->ID, PO_META_PO_NUMBER, true );
                         $eta       = lpr_allocator_sanitize_ymd( (string) get_post_meta( $post->ID, PO_META_ETA_DATE, true ) );
                         $note      = (string) get_post_meta( $post->ID, PO_META_NOTE, true );
                         $status    = in_array( $post->post_status, array( PO_STATUS_OPEN, PO_STATUS_PARTIAL, PO_STATUS_CLOSED ), true ) ? $post->post_status : PO_STATUS_OPEN;
@@ -4240,6 +4252,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Supplier_PO_CPT' ) ) {
                                 <div class="field">
                                         <label for="lpr_supplier_name"><strong><?php echo esc_html__( 'Supplier Name', 'lpr-backorder-allocator' ); ?></strong></label>
                                         <input type="text" id="lpr_supplier_name" name="lpr_supplier_name" value="<?php echo esc_attr( (string) $supplier ); ?>" />
+				</div>
+				<div class="field">
+					<label for="lpr_supplier_contact"><strong><?php echo esc_html__( 'Supplier Contact', 'lpr-backorder-allocator' ); ?></strong></label>
+					<input type="text" id="lpr_supplier_contact" name="lpr_supplier_contact" value="<?php echo esc_attr( (string) $supplier_contact ); ?>" />
 				</div>
 				<div class="field">
 					<label for="lpr_po_number"><strong><?php echo esc_html__( 'PO Number', 'lpr-backorder-allocator' ); ?></strong></label>
@@ -4418,13 +4434,15 @@ table.appendChild(tr);
 
 			// Header save.
 			if ( isset( $_POST['lpr_po_header_nonce'] ) && wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['lpr_po_header_nonce'] ) ), 'lpr_po_header_action' ) ) {
-                                $supplier  = isset( $_POST['lpr_supplier_name'] ) ? sanitize_text_field( wp_unslash( $_POST['lpr_supplier_name'] ) ) : '';
-                                $po_number = isset( $_POST['lpr_po_number'] ) ? sanitize_text_field( wp_unslash( $_POST['lpr_po_number'] ) ) : '';
+                                $supplier         = isset( $_POST['lpr_supplier_name'] ) ? sanitize_text_field( wp_unslash( $_POST['lpr_supplier_name'] ) ) : '';
+                                $supplier_contact = isset( $_POST['lpr_supplier_contact'] ) ? sanitize_text_field( wp_unslash( $_POST['lpr_supplier_contact'] ) ) : '';
+                                $po_number        = isset( $_POST['lpr_po_number'] ) ? sanitize_text_field( wp_unslash( $_POST['lpr_po_number'] ) ) : '';
                                 $eta       = isset( $_POST['lpr_eta_date'] ) ? lpr_allocator_sanitize_ymd( wp_unslash( $_POST['lpr_eta_date'] ) ) : '';
                                 $note      = isset( $_POST['lpr_po_note'] ) ? sanitize_textarea_field( wp_unslash( $_POST['lpr_po_note'] ) ) : '';
                                 $status    = isset( $_POST['lpr_po_status'] ) ? sanitize_key( wp_unslash( $_POST['lpr_po_status'] ) ) : PO_STATUS_OPEN;
 
                                 update_post_meta( $post_id, PO_META_SUPPLIER_NAME, $supplier );
+                                update_post_meta( $post_id, defined( __NAMESPACE__ . '\PO_META_SUPPLIER_CONTACT' ) ? PO_META_SUPPLIER_CONTACT : '_lpr_supplier_contact', $supplier_contact );
                                 update_post_meta( $post_id, PO_META_PO_NUMBER, $po_number );
                                 update_post_meta( $post_id, PO_META_ETA_DATE, $eta );
                                 update_post_meta( $post_id, PO_META_NOTE, $note );
