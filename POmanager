@@ -2236,12 +2236,12 @@ if ( ! class_exists( __NAMESPACE__ . '\Reorder_Recommendations_Page' ) ) {
 
                         foreach ( $demand as $product_id => $stat ) {
                                 $qty_total = (int) ( $stat['qty_total'] ?? 0 );
-                                if ( $qty_total <= 0 ) {
+                                if ( $qty_total < 4 ) {
                                         continue;
                                 }
 
                                 $product = function_exists( 'wc_get_product' ) ? wc_get_product( (int) $product_id ) : null;
-                                if ( ! ( $product instanceof \WC_Product ) ) {
+                                if ( ! ( $product instanceof \WC_Product ) || ! $product->is_type( 'simple' ) ) {
                                         continue;
                                 }
 
@@ -2305,6 +2305,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Reorder_Recommendations_Page' ) ) {
                                 $lead_std     = max( 1, (int) ( $lead_row['std_lead'] ?? 4 ) );
                                 $stockout_day = (int) floor( $on_hand / $avg_daily );
                                 $stockout_ts  = $today_ts + ( max( 0, $stockout_day ) * DAY_IN_SECONDS );
+                                $stockout_date = lpr_allocator_format_store_date( wp_date( 'd-m-Y', $stockout_ts ) );
+                                $stockout_is_urgent = $stockout_ts <= ( $today_ts + ( 21 * DAY_IN_SECONDS ) );
 
                                 $recommended_order_ts = $stockout_ts - ( ( $lead_days + 2 ) * DAY_IN_SECONDS );
                                 $reminder_ts          = $recommended_order_ts - ( max( 1, (int) ceil( $lead_days * 0.2 ) ) * DAY_IN_SECONDS );
@@ -2335,6 +2337,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Reorder_Recommendations_Page' ) ) {
                                         'on_hand'           => $on_hand,
                                         'incoming_qty'      => $incoming_qty,
                                         'next_eta'          => $next_eta,
+                                        'stockout_date'     => $stockout_date,
+                                        'stockout_urgent'   => $stockout_is_urgent,
                                         'stockout_window'   => lpr_allocator_format_store_date( wp_date( 'd-m-Y', $window_start ) ) . ' – ' . lpr_allocator_format_store_date( wp_date( 'd-m-Y', $window_end ) ),
                                         'recommended_order' => lpr_allocator_format_store_date( wp_date( 'd-m-Y', $recommended_order_ts ) ),
                                         'reminder_date'     => lpr_allocator_format_store_date( wp_date( 'd-m-Y', $reminder_ts ) ),
@@ -2383,6 +2387,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Reorder_Recommendations_Page' ) ) {
                                                         <th class="num"><?php esc_html_e( 'Reorder Cycle (days)', 'lpr-backorder-allocator' ); ?></th>
                                                         <th class="num"><?php esc_html_e( 'On Hand', 'lpr-backorder-allocator' ); ?></th>
                                                         <th class="num"><?php esc_html_e( 'Incoming Free', 'lpr-backorder-allocator' ); ?></th>
+                                                        <th><?php esc_html_e( 'Expected OOS Date', 'lpr-backorder-allocator' ); ?></th>
                                                         <th><?php esc_html_e( 'Likely Stockout Window', 'lpr-backorder-allocator' ); ?></th>
                                                         <th><?php esc_html_e( 'Recommended Order Date', 'lpr-backorder-allocator' ); ?></th>
                                                         <th><?php esc_html_e( 'Reminder Date', 'lpr-backorder-allocator' ); ?></th>
@@ -2392,7 +2397,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Reorder_Recommendations_Page' ) ) {
                                         </thead>
                                         <tbody>
                                                 <?php if ( empty( $rows ) ) : ?>
-                                                        <tr><td colspan="11"><?php esc_html_e( 'No recommendation data available yet. Add recent orders and supplier PO ETAs to improve forecast quality.', 'lpr-backorder-allocator' ); ?></td></tr>
+                                                        <tr><td colspan="12"><?php esc_html_e( 'No recommendation data available yet. Add recent orders and supplier PO ETAs to improve forecast quality.', 'lpr-backorder-allocator' ); ?></td></tr>
                                                 <?php else : ?>
                                                         <?php foreach ( $rows as $row ) : ?>
                                                                 <tr>
@@ -2402,6 +2407,13 @@ if ( ! class_exists( __NAMESPACE__ . '\Reorder_Recommendations_Page' ) ) {
                                                                         <td class="num"><?php echo esc_html( (string) (int) $row['cycle_days'] ); ?></td>
                                                                         <td class="num"><?php echo esc_html( (string) (int) $row['on_hand'] ); ?></td>
                                                                         <td class="num"><?php echo esc_html( (string) (int) $row['incoming_qty'] ); ?></td>
+                                                                        <td>
+                                                                                <?php if ( ! empty( $row['stockout_urgent'] ) ) : ?>
+                                                                                        <strong style="color:#b32d2e;"><?php echo esc_html( (string) $row['stockout_date'] ); ?></strong>
+                                                                                <?php else : ?>
+                                                                                        <strong><?php echo esc_html( (string) $row['stockout_date'] ); ?></strong>
+                                                                                <?php endif; ?>
+                                                                        </td>
                                                                         <td><?php echo esc_html( (string) $row['stockout_window'] ); ?></td>
                                                                         <td><strong><?php echo esc_html( (string) $row['recommended_order'] ); ?></strong></td>
                                                                         <td><?php echo esc_html( (string) $row['reminder_date'] ); ?></td>
