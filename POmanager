@@ -2652,6 +2652,214 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Cart' ) ) {
         Incoming_Stock_Cart::init();
 }
 
+if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Cart_Eta_Summary' ) ) {
+        /**
+         * Builds a single cart-level ETA estimate from line-level ETAs.
+         */
+        class Incoming_Stock_Cart_Eta_Summary {
+
+                /**
+                 * Prevent duplicate hooks.
+                 *
+                 * @var bool
+                 */
+                private static $bootstrapped = false;
+
+                public static function init(): void {
+                        if ( self::$bootstrapped ) {
+                                return;
+                        }
+
+                        self::$bootstrapped = true;
+
+                        if ( ! self::is_enabled() ) {
+                                return;
+                        }
+
+                        add_action( 'woocommerce_cart_totals_before_order_total', array( __CLASS__, 'render_cart_totals_row' ), 15 );
+                        add_action( 'woocommerce_review_order_before_order_total', array( __CLASS__, 'render_checkout_totals_row' ), 15 );
+                        add_action( 'woocommerce_before_checkout_form', array( __CLASS__, 'render_checkout_summary' ), 8 );
+                }
+
+                /**
+                 * Ensure output only runs on storefront flows.
+                 */
+                protected static function is_enabled(): bool {
+                        if ( wp_doing_cron() ) {
+                                return false;
+                        }
+
+                        if ( is_admin() && ! wp_doing_ajax() ) {
+                                return false;
+                        }
+
+                        if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_frontend_incoming_enabled' ) || ! lpr_allocator_frontend_incoming_enabled() ) {
+                                return false;
+                        }
+
+                        return class_exists( '\WooCommerce' ) && function_exists( 'WC' );
+                }
+
+                /**
+                 * Render in cart totals table.
+                 */
+                public static function render_cart_totals_row(): void {
+                        $summary = self::build_summary();
+                        if ( empty( $summary ) ) {
+                                return;
+                        }
+
+                        echo '<tr class="lpr-cart-eta-summary-row"><th>' . esc_html__( 'Estimated availability', 'lpr-backorder-allocator' ) . '</th><td data-title="' . esc_attr__( 'Estimated availability', 'lpr-backorder-allocator' ) . '">' . self::build_summary_markup( $summary ) . '</td></tr>';
+                }
+
+                /**
+                 * Render in checkout order totals table.
+                 */
+                public static function render_checkout_totals_row(): void {
+                        $summary = self::build_summary();
+                        if ( empty( $summary ) ) {
+                                return;
+                        }
+
+                        echo '<tr class="lpr-checkout-eta-summary-row"><th>' . esc_html__( 'Estimated availability', 'lpr-backorder-allocator' ) . '</th><td>' . self::build_summary_markup( $summary ) . '</td></tr>';
+                }
+
+                /**
+                 * Render prominent summary before checkout form.
+                 */
+                public static function render_checkout_summary(): void {
+                        $summary = self::build_summary();
+                        if ( empty( $summary ) ) {
+                                return;
+                        }
+
+                        echo '<div class="woocommerce-info lpr-checkout-eta-summary">' . self::build_summary_markup( $summary ) . '</div>';
+                }
+
+                /**
+                 * Build aggregate estimate and confidence details from cart lines.
+                 *
+                 * @return array<string,mixed>
+                 */
+                protected static function build_summary(): array {
+                        if ( ! function_exists( 'WC' ) || ! WC()->cart ) {
+                                return array();
+                        }
+
+                        $items = WC()->cart->get_cart();
+                        if ( empty( $items ) ) {
+                                return array();
+                        }
+
+                        $weighted_total = 0;
+                        $weighted_qty   = 0;
+                        $eta_qty        = 0;
+                        $total_qty      = 0;
+                        $timestamps     = array();
+
+                        foreach ( $items as $cart_item ) {
+                                $line_qty  = max( 0, (int) ( $cart_item['quantity'] ?? 0 ) );
+                                $total_qty += $line_qty;
+
+                                if ( $line_qty <= 0 ) {
+                                        continue;
+                                }
+
+                                $product = $cart_item['data'] ?? null;
+                                if ( ! $product instanceof \WC_Product ) {
+                                        continue;
+                                }
+
+                                if ( 'instock' === $product->get_stock_status() ) {
+                                        continue;
+                                }
+
+                                $product_id = (int) $product->get_id();
+                                if ( $product_id <= 0 ) {
+                                        continue;
+                                }
+
+                                $eta_raw = trim( (string) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_ETA' ) ? PRODUCT_META_NEXT_EXTRA_ETA : '_lpr_next_extra_eta', true ) );
+                                if ( '' === $eta_raw ) {
+                                        continue;
+                                }
+
+                                $timestamp = strtotime( $eta_raw );
+                                if ( false === $timestamp ) {
+                                        continue;
+                                }
+
+                                $timestamps[]   = (int) $timestamp;
+                                $weighted_total += (int) $timestamp * $line_qty;
+                                $weighted_qty   += $line_qty;
+                                $eta_qty        += $line_qty;
+                        }
+
+                        if ( $weighted_qty <= 0 ) {
+                                return array();
+                        }
+
+                        $estimate_ts = (int) round( $weighted_total / $weighted_qty );
+                        sort( $timestamps );
+                        $spread_days = 0;
+                        if ( count( $timestamps ) > 1 ) {
+                                $spread_days = (int) round( ( (int) end( $timestamps ) - (int) reset( $timestamps ) ) / DAY_IN_SECONDS );
+                        }
+
+                        $coverage = $total_qty > 0 ? ( $eta_qty / $total_qty ) : 0;
+
+                        $confidence = __( 'Low', 'lpr-backorder-allocator' );
+                        if ( $coverage >= 0.9 && $spread_days <= 2 ) {
+                                $confidence = __( 'High', 'lpr-backorder-allocator' );
+                        } elseif ( $coverage >= 0.6 && $spread_days <= 7 ) {
+                                $confidence = __( 'Medium', 'lpr-backorder-allocator' );
+                        }
+
+                        $assumptions = sprintf(
+                                /* translators: 1: covered quantity, 2: total cart quantity, 3: date spread in days */
+                                __( 'Assumes in-stock lines ship now and backordered lines follow current incoming ETAs (%1$d/%2$d units covered; ETA spread %3$d days).', 'lpr-backorder-allocator' ),
+                                (int) $eta_qty,
+                                (int) $total_qty,
+                                max( 0, (int) $spread_days )
+                        );
+
+                        return array(
+                                'estimate'    => wp_date( get_option( 'date_format' ), $estimate_ts ),
+                                'confidence'  => $confidence,
+                                'assumptions' => $assumptions,
+                        );
+                }
+
+                /**
+                 * Shared markup for all placements.
+                 *
+                 * @param array<string,mixed> $summary
+                 */
+                protected static function build_summary_markup( array $summary ): string {
+                        $estimate    = isset( $summary['estimate'] ) ? (string) $summary['estimate'] : '';
+                        $confidence  = isset( $summary['confidence'] ) ? (string) $summary['confidence'] : '';
+                        $assumptions = isset( $summary['assumptions'] ) ? (string) $summary['assumptions'] : '';
+
+                        if ( '' === $estimate ) {
+                                return '';
+                        }
+
+                        return sprintf(
+                                '<div class="lpr-cart-eta-summary"><strong>%1$s</strong> <span class="lpr-cart-eta-confidence">%2$s: %3$s</span><br /><small>%4$s</small></div>',
+                                sprintf(
+                                        /* translators: %s: best estimate date */
+                                        esc_html__( 'Best estimate: %s', 'lpr-backorder-allocator' ),
+                                        esc_html( $estimate )
+                                ),
+                                esc_html__( 'Confidence', 'lpr-backorder-allocator' ),
+                                esc_html( $confidence ),
+                                esc_html( $assumptions )
+                        );
+                }
+        }
+        Incoming_Stock_Cart_Eta_Summary::init();
+}
+
 if ( ! is_admin() && ! wp_doing_cron() && ! lpr_allocator_is_incoming_request() ) {
         return;
 }
