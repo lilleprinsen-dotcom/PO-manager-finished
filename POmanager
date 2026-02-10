@@ -6312,6 +6312,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
 		protected static function build_timeline( \WC_Order $order ): array {
 			$items = $order->get_items( 'line_item' );
 			$allocation_rows = array();
+			$line_eta_timestamps = self::collect_line_eta_timestamps( $items );
+			$eta_meta            = self::build_split_eta_meta( $line_eta_timestamps );
 			foreach ( $items as $item ) {
 				if ( ! ( $item instanceof \WC_Order_Item_Product ) ) {
 					continue;
@@ -6342,6 +6344,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
 				array(
 					'label' => __( 'ETA updated', 'lpr-backorder-allocator' ),
 					'date'  => self::date_from_ts( $eta_updated_ts ),
+					'meta'  => $eta_meta,
 					'done'  => $eta_updated_ts > 0,
 				),
 				array(
@@ -6354,6 +6357,54 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
 					'date'  => self::date_from_ts( $shipped_ts ),
 					'done'  => $shipped_ts > 0,
 				),
+			);
+		}
+
+		protected static function collect_line_eta_timestamps( array $items ): array {
+			$timestamps = array();
+			$meta_key   = defined( __NAMESPACE__ . '\\ORDER_ITEM_META_LINE_ETA' ) ? ORDER_ITEM_META_LINE_ETA : '_lpr_line_eta';
+
+			foreach ( $items as $item ) {
+				if ( ! ( $item instanceof \WC_Order_Item_Product ) ) {
+					continue;
+				}
+
+				$eta_value = (string) $item->get_meta( $meta_key, true );
+				$eta_ts    = self::to_timestamp( $eta_value );
+				if ( $eta_ts > 0 ) {
+					$timestamps[] = $eta_ts;
+				}
+			}
+
+			$timestamps = array_values( array_unique( $timestamps ) );
+			sort( $timestamps );
+
+			return $timestamps;
+		}
+
+		protected static function build_split_eta_meta( array $eta_timestamps ): string {
+			if ( count( $eta_timestamps ) <= 1 ) {
+				return '';
+			}
+
+			$labels = array();
+			foreach ( $eta_timestamps as $eta_ts ) {
+				$labels[] = self::date_from_ts( (int) $eta_ts );
+			}
+
+			$labels = array_filter( $labels, static function ( $label ): bool {
+				return '' !== trim( (string) $label );
+			} );
+
+			if ( empty( $labels ) ) {
+				return '';
+			}
+
+			return sprintf(
+				/* translators: 1: number of split ETAs, 2: comma-separated ETA dates. */
+				__( 'Split delivery across %1$d ETAs: %2$s', 'lpr-backorder-allocator' ),
+				count( $labels ),
+				implode( ', ', $labels )
 			);
 		}
 
