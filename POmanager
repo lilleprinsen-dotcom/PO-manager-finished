@@ -3388,6 +3388,40 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_sanitize_po_lines_input'
         }
 }
 
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_extract_po_line_targets' ) ) {
+        /**
+         * Extract unique product/variation IDs from PO lines.
+         *
+         * @param mixed $lines
+         * @param bool  $require_qty_only When true, only include lines with qty_ordered > 0.
+         * @return int[]
+         */
+        function lpr_allocator_extract_po_line_targets( $lines, bool $require_qty_only = true ): array {
+                if ( ! is_array( $lines ) ) {
+                        return array();
+                }
+
+                $targets = array();
+                foreach ( $lines as $line ) {
+                        if ( ! is_array( $line ) ) {
+                                continue;
+                        }
+                        $qty_ordered = isset( $line['qty_ordered'] ) ? max( 0, (int) $line['qty_ordered'] ) : 0;
+                        if ( $require_qty_only && $qty_ordered <= 0 ) {
+                                continue;
+                        }
+                        $variation_id = isset( $line['variation_id'] ) ? absint( $line['variation_id'] ) : 0;
+                        $product_id   = isset( $line['product_id'] ) ? absint( $line['product_id'] ) : 0;
+                        $target_id    = $variation_id > 0 ? $variation_id : $product_id;
+                        if ( $target_id > 0 ) {
+                                $targets[ $target_id ] = true;
+                        }
+                }
+
+                return array_map( 'absint', array_keys( $targets ) );
+        }
+}
+
 if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_normalize_po_alloc_index' ) ) {
         /**
          * Normalize a PO allocation index array into a keyed map of order:item => row.
@@ -3410,6 +3444,120 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_normalize_po_alloc_index
                 }
 
                 return $sanitized;
+        }
+}
+
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_remove_po_allocations_for_targets' ) ) {
+        /**
+         * Remove allocations pointing to a PO for specific product/variation IDs.
+         *
+         * @param int   $po_id
+         * @param int[] $target_ids
+         * @return void
+         */
+        function lpr_allocator_remove_po_allocations_for_targets( int $po_id, array $target_ids ): void {
+                if ( $po_id <= 0 || empty( $target_ids ) || ! function_exists( 'wc_get_order' ) ) {
+                        return;
+                }
+
+                $targets = array();
+                foreach ( $target_ids as $target_id ) {
+                        $target_id = absint( $target_id );
+                        if ( $target_id > 0 ) {
+                                $targets[ $target_id ] = true;
+                        }
+                }
+                if ( empty( $targets ) ) {
+                        return;
+                }
+
+                if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_get_po_allocation_index' ) ) {
+                        return;
+                }
+
+                $index = lpr_allocator_get_po_allocation_index( $po_id );
+                if ( empty( $index ) && function_exists( __NAMESPACE__ . '\lpr_allocator_rebuild_po_alloc_index' ) ) {
+                        $index = lpr_allocator_rebuild_po_alloc_index( $po_id );
+                }
+
+                if ( empty( $index ) ) {
+                        return;
+                }
+
+                $meta_key     = ORDER_ITEM_META_ALLOCATIONS;
+                $needs_recalc = array();
+
+                foreach ( $index as $entry ) {
+                        $order_id = isset( $entry['order_id'] ) ? absint( $entry['order_id'] ) : 0;
+                        $item_id  = isset( $entry['item_id'] ) ? absint( $entry['item_id'] ) : 0;
+
+                        if ( $order_id <= 0 || $item_id <= 0 ) {
+                                continue;
+                        }
+
+                        $order = wc_get_order( $order_id );
+                        if ( ! ( $order instanceof \WC_Order ) ) {
+                                continue;
+                        }
+
+                        $item = $order->get_item( $item_id );
+                        if ( ! ( $item instanceof \WC_Order_Item_Product ) ) {
+                                continue;
+                        }
+
+                        $target_id = (int) $item->get_variation_id();
+                        if ( $target_id <= 0 ) {
+                                $target_id = (int) $item->get_product_id();
+                        }
+                        if ( $target_id <= 0 || ! isset( $targets[ $target_id ] ) ) {
+                                continue;
+                        }
+
+                        if ( method_exists( $item, 'read_meta_data' ) ) {
+                                $item->read_meta_data( true );
+                        }
+
+                        $allocs = $item->get_meta( $meta_key, true );
+                        if ( ! is_array( $allocs ) ) {
+                                continue;
+                        }
+
+                        $changed  = false;
+                        $filtered = array();
+                        foreach ( $allocs as $row ) {
+                                $row_po_id = isset( $row['po_id'] ) ? (int) $row['po_id'] : 0;
+                                if ( $row_po_id === $po_id ) {
+                                        $changed = true;
+                                        continue;
+                                }
+                                $filtered[] = $row;
+                        }
+
+                        if ( $changed ) {
+                                $item->update_meta_data( $meta_key, $filtered );
+                                $item->save();
+                                $needs_recalc[ $order_id ] = true;
+                        }
+                }
+
+                if ( empty( $needs_recalc ) ) {
+                        return;
+                }
+
+                foreach ( array_keys( $needs_recalc ) as $oid ) {
+                        if ( function_exists( __NAMESPACE__ . '\lpr_allocator_reapply_po_allocations_for_order' ) ) {
+                                lpr_allocator_reapply_po_allocations_for_order( (int) $oid );
+                        }
+                        if ( class_exists( __NAMESPACE__ . '\ETA' ) ) {
+                                ETA::update_line_eta( (int) $oid );
+                        }
+                }
+
+                $lines = get_post_meta( $po_id, PO_META_LINES, true );
+                if ( is_array( $lines ) ) {
+                        $updated = lpr_allocator_recalculate_po_lines_from_allocations( $po_id, $lines );
+                        update_post_meta( $po_id, PO_META_LINES, $updated );
+                }
         }
 }
 
@@ -4297,6 +4445,12 @@ table.appendChild(tr);
                         if ( isset( $_POST['lpr_po_lines_nonce'] ) && wp_verify_nonce( sanitize_text_field( wp_unslash( $_POST['lpr_po_lines_nonce'] ) ), 'lpr_po_lines_action' ) ) {
                                 $raw_lines = isset( $_POST['lpr_po_lines'] ) ? (array) $_POST['lpr_po_lines'] : array();
                                 $clean     = lpr_allocator_sanitize_po_lines_input( $raw_lines );
+                                $prev_targets = lpr_allocator_extract_po_line_targets( $prev_lines, true );
+                                $new_targets  = lpr_allocator_extract_po_line_targets( $clean, true );
+                                $removed_targets = array_diff( $prev_targets, $new_targets );
+                                if ( ! empty( $removed_targets ) && function_exists( __NAMESPACE__ . '\lpr_allocator_remove_po_allocations_for_targets' ) ) {
+                                        lpr_allocator_remove_po_allocations_for_targets( $post_id, $removed_targets );
+                                }
                                 $clean     = lpr_allocator_recalculate_po_lines_from_allocations( $post_id, $clean );
                                 update_post_meta( $post_id, PO_META_LINES, $clean );
                                 $line_changed = lpr_allocator_extract_po_line_eta_overrides( $clean ) !== $prev_line_map;
