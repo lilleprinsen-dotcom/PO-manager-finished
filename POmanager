@@ -113,6 +113,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                         return array(
                                 'order_statuses'        => array( 'processing', 'on-hold' ),
                                 'inform_customer_eta'   => false,
+                                'eta_update_cadence'   => 'hourly',
+                                'eta_channel_mix'      => array( 'email' ),
+                                'eta_digest_low_severity' => true,
+                                'eta_urgent_delay_days' => 3,
                                 'frontend_extra_pool'   => false,
                                 'frontend_notice_emoji' => true,
                                 'frontend_notice_template'      => __( '%qty% units expected (ETA %eta%)', 'lpr-backorder-allocator' ),
@@ -323,9 +327,40 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                         $th_new                  = isset( $raw['email_table_heading_new_eta'] ) ? sanitize_text_field( $raw['email_table_heading_new_eta'] ) : '';
                         $unallocated_label       = isset( $raw['email_unallocated_label'] ) ? sanitize_text_field( $raw['email_unallocated_label'] ) : '';
 
+                        $allowed_eta_cadence = array( 'immediate', 'hourly', 'daily' );
+                        $eta_cadence         = isset( $raw['eta_update_cadence'] ) ? sanitize_key( (string) $raw['eta_update_cadence'] ) : $defaults['eta_update_cadence'];
+                        if ( ! in_array( $eta_cadence, $allowed_eta_cadence, true ) ) {
+                                $eta_cadence = $defaults['eta_update_cadence'];
+                        }
+
+                        $allowed_eta_channels = array( 'email', 'sms' );
+                        $eta_channel_mix      = isset( $raw['eta_channel_mix'] ) ? $raw['eta_channel_mix'] : $defaults['eta_channel_mix'];
+                        if ( is_string( $eta_channel_mix ) ) {
+                                $eta_channel_mix = preg_split( '/[,\s]+/', $eta_channel_mix ) ?: array();
+                        }
+                        if ( ! is_array( $eta_channel_mix ) ) {
+                                $eta_channel_mix = array();
+                        }
+                        $eta_channel_mix = array_values( array_unique( array_filter( array_map( 'sanitize_key', $eta_channel_mix ), static function ( $channel ) use ( $allowed_eta_channels ) {
+                                return in_array( $channel, $allowed_eta_channels, true );
+                        } ) ) );
+                        if ( empty( $eta_channel_mix ) ) {
+                                $eta_channel_mix = $defaults['eta_channel_mix'];
+                        }
+
+                        $eta_digest_low = isset( $raw['eta_digest_low_severity'] ) ? (bool) $raw['eta_digest_low_severity'] : (bool) $defaults['eta_digest_low_severity'];
+                        $urgent_days    = isset( $raw['eta_urgent_delay_days'] ) ? (int) $raw['eta_urgent_delay_days'] : (int) $defaults['eta_urgent_delay_days'];
+                        if ( $urgent_days < 1 || $urgent_days > 30 ) {
+                                $urgent_days = (int) $defaults['eta_urgent_delay_days'];
+                        }
+
                         return array(
                                 'order_statuses'        => $statuses,
                                 'inform_customer_eta'   => (bool) $inform,
+                                'eta_update_cadence'   => $eta_cadence,
+                                'eta_channel_mix'      => $eta_channel_mix,
+                                'eta_digest_low_severity' => (bool) $eta_digest_low,
+                                'eta_urgent_delay_days' => (int) $urgent_days,
                                 'frontend_extra_pool'   => (bool) $front,
                                 'frontend_notice_emoji' => (bool) $emoji,
                                 'frontend_notice_template' => $notice_tpl,
@@ -657,6 +692,54 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                 ),
 
                                 array(
+                                        'title'       => __( 'ETA update cadence', 'lpr-backorder-allocator' ),
+                                        'desc'        => __( 'Default customer profile preference for ETA update frequency.', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_eta_update_cadence',
+                                        'type'        => 'select',
+                                        'options'     => array(
+                                                'immediate' => __( 'Immediate', 'lpr-backorder-allocator' ),
+                                                'hourly'    => __( 'Hourly digest', 'lpr-backorder-allocator' ),
+                                                'daily'     => __( 'Daily digest', 'lpr-backorder-allocator' ),
+                                        ),
+                                        'default'     => $defaults['eta_update_cadence'],
+                                ),
+
+                                array(
+                                        'title'       => __( 'ETA channel mix', 'lpr-backorder-allocator' ),
+                                        'desc'        => __( 'Default customer profile channels. SMS is reserved for future integrations.', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_eta_channel_mix',
+                                        'type'        => 'multiselect',
+                                        'css'         => 'min-width: 260px;',
+                                        'options'     => array(
+                                                'email' => __( 'Email', 'lpr-backorder-allocator' ),
+                                                'sms'   => __( 'SMS', 'lpr-backorder-allocator' ),
+                                        ),
+                                        'default'     => $defaults['eta_channel_mix'],
+                                ),
+
+                                array(
+                                        'title'   => __( 'Digest low-severity ETA updates', 'lpr-backorder-allocator' ),
+                                        'desc'    => __( 'Batch low-severity ETA updates into digest messages to reduce notification noise.', 'lpr-backorder-allocator' ),
+                                        'id'      => 'lpr_allocator_eta_digest_low_severity',
+                                        'type'    => 'checkbox',
+                                        'default' => 'yes',
+                                ),
+
+                                array(
+                                        'title'       => __( 'Urgent delay threshold (days)', 'lpr-backorder-allocator' ),
+                                        'desc'        => __( 'Delays at or above this threshold are sent immediately even when digesting is enabled.', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_eta_urgent_delay_days',
+                                        'type'        => 'number',
+                                        'css'         => 'width: 90px;',
+                                        'default'     => $defaults['eta_urgent_delay_days'],
+                                        'custom_attributes' => array(
+                                                'min'  => '1',
+                                                'max'  => '30',
+                                                'step' => '1',
+                                        ),
+                                ),
+
+                                array(
                                         'title'       => __( 'ETA email subject', 'lpr-backorder-allocator' ),
                                         'desc'        => __( 'Use %order_number% or %customer_name% placeholders.', 'lpr-backorder-allocator' ),
                                         'id'          => 'lpr_allocator_eta_email_subject',
@@ -908,6 +991,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                         $map = array(
                                 'lpr_allocator_order_statuses'             => (array) $settings['order_statuses'],
                                 'lpr_allocator_inform_customer_eta'        => $settings['inform_customer_eta'] ? 'yes' : 'no',
+                                'lpr_allocator_eta_update_cadence'         => (string) $settings['eta_update_cadence'],
+                                'lpr_allocator_eta_channel_mix'            => (array) $settings['eta_channel_mix'],
+                                'lpr_allocator_eta_digest_low_severity'    => ! empty( $settings['eta_digest_low_severity'] ) ? 'yes' : 'no',
+                                'lpr_allocator_eta_urgent_delay_days'      => (int) $settings['eta_urgent_delay_days'],
                                 'lpr_allocator_frontend_extra_pool'        => $settings['frontend_extra_pool'] ? 'yes' : 'no',
                                 'lpr_allocator_frontend_notice_emoji'      => $settings['frontend_notice_emoji'] ? 'yes' : 'no',
                                 'lpr_allocator_frontend_notice_template'   => (string) $settings['frontend_notice_template'],
@@ -1279,6 +1366,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                         $raw      = $settings;
 
                         $raw['inform_customer_eta']           = ! empty( $_POST['lpr_allocator_inform_customer_eta'] );
+                        $raw['eta_update_cadence']            = isset( $_POST['lpr_allocator_eta_update_cadence'] ) ? (string) wp_unslash( $_POST['lpr_allocator_eta_update_cadence'] ) : $settings['eta_update_cadence'];
+                        $raw['eta_channel_mix']               = isset( $_POST['lpr_allocator_eta_channel_mix'] ) ? (array) wp_unslash( $_POST['lpr_allocator_eta_channel_mix'] ) : $settings['eta_channel_mix'];
+                        $raw['eta_digest_low_severity']       = ! empty( $_POST['lpr_allocator_eta_digest_low_severity'] );
+                        $raw['eta_urgent_delay_days']         = isset( $_POST['lpr_allocator_eta_urgent_delay_days'] ) ? (int) $_POST['lpr_allocator_eta_urgent_delay_days'] : $settings['eta_urgent_delay_days'];
                         $raw['eta_email_subject']             = isset( $_POST['lpr_allocator_eta_email_subject'] ) ? (string) wp_unslash( $_POST['lpr_allocator_eta_email_subject'] ) : $settings['eta_email_subject'];
                         $raw['eta_email_intro']               = isset( $_POST['lpr_allocator_eta_email_intro'] ) ? (string) wp_unslash( $_POST['lpr_allocator_eta_email_intro'] ) : $settings['eta_email_intro'];
                         $raw['email_eta_disclaimer']          = isset( $_POST['lpr_allocator_email_eta_disclaimer'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_eta_disclaimer'] ) : $settings['email_eta_disclaimer'];
@@ -4870,9 +4961,11 @@ public static function update_line_eta( int $order_id ): void {
 
 			// Queue for optional customer email (we’ll send once per order)
                         $changes[] = array(
-                                'name' => $item->get_name() . ( $sku ? ' [' . $sku . ']' : '' ),
-                                'prev' => $from_h,
-                                'new'  => $to_h,
+                                'name'     => $item->get_name() . ( $sku ? ' [' . $sku . ']' : '' ),
+                                'prev'     => $from_h,
+                                'new'      => $to_h,
+                                'prev_raw' => $prev_eta,
+                                'new_raw'  => $new_eta,
                         );
                 }
         }
@@ -4886,7 +4979,157 @@ public static function update_line_eta( int $order_id ): void {
 }
 
                 protected static function maybe_email_eta_changes( \WC_Order $order, array $changes ): void {
-                        self::send_eta_email( $order, $changes );
+                        $preferences = self::eta_notification_preferences( $order );
+                        if ( ! in_array( 'email', (array) $preferences['channels'], true ) ) {
+                                return;
+                        }
+
+                        $urgent_rows = array();
+                        $low_rows    = array();
+
+                        foreach ( $changes as $row ) {
+                                if ( self::is_urgent_eta_delay( $row, (int) $preferences['urgent_delay_days'] ) ) {
+                                        $urgent_rows[] = $row;
+                                } else {
+                                        $low_rows[] = $row;
+                                }
+                        }
+
+                        if ( ! empty( $urgent_rows ) ) {
+                                self::send_eta_email( $order, $urgent_rows );
+                        }
+
+                        if ( empty( $low_rows ) ) {
+                                return;
+                        }
+
+                        if ( empty( $preferences['digest_low'] ) || 'immediate' === $preferences['cadence'] ) {
+                                self::send_eta_email( $order, $low_rows );
+                                return;
+                        }
+
+                        $queued = self::queue_eta_digest_rows( $order, $low_rows );
+                        if ( self::is_digest_due( $order, (string) $preferences['cadence'] ) ) {
+                                self::flush_eta_digest( $order, $queued );
+                        }
+                }
+
+                protected static function eta_notification_preferences( \WC_Order $order ): array {
+                        $settings   = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array();
+                        $defaults   = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::defaults() : array();
+                        $customer_id = (int) $order->get_customer_id();
+
+                        $cadence = isset( $settings['eta_update_cadence'] ) ? (string) $settings['eta_update_cadence'] : (string) ( $defaults['eta_update_cadence'] ?? 'hourly' );
+                        $digest_low = isset( $settings['eta_digest_low_severity'] ) ? (bool) $settings['eta_digest_low_severity'] : true;
+                        $channels = isset( $settings['eta_channel_mix'] ) && is_array( $settings['eta_channel_mix'] ) ? $settings['eta_channel_mix'] : array( 'email' );
+                        $urgent_days = isset( $settings['eta_urgent_delay_days'] ) ? (int) $settings['eta_urgent_delay_days'] : 3;
+
+                        if ( $customer_id > 0 ) {
+                                $meta_cadence = sanitize_key( (string) get_user_meta( $customer_id, '_lpr_eta_update_cadence', true ) );
+                                if ( in_array( $meta_cadence, array( 'immediate', 'hourly', 'daily' ), true ) ) {
+                                        $cadence = $meta_cadence;
+                                }
+
+                                $meta_digest = get_user_meta( $customer_id, '_lpr_eta_digest_low_severity', true );
+                                if ( '' !== $meta_digest && null !== $meta_digest ) {
+                                        $digest_low = function_exists( 'wc_string_to_bool' ) ? wc_string_to_bool( (string) $meta_digest ) : in_array( strtolower( (string) $meta_digest ), array( '1', 'yes', 'true', 'on' ), true );
+                                }
+
+                                $meta_channels = get_user_meta( $customer_id, '_lpr_eta_channel_mix', true );
+                                if ( is_string( $meta_channels ) && '' !== trim( $meta_channels ) ) {
+                                        $meta_channels = preg_split( '/[,\s]+/', $meta_channels ) ?: array();
+                                }
+                                if ( is_array( $meta_channels ) && ! empty( $meta_channels ) ) {
+                                        $channels = $meta_channels;
+                                }
+
+                                $meta_urgent_days = (int) get_user_meta( $customer_id, '_lpr_eta_urgent_delay_days', true );
+                                if ( $meta_urgent_days > 0 ) {
+                                        $urgent_days = $meta_urgent_days;
+                                }
+                        }
+
+                        $channels = array_values( array_unique( array_filter( array_map( 'sanitize_key', (array) $channels ), static function ( $channel ) {
+                                return in_array( $channel, array( 'email', 'sms' ), true );
+                        } ) ) );
+                        if ( empty( $channels ) ) {
+                                $channels = array( 'email' );
+                        }
+
+                        if ( ! in_array( $cadence, array( 'immediate', 'hourly', 'daily' ), true ) ) {
+                                $cadence = 'hourly';
+                        }
+
+                        $urgent_days = max( 1, min( 30, (int) $urgent_days ) );
+
+                        return array(
+                                'cadence'           => $cadence,
+                                'channels'          => $channels,
+                                'digest_low'        => (bool) $digest_low,
+                                'urgent_delay_days' => $urgent_days,
+                        );
+                }
+
+                protected static function is_urgent_eta_delay( array $row, int $threshold_days ): bool {
+                        $prev_raw = isset( $row['prev_raw'] ) ? lpr_allocator_sanitize_ymd( (string) $row['prev_raw'] ) : '';
+                        $new_raw  = isset( $row['new_raw'] ) ? lpr_allocator_sanitize_ymd( (string) $row['new_raw'] ) : '';
+                        if ( '' === $prev_raw || '' === $new_raw ) {
+                                return false;
+                        }
+                        if ( lpr_allocator_compare_dates( $new_raw, $prev_raw ) <= 0 ) {
+                                return false;
+                        }
+                        $prev_obj = lpr_allocator_parse_date( $prev_raw );
+                        $new_obj  = lpr_allocator_parse_date( $new_raw );
+                        if ( ! $prev_obj || ! $new_obj ) {
+                                return false;
+                        }
+                        $days = (int) $prev_obj->diff( $new_obj )->days;
+
+                        return $days >= max( 1, $threshold_days );
+                }
+
+                protected static function digest_meta_key(): string {
+                        return '_lpr_eta_digest_pending_rows';
+                }
+
+                protected static function queue_eta_digest_rows( \WC_Order $order, array $rows ): array {
+                        $meta_key = self::digest_meta_key();
+                        $queued   = $order->get_meta( $meta_key, true );
+                        if ( ! is_array( $queued ) ) {
+                                $queued = array();
+                        }
+                        foreach ( $rows as $row ) {
+                                if ( ! is_array( $row ) ) {
+                                        continue;
+                                }
+                                $queued[] = $row;
+                        }
+                        $order->update_meta_data( $meta_key, $queued );
+                        $order->save();
+
+                        return $queued;
+                }
+
+                protected static function is_digest_due( \WC_Order $order, string $cadence ): bool {
+                        $eta_email_meta_key = defined( __NAMESPACE__ . '\\ORDER_META_LAST_ETA_EMAIL' ) ? ORDER_META_LAST_ETA_EMAIL : '_lpr_last_eta_email';
+                        $last_sent = (int) $order->get_meta( $eta_email_meta_key, true );
+                        if ( $last_sent <= 0 ) {
+                                return true;
+                        }
+                        $interval = 'daily' === $cadence ? DAY_IN_SECONDS : HOUR_IN_SECONDS;
+
+                        return ( time() - $last_sent ) >= $interval;
+                }
+
+                protected static function flush_eta_digest( \WC_Order $order, array $rows ): void {
+                        if ( empty( $rows ) ) {
+                                return;
+                        }
+                        if ( self::send_eta_email( $order, $rows ) ) {
+                                $order->delete_meta_data( self::digest_meta_key() );
+                                $order->save();
+                        }
                 }
 
                 /**
