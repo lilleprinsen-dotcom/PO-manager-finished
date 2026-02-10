@@ -3202,6 +3202,177 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_format_store_date' ) ) {
         }
 }
 
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_requested_delivery_defaults' ) ) {
+        /**
+         * Default structure for requested delivery metadata.
+         *
+         * @return array{date:string,window_start:string,window_end:string,preference:string,has_constraint:bool}
+         */
+        function lpr_allocator_requested_delivery_defaults(): array {
+                return array(
+                        'date'           => '',
+                        'window_start'   => '',
+                        'window_end'     => '',
+                        'preference'     => 'anytime',
+                        'has_constraint' => false,
+                );
+        }
+}
+
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_parse_requested_delivery_meta' ) ) {
+        /**
+         * Parse requested delivery metadata from legacy or JSON storage.
+         *
+         * @param mixed $raw
+         * @return array{date:string,window_start:string,window_end:string,preference:string,has_constraint:bool}
+         */
+        function lpr_allocator_parse_requested_delivery_meta( $raw ): array {
+                $meta     = lpr_allocator_requested_delivery_defaults();
+                $decoded  = null;
+                $raw_text = is_scalar( $raw ) ? trim( (string) $raw ) : '';
+
+                if ( is_array( $raw ) ) {
+                        $decoded = $raw;
+                } elseif ( '' !== $raw_text && ( '{' === substr( $raw_text, 0, 1 ) || '[' === substr( $raw_text, 0, 1 ) ) ) {
+                        $json = json_decode( $raw_text, true );
+                        if ( is_array( $json ) ) {
+                                $decoded = $json;
+                        }
+                }
+
+                if ( is_array( $decoded ) ) {
+                        $meta['date']         = lpr_allocator_sanitize_ymd( (string) ( $decoded['date'] ?? '' ) );
+                        $meta['window_start'] = lpr_allocator_sanitize_ymd( (string) ( $decoded['window_start'] ?? '' ) );
+                        $meta['window_end']   = lpr_allocator_sanitize_ymd( (string) ( $decoded['window_end'] ?? '' ) );
+                        $pref                 = sanitize_key( (string) ( $decoded['preference'] ?? 'anytime' ) );
+                        $allowed_prefs        = array( 'anytime', 'earliest', 'latest', 'exact' );
+                        $meta['preference']   = in_array( $pref, $allowed_prefs, true ) ? $pref : 'anytime';
+                } else {
+                        // Legacy: single date string.
+                        $meta['date'] = lpr_allocator_sanitize_ymd( $raw_text );
+                }
+
+                if ( '' !== $meta['date'] && '' === $meta['window_start'] && '' === $meta['window_end'] ) {
+                        $meta['window_start'] = $meta['date'];
+                        $meta['window_end']   = $meta['date'];
+                }
+                if ( '' !== $meta['window_start'] && '' === $meta['window_end'] ) {
+                        $meta['window_end'] = $meta['window_start'];
+                }
+                if ( '' !== $meta['window_end'] && '' === $meta['window_start'] ) {
+                        $meta['window_start'] = $meta['window_end'];
+                }
+
+                if ( '' !== $meta['window_start'] && '' !== $meta['window_end'] && lpr_allocator_compare_dates( $meta['window_start'], $meta['window_end'] ) > 0 ) {
+                        $tmp                  = $meta['window_start'];
+                        $meta['window_start'] = $meta['window_end'];
+                        $meta['window_end']   = $tmp;
+                }
+
+                $meta['has_constraint'] = ( '' !== $meta['date'] || '' !== $meta['window_start'] || '' !== $meta['window_end'] );
+
+                return $meta;
+        }
+}
+
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_requested_delivery_to_storage' ) ) {
+        /**
+         * Serialize requested delivery metadata for order storage.
+         */
+        function lpr_allocator_requested_delivery_to_storage( array $meta ): string {
+                $parsed = lpr_allocator_parse_requested_delivery_meta( $meta );
+                if ( empty( $parsed['has_constraint'] ) ) {
+                        return '';
+                }
+
+                return wp_json_encode(
+                        array(
+                                'date'         => (string) $parsed['date'],
+                                'window_start' => (string) $parsed['window_start'],
+                                'window_end'   => (string) $parsed['window_end'],
+                                'preference'   => (string) $parsed['preference'],
+                        )
+                );
+        }
+}
+
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_order_requested_delivery_meta' ) ) {
+        /**
+         * Return normalized requested delivery metadata for an order.
+         */
+        function lpr_allocator_order_requested_delivery_meta( \WC_Order $order ): array {
+                $meta_key = defined( __NAMESPACE__ . '\ORDER_META_REQUESTED_DELIVERY' ) ? ORDER_META_REQUESTED_DELIVERY : '_lpr_requested_delivery_date';
+                $raw      = $order->get_meta( $meta_key, true );
+
+                return lpr_allocator_parse_requested_delivery_meta( $raw );
+        }
+}
+
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_requested_delivery_ready_by' ) ) {
+        /**
+         * Requested ready-by date (window end minus 14 days) or empty string.
+         */
+        function lpr_allocator_requested_delivery_ready_by( array $meta ): string {
+                $meta = lpr_allocator_parse_requested_delivery_meta( $meta );
+                $end  = (string) ( $meta['window_end'] ?? '' );
+                if ( '' === $end ) {
+                        return '';
+                }
+
+                $ts = lpr_allocator_date_to_timestamp( $end );
+                if ( $ts <= 0 ) {
+                        return '';
+                }
+
+                return gmdate( 'd-m-Y', $ts - ( 14 * DAY_IN_SECONDS ) );
+        }
+}
+
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_item_fulfillment_confidence' ) ) {
+        /**
+         * Calculate a fulfillment confidence score for a line item.
+         *
+         * @return array{score:int,label:string}
+         */
+        function lpr_allocator_item_fulfillment_confidence( \WC_Order_Item_Product $item, ?\WC_Order $order = null ): array {
+                $force_qty = (int) $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_FORCE_ALLOCATION' ) ? ORDER_ITEM_META_FORCE_ALLOCATION : '_lpr_force_allocation', true );
+                $desired   = function_exists( __NAMESPACE__ . '\lpr_allocator_calc_backorder_desired' ) ? lpr_allocator_calc_backorder_desired( $item ) : max( 0, (int) $item->get_quantity() );
+                $allocated = function_exists( __NAMESPACE__ . '\lpr_allocator_get_item_allocated_active' ) ? lpr_allocator_get_item_allocated_active( $item ) : 0;
+                $target    = max( $desired, $force_qty );
+                $coverage  = $target > 0 ? min( 1, $allocated / $target ) : 1;
+
+                $line_eta  = (string) $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_LINE_ETA' ) ? ORDER_ITEM_META_LINE_ETA : '_lpr_line_eta', true );
+                $eta_clean = lpr_allocator_sanitize_ymd( $line_eta );
+                $eta_score = '' !== $eta_clean ? 1.0 : 0.4;
+
+                $window_score = 1.0;
+                if ( $order instanceof \WC_Order ) {
+                        $meta         = lpr_allocator_order_requested_delivery_meta( $order );
+                        $window_start = (string) ( $meta['window_start'] ?? '' );
+                        $window_end   = (string) ( $meta['window_end'] ?? '' );
+
+                        if ( '' !== $window_start || '' !== $window_end ) {
+                                if ( '' === $eta_clean ) {
+                                        $window_score = 0.5;
+                                } elseif ( '' !== $window_start && lpr_allocator_compare_dates( $eta_clean, $window_start ) < 0 ) {
+                                        $window_score = 0.85;
+                                } elseif ( '' !== $window_end && lpr_allocator_compare_dates( $eta_clean, $window_end ) > 0 ) {
+                                        $window_score = 0.2;
+                                }
+                        }
+                }
+
+                $score = (int) round( 100 * ( ( 0.6 * $coverage ) + ( 0.25 * $eta_score ) + ( 0.15 * $window_score ) ) );
+                $score = max( 0, min( 100, $score ) );
+                $label = $score >= 80 ? __( 'High', 'lpr-backorder-allocator' ) : ( $score >= 50 ? __( 'Medium', 'lpr-backorder-allocator' ) : __( 'Low', 'lpr-backorder-allocator' ) );
+
+                return array(
+                        'score' => $score,
+                        'label' => $label,
+                );
+        }
+}
+
 if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_touch_allocation_status' ) ) {
         /**
          * Update an allocation row status and stamp the change time.
@@ -5973,6 +6144,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
 			echo '<th>' . esc_html__( 'Item', 'lpr-backorder-allocator' ) . '</th>';
 			echo '<th>' . esc_html__( 'Qty', 'lpr-backorder-allocator' ) . '</th>';
 			echo '<th>' . esc_html__( 'ETA', 'lpr-backorder-allocator' ) . '</th>';
+			echo '<th>' . esc_html__( 'Confidence', 'lpr-backorder-allocator' ) . '</th>';
 			echo '<th>' . esc_html__( 'Allocations', 'lpr-backorder-allocator' ) . '</th>';
 			echo '</tr></thead><tbody>';
 
@@ -5994,6 +6166,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
                                 $allocs    = $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_ALLOCATIONS' ) ? ORDER_ITEM_META_ALLOCATIONS : 'lpr_allocations', true );
                                 $needs     = class_exists( __NAMESPACE__ . '\Backorder' ) ? Backorder::needs_allocation( $item ) : false;
                                 $force_qty = (int) $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_FORCE_ALLOCATION' ) ? ORDER_ITEM_META_FORCE_ALLOCATION : '_lpr_force_allocation', true );
+                                $confidence = function_exists( __NAMESPACE__ . '\lpr_allocator_item_fulfillment_confidence' ) ? lpr_allocator_item_fulfillment_confidence( $item, $order ) : array( 'score' => 0, 'label' => __( 'Low', 'lpr-backorder-allocator' ) );
 
                                 echo '<tr>';
                                 echo '<td>';
@@ -6034,6 +6207,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
                                 } else {
                                         echo '<td class="lpr-unallocated">' . esc_html__( 'Unallocated', 'lpr-backorder-allocator' ) . '</td>';
                                 }
+
+                                echo '<td>' . esc_html( sprintf( '%1$d%% (%2$s)', (int) ( $confidence['score'] ?? 0 ), (string) ( $confidence['label'] ?? '' ) ) ) . '</td>';
 
 				echo '<td>';
 				if ( is_array( $allocs ) && ! empty( $allocs ) ) {
@@ -6322,6 +6497,19 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
                                         } else {
                                                 $allocation_label = __( 'Awaiting allocation', 'lpr-backorder-allocator' );
                                         }
+                                }
+
+                                $confidence = function_exists( __NAMESPACE__ . '\lpr_allocator_item_fulfillment_confidence' ) ? lpr_allocator_item_fulfillment_confidence( $item, $order ) : array( 'score' => 0, 'label' => __( 'Low', 'lpr-backorder-allocator' ) );
+                                $confidence_label = sprintf(
+                                        /* translators: 1: score percentage, 2: confidence label */
+                                        __( 'Fulfillment confidence: %1$d%% (%2$s)', 'lpr-backorder-allocator' ),
+                                        (int) ( $confidence['score'] ?? 0 ),
+                                        (string) ( $confidence['label'] ?? '' )
+                                );
+                                if ( '' !== $allocation_label ) {
+                                        $allocation_label .= ' · ' . $confidence_label;
+                                } else {
+                                        $allocation_label = $confidence_label;
                                 }
 
                                 $rows[] = array(
@@ -7652,27 +7840,57 @@ if ( ! class_exists( __NAMESPACE__ . '\Requested_Delivery_Date_Box' ) ) {
                         $order_id = self::resolve_order_id( $post_or_screen );
                         $order    = wc_get_order( $order_id );
                         $value    = '';
+                        $meta     = lpr_allocator_requested_delivery_defaults();
                         if ( $order instanceof \WC_Order ) {
                                 $value = (string) $order->get_meta( defined( __NAMESPACE__ . '\ORDER_META_REQUESTED_DELIVERY' ) ? ORDER_META_REQUESTED_DELIVERY : '_lpr_requested_delivery_date', true );
+                                $meta  = lpr_allocator_parse_requested_delivery_meta( $value );
                         }
 
                         wp_nonce_field( 'lpr_requested_delivery', 'lpr_requested_delivery_nonce' );
 
-                                        woocommerce_wp_text_input(
-                                                array(
-                                                        'id'                => 'lpr_requested_delivery',
-                                                        'name'              => 'lpr_requested_delivery',
-                                                        'type'              => 'text',
-                                                        'label'             => __( 'Requested delivery date (dd-mm-yyyy)', 'lpr-backorder-allocator' ),
-                                                        'class'             => 'short',
-                                                        'value'             => lpr_allocator_sanitize_ymd( $value ),
-                                                        'custom_attributes' => array(
-                                                                'pattern'     => '\\d{2}-\\d{2}-\\d{4}',
-                                                                'placeholder' => 'DD-MM-YYYY',
-                                                        ),
-                                                )
-                                        );
-                        echo '<p class="description">' . esc_html__( 'We aim to have the order ready at least 14 days before this date. Leave blank for ASAP.', 'lpr-backorder-allocator' ) . '</p>';
+                        woocommerce_wp_text_input(
+                                array(
+                                        'id'                => 'lpr_requested_delivery_window_start',
+                                        'name'              => 'lpr_requested_delivery_window_start',
+                                        'type'              => 'text',
+                                        'label'             => __( 'Requested window start (dd-mm-yyyy)', 'lpr-backorder-allocator' ),
+                                        'class'             => 'short',
+                                        'value'             => lpr_allocator_sanitize_ymd( (string) $meta['window_start'] ),
+                                        'custom_attributes' => array(
+                                                'pattern'     => '\\d{2}-\\d{2}-\\d{4}',
+                                                'placeholder' => 'DD-MM-YYYY',
+                                        ),
+                                )
+                        );
+                        woocommerce_wp_text_input(
+                                array(
+                                        'id'                => 'lpr_requested_delivery_window_end',
+                                        'name'              => 'lpr_requested_delivery_window_end',
+                                        'type'              => 'text',
+                                        'label'             => __( 'Requested window end (dd-mm-yyyy)', 'lpr-backorder-allocator' ),
+                                        'class'             => 'short',
+                                        'value'             => lpr_allocator_sanitize_ymd( (string) $meta['window_end'] ),
+                                        'custom_attributes' => array(
+                                                'pattern'     => '\\d{2}-\\d{2}-\\d{4}',
+                                                'placeholder' => 'DD-MM-YYYY',
+                                        ),
+                                )
+                        );
+
+                        $preferences = array(
+                                'anytime'  => __( 'Anytime in window', 'lpr-backorder-allocator' ),
+                                'earliest' => __( 'Prefer earliest slot', 'lpr-backorder-allocator' ),
+                                'latest'   => __( 'Prefer latest slot', 'lpr-backorder-allocator' ),
+                                'exact'    => __( 'Exact window only', 'lpr-backorder-allocator' ),
+                        );
+                        echo '<p><label for="lpr_requested_delivery_preference"><strong>' . esc_html__( 'Delivery preference', 'lpr-backorder-allocator' ) . '</strong></label><br/>';
+                        echo '<select id="lpr_requested_delivery_preference" name="lpr_requested_delivery_preference" class="short">';
+                        foreach ( $preferences as $pref_key => $pref_label ) {
+                                echo '<option value="' . esc_attr( $pref_key ) . '" ' . selected( (string) $meta['preference'], $pref_key, false ) . '>' . esc_html( $pref_label ) . '</option>';
+                        }
+                        echo '</select></p>';
+
+                        echo '<p class="description">' . esc_html__( 'Leave start/end blank for ASAP. For legacy compatibility, the old date field still saves as a single-day window.', 'lpr-backorder-allocator' ) . '</p>';
                 }
 
                 public static function save_meta( int $order_id, $order = null ): void {
@@ -7695,8 +7913,24 @@ if ( ! class_exists( __NAMESPACE__ . '\Requested_Delivery_Date_Box' ) ) {
                                 return;
                         }
 
-                        $raw      = isset( $_POST['lpr_requested_delivery'] ) ? (string) wp_unslash( $_POST['lpr_requested_delivery'] ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
-                        $val      = lpr_allocator_sanitize_ymd( $raw );
+                        $legacy_raw = isset( $_POST['lpr_requested_delivery'] ) ? (string) wp_unslash( $_POST['lpr_requested_delivery'] ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $start_raw  = isset( $_POST['lpr_requested_delivery_window_start'] ) ? (string) wp_unslash( $_POST['lpr_requested_delivery_window_start'] ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $end_raw    = isset( $_POST['lpr_requested_delivery_window_end'] ) ? (string) wp_unslash( $_POST['lpr_requested_delivery_window_end'] ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $pref_raw   = isset( $_POST['lpr_requested_delivery_preference'] ) ? (string) wp_unslash( $_POST['lpr_requested_delivery_preference'] ) : 'anytime'; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+
+                        if ( '' === trim( $start_raw ) && '' === trim( $end_raw ) && '' !== trim( $legacy_raw ) ) {
+                                $start_raw = $legacy_raw;
+                                $end_raw   = $legacy_raw;
+                        }
+
+                        $val = lpr_allocator_requested_delivery_to_storage(
+                                array(
+                                        'window_start' => lpr_allocator_sanitize_ymd( $start_raw ),
+                                        'window_end'   => lpr_allocator_sanitize_ymd( $end_raw ),
+                                        'date'         => '',
+                                        'preference'   => sanitize_key( $pref_raw ),
+                                )
+                        );
                         $meta_key = defined( __NAMESPACE__ . '\ORDER_META_REQUESTED_DELIVERY' ) ? ORDER_META_REQUESTED_DELIVERY : '_lpr_requested_delivery_date';
                         $prev     = '';
 
@@ -8469,14 +8703,14 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_FIFO_Allocator' ) ) {
 
                 /**
                  * Build a FIFO queue of order items needing allocation for a given product/variation.
-                 * Sorted by requested ready-by date (ASAP first, then earliest ready_by), then paid date ASC (fallback created),
+                 * Sorted by window-constrained orders first, then requested ready-by date (ASAP first, then earliest ready_by), then paid date ASC (fallback created),
                  * then created ASC, then order ID ASC.
                  * Always evaluates every eligible order (paginated) so prioritisation is not biased by creation time.
                  *
                  * @param int    $target_id
                  * @param int    $required_total
                  * @param string $po_eta_for_line Current PO ETA (header or override) for eligibility checks.
-                 * @return array[] Each item: [order_id, item_id, need, paid_ts, created_ts, ready_by]
+                 * @return array[] Each item: [order_id, item_id, need, paid_ts, created_ts, ready_by, window_constrained]
                  */
                 protected static function build_fifo_queue( int $target_id, int $required_total, string $po_eta_for_line ): array {
                         $settings = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array( 'order_statuses' => array( 'processing', 'on-hold' ) );
@@ -8513,7 +8747,9 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_FIFO_Allocator' ) ) {
                                         $created  = $order->get_date_created();
                                         $paid_ts  = $paid ? (int) $paid->getTimestamp() : null;
                                         $created_ts = $created ? (int) $created->getTimestamp() : 0;
-                                        $ready_by    = self::requested_ready_by( $order );
+                                        $request_meta      = function_exists( __NAMESPACE__ . '\lpr_allocator_order_requested_delivery_meta' ) ? lpr_allocator_order_requested_delivery_meta( $order ) : array();
+                                        $ready_by          = self::requested_ready_by( $order );
+                                        $window_constrained = ! empty( $request_meta['has_constraint'] );
                                         $backorder_lines = function_exists( __NAMESPACE__ . '\lpr_allocator_count_backorder_lines' ) ? lpr_allocator_count_backorder_lines( $order ) : 0;
                                         if ( $backorder_lines <= 0 ) {
                                                 continue; // No backorders left on this order.
@@ -8558,6 +8794,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_FIFO_Allocator' ) ) {
                                                         'paid_ts'    => $paid_ts,
                                                         'created_ts' => $created_ts,
                                                         'ready_by'   => $ready_by,
+                                                        'window_constrained' => $window_constrained,
                                                         'backorder_lines' => $backorder_lines,
                                                 );
                                         }
@@ -8573,6 +8810,12 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_FIFO_Allocator' ) ) {
                         usort(
                                 $queue,
                                 static function ( $a, $b ) {
+                                        $awc = ! empty( $a['window_constrained'] );
+                                        $bwc = ! empty( $b['window_constrained'] );
+                                        if ( $awc !== $bwc ) {
+                                                return $awc ? -1 : 1;
+                                        }
+
                                         $ar = isset( $a['ready_by'] ) ? (string) $a['ready_by'] : '';
                                         $br = isset( $b['ready_by'] ) ? (string) $b['ready_by'] : '';
                                         if ( $ar !== $br ) {
@@ -8604,24 +8847,13 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_FIFO_Allocator' ) ) {
                  * Requested ready-by date (requested delivery minus 14 days) or empty string.
                  */
                 protected static function requested_ready_by( \WC_Order $order ): string {
-                        $requested = '';
-                        if ( defined( __NAMESPACE__ . '\ORDER_META_REQUESTED_DELIVERY' ) ) {
-                                $requested = (string) $order->get_meta( ORDER_META_REQUESTED_DELIVERY, true );
-                        } else {
-                                $requested = (string) $order->get_meta( '_lpr_requested_delivery_date', true );
+                        if ( function_exists( __NAMESPACE__ . '\lpr_allocator_order_requested_delivery_meta' ) && function_exists( __NAMESPACE__ . '\lpr_allocator_requested_delivery_ready_by' ) ) {
+                                $meta = lpr_allocator_order_requested_delivery_meta( $order );
+
+                                return lpr_allocator_requested_delivery_ready_by( $meta );
                         }
 
-                        $requested = lpr_allocator_sanitize_ymd( $requested );
-                        if ( '' === $requested ) {
-                                return '';
-                        }
-
-                        $ts = lpr_allocator_date_to_timestamp( $requested );
-                        if ( $ts <= 0 ) {
-                                return '';
-                        }
-
-                        return gmdate( 'd-m-Y', $ts - ( 14 * DAY_IN_SECONDS ) );
+                        return '';
                 }
 
                 /**
