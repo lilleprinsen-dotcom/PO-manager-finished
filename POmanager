@@ -1973,7 +1973,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Email_Notification_Preview' ) ) {
 
 
 /**
- * Admin page: reorder recommendations with stockout reminders and supplier risk.
+ * Admin page: reorder recommendations with stockout reminders, filtering, and search.
  */
 if ( ! class_exists( __NAMESPACE__ . '\Reorder_Recommendations_Page' ) ) {
         class Reorder_Recommendations_Page {
@@ -2314,47 +2314,69 @@ if ( ! class_exists( __NAMESPACE__ . '\Reorder_Recommendations_Page' ) ) {
                                 $window_start = $stockout_ts - ( $lead_std * DAY_IN_SECONDS );
                                 $window_end   = $stockout_ts + ( $lead_std * DAY_IN_SECONDS );
 
-                                $confidence = 55;
-                                $confidence += min( 25, (int) ( ( $stat['order_count'] ?? 0 ) * 2 ) );
-                                $confidence += min( 15, (int) ( ( $lead_row['sample_count'] ?? 0 ) * 2 ) );
-                                $confidence -= min( 20, $lead_std * 2 );
-                                $confidence = max( 10, min( 98, $confidence ) );
-
-                                $risk = __( 'Low risk', 'lpr-backorder-allocator' );
-                                $overdue_ratio = (float) ( $lead_row['overdue_ratio'] ?? 0 );
-                                if ( $overdue_ratio >= 0.35 || $lead_std >= 10 ) {
-                                        $risk = __( 'High risk: volatile lead times or overdue open POs.', 'lpr-backorder-allocator' );
-                                } elseif ( $overdue_ratio >= 0.15 || $lead_std >= 6 ) {
-                                        $risk = __( 'Medium risk: lead times are somewhat inconsistent.', 'lpr-backorder-allocator' );
-                                }
-
                                 $rows[] = array(
                                         'product_id'        => (int) $product_id,
                                         'product_label'     => $product->get_formatted_name(),
                                         'supplier'          => $supplier,
+                                        'ordered_qty'       => $qty_total,
                                         'avg_daily'         => round( $avg_daily, 2 ),
                                         'cycle_days'        => $cycle_days,
                                         'on_hand'           => $on_hand,
                                         'incoming_qty'      => $incoming_qty,
                                         'next_eta'          => $next_eta,
                                         'stockout_date'     => $stockout_date,
+                                        'stockout_days'     => max( 0, $stockout_day ),
                                         'stockout_urgent'   => $stockout_is_urgent,
                                         'stockout_window'   => lpr_allocator_format_store_date( wp_date( 'd-m-Y', $window_start ) ) . ' – ' . lpr_allocator_format_store_date( wp_date( 'd-m-Y', $window_end ) ),
                                         'recommended_order' => lpr_allocator_format_store_date( wp_date( 'd-m-Y', $recommended_order_ts ) ),
                                         'reminder_date'     => lpr_allocator_format_store_date( wp_date( 'd-m-Y', $reminder_ts ) ),
-                                        'confidence'        => $confidence,
-                                        'risk_note'         => $risk,
                                 );
                         }
 
                         usort(
                                 $rows,
                                 static function ( array $a, array $b ): int {
-                                        return (float) ( $a['confidence'] ?? 0 ) <=> (float) ( $b['confidence'] ?? 0 );
+                                        $a_days = (int) ( $a['stockout_days'] ?? PHP_INT_MAX );
+                                        $b_days = (int) ( $b['stockout_days'] ?? PHP_INT_MAX );
+                                        if ( $a_days === $b_days ) {
+                                                return (float) ( $b['avg_daily'] ?? 0 ) <=> (float) ( $a['avg_daily'] ?? 0 );
+                                        }
+                                        return $a_days <=> $b_days;
                                 }
                         );
 
-                        return array_slice( $rows, 0, 60 );
+                        return array_slice( $rows, 0, 200 );
+                }
+
+                protected static function filter_rows( array $rows, string $search_term, string $supplier, string $stockout_filter ): array {
+                        $needle = function_exists( 'mb_strtolower' ) ? mb_strtolower( trim( $search_term ) ) : strtolower( trim( $search_term ) );
+
+                        return array_values(
+                                array_filter(
+                                        $rows,
+                                        static function ( array $row ) use ( $needle, $supplier, $stockout_filter ): bool {
+                                                if ( '' !== $supplier && (string) ( $row['supplier'] ?? '' ) !== $supplier ) {
+                                                        return false;
+                                                }
+
+                                                $days_to_stockout = (int) ( $row['stockout_days'] ?? 9999 );
+                                                if ( 'urgent_30' === $stockout_filter && $days_to_stockout > 30 ) {
+                                                        return false;
+                                                }
+                                                if ( 'next_60' === $stockout_filter && $days_to_stockout > 60 ) {
+                                                        return false;
+                                                }
+
+                                                if ( '' === $needle ) {
+                                                        return true;
+                                                }
+
+                                                $haystack = (string) ( $row['product_label'] ?? '' ) . ' ' . (string) ( $row['supplier'] ?? '' );
+                                                $haystack = function_exists( 'mb_strtolower' ) ? mb_strtolower( $haystack ) : strtolower( $haystack );
+                                                return false !== strpos( $haystack, $needle );
+                                        }
+                                )
+                        );
                 }
 
                 public static function render(): void {
@@ -2362,8 +2384,20 @@ if ( ! class_exists( __NAMESPACE__ . '\Reorder_Recommendations_Page' ) ) {
                                 wp_die( esc_html__( 'Insufficient permissions.', 'lpr-backorder-allocator' ) );
                         }
 
-                        $lookback_days = isset( $_GET['lookback_days'] ) ? max( 30, min( 365, absint( $_GET['lookback_days'] ) ) ) : 90; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
-                        $rows          = self::build_recommendations( $lookback_days );
+                        $lookback_days   = isset( $_GET['lookback_days'] ) ? max( 30, min( 365, absint( $_GET['lookback_days'] ) ) ) : 90; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $search_term     = isset( $_GET['s'] ) ? sanitize_text_field( wp_unslash( $_GET['s'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $supplier_filter = isset( $_GET['supplier'] ) ? sanitize_text_field( wp_unslash( $_GET['supplier'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $stockout_filter = isset( $_GET['stockout_filter'] ) ? sanitize_key( wp_unslash( $_GET['stockout_filter'] ) ) : 'any'; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        if ( ! in_array( $stockout_filter, array( 'any', 'urgent_30', 'next_60' ), true ) ) {
+                                $stockout_filter = 'any';
+                        }
+
+                        $rows           = self::build_recommendations( $lookback_days );
+                        $supplier_names = array_values( array_unique( array_map( static function ( array $row ): string {
+                                return (string) ( $row['supplier'] ?? '' );
+                        }, $rows ) ) );
+                        sort( $supplier_names, SORT_NATURAL | SORT_FLAG_CASE );
+                        $rows = self::filter_rows( $rows, $search_term, $supplier_filter, $stockout_filter );
                         ?>
                         <div class="wrap">
                                 <h1><?php echo esc_html__( 'Reorder Recommendations', 'lpr-backorder-allocator' ); ?></h1>
@@ -2375,6 +2409,27 @@ if ( ! class_exists( __NAMESPACE__ . '\Reorder_Recommendations_Page' ) ) {
                                                 <?php esc_html_e( 'Lookback days:', 'lpr-backorder-allocator' ); ?>
                                                 <input type="number" min="30" max="365" step="1" name="lookback_days" value="<?php echo esc_attr( (string) $lookback_days ); ?>" />
                                         </label>
+                                        <label style="margin-left:10px;">
+                                                <?php esc_html_e( 'Search:', 'lpr-backorder-allocator' ); ?>
+                                                <input type="search" name="s" value="<?php echo esc_attr( $search_term ); ?>" placeholder="<?php echo esc_attr__( 'Product or supplier…', 'lpr-backorder-allocator' ); ?>" />
+                                        </label>
+                                        <label style="margin-left:10px;">
+                                                <?php esc_html_e( 'Supplier:', 'lpr-backorder-allocator' ); ?>
+                                                <select name="supplier">
+                                                        <option value=""><?php esc_html_e( 'All suppliers', 'lpr-backorder-allocator' ); ?></option>
+                                                        <?php foreach ( $supplier_names as $supplier_name ) : ?>
+                                                                <option value="<?php echo esc_attr( $supplier_name ); ?>" <?php selected( $supplier_filter, $supplier_name ); ?>><?php echo esc_html( $supplier_name ); ?></option>
+                                                        <?php endforeach; ?>
+                                                </select>
+                                        </label>
+                                        <label style="margin-left:10px;">
+                                                <?php esc_html_e( 'Stockout filter:', 'lpr-backorder-allocator' ); ?>
+                                                <select name="stockout_filter">
+                                                        <option value="any" <?php selected( $stockout_filter, 'any' ); ?>><?php esc_html_e( 'Any', 'lpr-backorder-allocator' ); ?></option>
+                                                        <option value="urgent_30" <?php selected( $stockout_filter, 'urgent_30' ); ?>><?php esc_html_e( 'Stockout in ≤30 days', 'lpr-backorder-allocator' ); ?></option>
+                                                        <option value="next_60" <?php selected( $stockout_filter, 'next_60' ); ?>><?php esc_html_e( 'Stockout in ≤60 days', 'lpr-backorder-allocator' ); ?></option>
+                                                </select>
+                                        </label>
                                         <button type="submit" class="button button-secondary"><?php esc_html_e( 'Refresh', 'lpr-backorder-allocator' ); ?></button>
                                 </form>
 
@@ -2383,6 +2438,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Reorder_Recommendations_Page' ) ) {
                                                 <tr>
                                                         <th><?php esc_html_e( 'Product', 'lpr-backorder-allocator' ); ?></th>
                                                         <th><?php esc_html_e( 'Supplier', 'lpr-backorder-allocator' ); ?></th>
+                                                        <th class="num"><?php esc_html_e( 'Ordered in Period', 'lpr-backorder-allocator' ); ?></th>
                                                         <th class="num"><?php esc_html_e( 'Avg Daily Demand', 'lpr-backorder-allocator' ); ?></th>
                                                         <th class="num"><?php esc_html_e( 'Reorder Cycle (days)', 'lpr-backorder-allocator' ); ?></th>
                                                         <th class="num"><?php esc_html_e( 'On Hand', 'lpr-backorder-allocator' ); ?></th>
@@ -2391,18 +2447,17 @@ if ( ! class_exists( __NAMESPACE__ . '\Reorder_Recommendations_Page' ) ) {
                                                         <th><?php esc_html_e( 'Likely Stockout Window', 'lpr-backorder-allocator' ); ?></th>
                                                         <th><?php esc_html_e( 'Recommended Order Date', 'lpr-backorder-allocator' ); ?></th>
                                                         <th><?php esc_html_e( 'Reminder Date', 'lpr-backorder-allocator' ); ?></th>
-                                                        <th><?php esc_html_e( 'Confidence', 'lpr-backorder-allocator' ); ?></th>
-                                                        <th><?php esc_html_e( 'Supplier Risk Note', 'lpr-backorder-allocator' ); ?></th>
                                                 </tr>
                                         </thead>
                                         <tbody>
                                                 <?php if ( empty( $rows ) ) : ?>
-                                                        <tr><td colspan="12"><?php esc_html_e( 'No recommendation data available yet. Add recent orders and supplier PO ETAs to improve forecast quality.', 'lpr-backorder-allocator' ); ?></td></tr>
+                                                        <tr><td colspan="11"><?php esc_html_e( 'No recommendation data available yet. Add recent orders and supplier PO ETAs to improve forecast quality.', 'lpr-backorder-allocator' ); ?></td></tr>
                                                 <?php else : ?>
                                                         <?php foreach ( $rows as $row ) : ?>
                                                                 <tr>
                                                                         <td><?php echo esc_html( (string) $row['product_label'] ); ?></td>
                                                                         <td><?php echo esc_html( (string) $row['supplier'] ); ?></td>
+                                                                        <td class="num"><?php echo esc_html( (string) (int) $row['ordered_qty'] ); ?></td>
                                                                         <td class="num"><?php echo esc_html( number_format_i18n( (float) $row['avg_daily'], 2 ) ); ?></td>
                                                                         <td class="num"><?php echo esc_html( (string) (int) $row['cycle_days'] ); ?></td>
                                                                         <td class="num"><?php echo esc_html( (string) (int) $row['on_hand'] ); ?></td>
@@ -2417,8 +2472,6 @@ if ( ! class_exists( __NAMESPACE__ . '\Reorder_Recommendations_Page' ) ) {
                                                                         <td><?php echo esc_html( (string) $row['stockout_window'] ); ?></td>
                                                                         <td><strong><?php echo esc_html( (string) $row['recommended_order'] ); ?></strong></td>
                                                                         <td><?php echo esc_html( (string) $row['reminder_date'] ); ?></td>
-                                                                        <td><?php echo esc_html( (string) (int) $row['confidence'] ); ?>%</td>
-                                                                        <td><?php echo esc_html( (string) $row['risk_note'] ); ?></td>
                                                                 </tr>
                                                         <?php endforeach; ?>
                                                 <?php endif; ?>
