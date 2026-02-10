@@ -2150,6 +2150,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Cart' ) ) {
                                 return;
                         }
 
+                        if ( 'instock' === $product->get_stock_status() ) {
+                                return;
+                        }
+
                         $qty = (int) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_QTY' ) ? PRODUCT_META_NEXT_EXTRA_QTY : '_lpr_next_extra_qty', true );
                         if ( $qty <= 0 ) {
                                 return;
