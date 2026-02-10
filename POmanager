@@ -125,6 +125,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                                 'frontend_refresh_interval'     => 900,
                                 'backorder_index_interval'      => 21600,
                                 'auto_allocation_interval'      => 0,
+                                'requested_delivery_lead_days'  => 14,
+                                'requested_delivery_window_priority_days' => 21,
                                 'brand_logo_url'        => '',
                                 'brand_primary_color'   => '#1a1a1a',
                                 'brand_support_email'   => '',
@@ -354,6 +356,16 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                                 $urgent_days = (int) $defaults['eta_urgent_delay_days'];
                         }
 
+                        $requested_lead_days = isset( $raw['requested_delivery_lead_days'] ) ? (int) $raw['requested_delivery_lead_days'] : (int) $defaults['requested_delivery_lead_days'];
+                        if ( $requested_lead_days < 0 || $requested_lead_days > 90 ) {
+                                $requested_lead_days = (int) $defaults['requested_delivery_lead_days'];
+                        }
+
+                        $requested_priority_days = isset( $raw['requested_delivery_window_priority_days'] ) ? (int) $raw['requested_delivery_window_priority_days'] : (int) $defaults['requested_delivery_window_priority_days'];
+                        if ( $requested_priority_days < 0 || $requested_priority_days > 365 ) {
+                                $requested_priority_days = (int) $defaults['requested_delivery_window_priority_days'];
+                        }
+
                         return array(
                                 'order_statuses'        => $statuses,
                                 'inform_customer_eta'   => (bool) $inform,
@@ -369,6 +381,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                                 'frontend_refresh_interval' => (int) $interval,
                                 'backorder_index_interval' => (int) $index_interval,
                                 'auto_allocation_interval' => (int) $alloc_interval,
+                                'requested_delivery_lead_days' => (int) $requested_lead_days,
+                                'requested_delivery_window_priority_days' => (int) $requested_priority_days,
                                 'brand_logo_url'        => $logo,
                                 'brand_primary_color'   => $color,
                                 'brand_support_email'   => $email,
@@ -500,6 +514,34 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                         'class'    => 'wc-enhanced-select',
                                         'options'  => $status_opts,
                                         'default'  => Settings::defaults()['order_statuses'],
+                                ),
+
+                                array(
+                                        'title'       => __( 'Requested delivery procurement lead time (days)', 'lpr-backorder-allocator' ),
+                                        'desc'        => __( 'Requested delivery dates are converted into readiness dates by subtracting this many days.', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_requested_delivery_lead_days',
+                                        'type'        => 'number',
+                                        'css'         => 'width: 90px;',
+                                        'default'     => $defaults['requested_delivery_lead_days'],
+                                        'custom_attributes' => array(
+                                                'min'  => '0',
+                                                'max'  => '90',
+                                                'step' => '1',
+                                        ),
+                                ),
+
+                                array(
+                                        'title'       => __( 'Priority window for requested delivery (days)', 'lpr-backorder-allocator' ),
+                                        'desc'        => __( 'Requested-delivery orders are prioritised before ASAP orders only when their readiness date is within this many days. Far-future requests will no longer block ASAP reallocation.', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_requested_delivery_window_priority_days',
+                                        'type'        => 'number',
+                                        'css'         => 'width: 90px;',
+                                        'default'     => $defaults['requested_delivery_window_priority_days'],
+                                        'custom_attributes' => array(
+                                                'min'  => '0',
+                                                'max'  => '365',
+                                                'step' => '1',
+                                        ),
                                 ),
 
 				array(
@@ -1003,6 +1045,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                 'lpr_allocator_frontend_refresh_interval'  => (int) $settings['frontend_refresh_interval'],
                                 'lpr_allocator_backorder_index_interval'   => (int) $settings['backorder_index_interval'],
                                 'lpr_allocator_auto_allocation_interval'   => (int) $settings['auto_allocation_interval'],
+                                'lpr_allocator_requested_delivery_lead_days' => (int) $settings['requested_delivery_lead_days'],
+                                'lpr_allocator_requested_delivery_window_priority_days' => (int) $settings['requested_delivery_window_priority_days'],
                                 'lpr_allocator_incoming_mobile_users'      => self::format_mobile_users_field( (array) ( $settings['incoming_mobile_users'] ?? array() ) ),
                                 'lpr_allocator_brand_logo_url'             => (string) $settings['brand_logo_url'],
                                 'lpr_allocator_brand_primary_color'        => (string) $settings['brand_primary_color'],
@@ -1330,6 +1374,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                         $raw['frontend_refresh_interval']   = isset( $_POST['lpr_allocator_frontend_refresh_interval'] ) ? (int) $_POST['lpr_allocator_frontend_refresh_interval'] : $settings['frontend_refresh_interval'];
                         $raw['backorder_index_interval']    = isset( $_POST['lpr_allocator_backorder_index_interval'] ) ? (int) $_POST['lpr_allocator_backorder_index_interval'] : $settings['backorder_index_interval'];
                         $raw['auto_allocation_interval']    = isset( $_POST['lpr_allocator_auto_allocation_interval'] ) ? (int) $_POST['lpr_allocator_auto_allocation_interval'] : $settings['auto_allocation_interval'];
+                        $raw['requested_delivery_lead_days'] = isset( $_POST['lpr_allocator_requested_delivery_lead_days'] ) ? (int) $_POST['lpr_allocator_requested_delivery_lead_days'] : $settings['requested_delivery_lead_days'];
+                        $raw['requested_delivery_window_priority_days'] = isset( $_POST['lpr_allocator_requested_delivery_window_priority_days'] ) ? (int) $_POST['lpr_allocator_requested_delivery_window_priority_days'] : $settings['requested_delivery_window_priority_days'];
                         $raw['incoming_mobile_users']       = isset( $_POST['lpr_allocator_incoming_mobile_users'] ) ? (string) wp_unslash( $_POST['lpr_allocator_incoming_mobile_users'] ) : $settings['incoming_mobile_users'];
 
                         Settings::update( $raw );
@@ -3793,7 +3839,16 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_requested_delivery_ready
                         return '';
                 }
 
-                return gmdate( 'd-m-Y', $ts - ( 14 * DAY_IN_SECONDS ) );
+                $lead_days = 14;
+                if ( class_exists( __NAMESPACE__ . '\Settings' ) ) {
+                        $settings  = Settings::get();
+                        $lead_days = isset( $settings['requested_delivery_lead_days'] ) ? (int) $settings['requested_delivery_lead_days'] : 14;
+                }
+                if ( $lead_days < 0 ) {
+                        $lead_days = 0;
+                }
+
+                return gmdate( 'd-m-Y', $ts - ( $lead_days * DAY_IN_SECONDS ) );
         }
 }
 
@@ -9324,14 +9379,14 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_FIFO_Allocator' ) ) {
 
                 /**
                  * Build a FIFO queue of order items needing allocation for a given product/variation.
-                 * Sorted by window-constrained orders first, then requested ready-by date (ASAP first, then earliest ready_by), then paid date ASC (fallback created),
+                 * Sorted by urgent requested-delivery orders first, then requested ready-by date (ASAP first, then earliest ready_by), then paid date ASC (fallback created),
                  * then created ASC, then order ID ASC.
                  * Always evaluates every eligible order (paginated) so prioritisation is not biased by creation time.
                  *
                  * @param int    $target_id
                  * @param int    $required_total
                  * @param string $po_eta_for_line Current PO ETA (header or override) for eligibility checks.
-                 * @return array[] Each item: [order_id, item_id, need, paid_ts, created_ts, ready_by, window_constrained]
+                 * @return array[] Each item: [order_id, item_id, need, paid_ts, created_ts, ready_by, window_constrained, requested_priority]
                  */
                 protected static function build_fifo_queue( int $target_id, int $required_total, string $po_eta_for_line ): array {
                         $settings = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array( 'order_statuses' => array( 'processing', 'on-hold' ) );
@@ -9371,6 +9426,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_FIFO_Allocator' ) ) {
                                         $request_meta      = function_exists( __NAMESPACE__ . '\lpr_allocator_order_requested_delivery_meta' ) ? lpr_allocator_order_requested_delivery_meta( $order ) : array();
                                         $ready_by          = self::requested_ready_by( $order );
                                         $window_constrained = ! empty( $request_meta['has_constraint'] );
+                                        $requested_priority = $window_constrained && self::is_requested_priority_order( $ready_by );
                                         $backorder_lines = function_exists( __NAMESPACE__ . '\lpr_allocator_count_backorder_lines' ) ? lpr_allocator_count_backorder_lines( $order ) : 0;
                                         if ( $backorder_lines <= 0 ) {
                                                 continue; // No backorders left on this order.
@@ -9416,6 +9472,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_FIFO_Allocator' ) ) {
                                                         'created_ts' => $created_ts,
                                                         'ready_by'   => $ready_by,
                                                         'window_constrained' => $window_constrained,
+                                                        'requested_priority' => $requested_priority,
                                                         'backorder_lines' => $backorder_lines,
                                                 );
                                         }
@@ -9431,10 +9488,10 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_FIFO_Allocator' ) ) {
                         usort(
                                 $queue,
                                 static function ( $a, $b ) {
-                                        $awc = ! empty( $a['window_constrained'] );
-                                        $bwc = ! empty( $b['window_constrained'] );
-                                        if ( $awc !== $bwc ) {
-                                                return $awc ? -1 : 1;
+                                        $aprio = ! empty( $a['requested_priority'] );
+                                        $bprio = ! empty( $b['requested_priority'] );
+                                        if ( $aprio !== $bprio ) {
+                                                return $aprio ? -1 : 1;
                                         }
 
                                         $ar = isset( $a['ready_by'] ) ? (string) $a['ready_by'] : '';
@@ -9475,6 +9532,38 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_FIFO_Allocator' ) ) {
                         }
 
                         return '';
+                }
+
+                /**
+                 * Whether a requested-delivery order should outrank ASAP demand in FIFO allocation.
+                 */
+                protected static function is_requested_priority_order( string $ready_by ): bool {
+                        if ( '' === $ready_by ) {
+                                return false;
+                        }
+
+                        $ready_ts = lpr_allocator_date_to_timestamp( $ready_by );
+                        if ( $ready_ts <= 0 ) {
+                                return false;
+                        }
+
+                        $priority_days = 21;
+                        if ( class_exists( __NAMESPACE__ . '\Settings' ) ) {
+                                $settings      = Settings::get();
+                                $priority_days = isset( $settings['requested_delivery_window_priority_days'] ) ? (int) $settings['requested_delivery_window_priority_days'] : 21;
+                        }
+                        if ( $priority_days < 0 ) {
+                                $priority_days = 0;
+                        }
+
+                        $today_ts = lpr_allocator_date_to_timestamp( gmdate( 'd-m-Y' ) );
+                        if ( $today_ts <= 0 ) {
+                                return false;
+                        }
+
+                        $days_until = (int) floor( ( $ready_ts - $today_ts ) / DAY_IN_SECONDS );
+
+                        return $days_until <= $priority_days;
                 }
 
                 /**
