@@ -2050,8 +2050,55 @@ if ( ! class_exists( __NAMESPACE__ . '\Reorder_Recommendations_Page' ) ) {
                 }
 
                 protected static function gather_product_demand( int $lookback_days ): array {
+                        global $wpdb;
+
                         if ( ! function_exists( 'wc_get_orders' ) ) {
                                 return array();
+                        }
+
+                        $orders_table        = $wpdb->prefix . 'wc_order_stats';
+                        $order_product_table = $wpdb->prefix . 'wc_order_product_lookup';
+
+                        if ( $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $orders_table ) ) === $orders_table && $wpdb->get_var( $wpdb->prepare( 'SHOW TABLES LIKE %s', $order_product_table ) ) === $order_product_table ) {
+                                $after_date = gmdate( 'Y-m-d H:i:s', strtotime( '-' . max( 30, $lookback_days ) . ' days' ) );
+                                $statuses   = array( 'wc-processing', 'wc-completed', 'wc-on-hold' );
+                                $placeholders = implode( ',', array_fill( 0, count( $statuses ), '%s' ) );
+
+                                $sql = $wpdb->prepare(
+                                        "SELECT opl.product_id AS product_id,
+                                                SUM(opl.product_qty) AS qty_total,
+                                                COUNT(*) AS order_count,
+                                                COUNT(DISTINCT DATE(os.date_created_gmt)) AS order_days_count
+                                         FROM {$order_product_table} opl
+                                         INNER JOIN {$orders_table} os ON os.order_id = opl.order_id
+                                         WHERE os.status IN ({$placeholders})
+                                           AND os.date_created_gmt >= %s
+                                         GROUP BY opl.product_id",
+                                        array_merge( $statuses, array( $after_date ) )
+                                );
+
+                                $results = $wpdb->get_results( $sql, ARRAY_A );
+                                if ( is_array( $results ) && ! empty( $results ) ) {
+                                        $rows = array();
+                                        foreach ( $results as $result ) {
+                                                $target_id = isset( $result['product_id'] ) ? (int) $result['product_id'] : 0;
+                                                $qty_total = isset( $result['qty_total'] ) ? (int) $result['qty_total'] : 0;
+                                                if ( $target_id <= 0 || $qty_total <= 0 ) {
+                                                        continue;
+                                                }
+
+                                                $rows[ $target_id ] = array(
+                                                        'qty_total'   => $qty_total,
+                                                        'order_days'  => array(),
+                                                        'order_count' => isset( $result['order_count'] ) ? (int) $result['order_count'] : 0,
+                                                        'days_count'  => isset( $result['order_days_count'] ) ? (int) $result['order_days_count'] : 0,
+                                                );
+                                        }
+
+                                        if ( ! empty( $rows ) ) {
+                                                return $rows;
+                                        }
+                                }
                         }
 
                         $rows         = array();
@@ -2125,6 +2172,22 @@ if ( ! class_exists( __NAMESPACE__ . '\Reorder_Recommendations_Page' ) ) {
                         $rows        = array();
                         $today_ts    = current_time( 'timestamp' );
 
+                        $candidate_cap = 600;
+                        if ( count( $demand ) > $candidate_cap ) {
+                                uasort(
+                                        $demand,
+                                        static function ( array $a, array $b ): int {
+                                                $a_qty = (int) ( $a['qty_total'] ?? 0 );
+                                                $b_qty = (int) ( $b['qty_total'] ?? 0 );
+                                                if ( $a_qty === $b_qty ) {
+                                                        return (int) ( $b['order_count'] ?? 0 ) <=> (int) ( $a['order_count'] ?? 0 );
+                                                }
+                                                return $b_qty <=> $a_qty;
+                                        }
+                                );
+                                $demand = array_slice( $demand, 0, $candidate_cap, true );
+                        }
+
                         foreach ( $demand as $product_id => $stat ) {
                                 $qty_total = (int) ( $stat['qty_total'] ?? 0 );
                                 if ( $qty_total <= 0 ) {
@@ -2141,10 +2204,15 @@ if ( ! class_exists( __NAMESPACE__ . '\Reorder_Recommendations_Page' ) ) {
                                         continue;
                                 }
 
-                                $order_days = array_keys( (array) ( $stat['order_days'] ?? array() ) );
-                                sort( $order_days );
                                 $cycle_days = 0;
-                                if ( count( $order_days ) >= 2 ) {
+                                $order_days_count = isset( $stat['days_count'] ) ? (int) $stat['days_count'] : 0;
+                                if ( 0 === $order_days_count ) {
+                                        $order_days_count = count( (array) ( $stat['order_days'] ?? array() ) );
+                                }
+
+                                if ( $order_days_count >= 2 ) {
+                                        $order_days = array_keys( (array) ( $stat['order_days'] ?? array() ) );
+                                        sort( $order_days );
                                         $gaps = array();
                                         for ( $i = 1; $i < count( $order_days ); $i++ ) {
                                                 $prev = strtotime( $order_days[ $i - 1 ] );
@@ -2156,6 +2224,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Reorder_Recommendations_Page' ) ) {
                                         if ( ! empty( $gaps ) ) {
                                                 sort( $gaps );
                                                 $cycle_days = (int) $gaps[ (int) floor( count( $gaps ) / 2 ) ];
+                                        } elseif ( $order_days_count > 1 ) {
+                                                $cycle_days = (int) max( 1, round( max( 1, $lookback_days ) / $order_days_count ) );
                                         }
                                 }
                                 if ( $cycle_days <= 0 ) {
