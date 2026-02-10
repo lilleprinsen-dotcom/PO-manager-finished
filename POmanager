@@ -4703,6 +4703,33 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_extract_po_line_eta_over
         }
 }
 
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_resolve_line_eta' ) ) {
+        /**
+         * Resolve the effective ETA for a PO line.
+         *
+         * Prefers line-level ETA override and falls back to the PO header ETA.
+         *
+         * @param int   $po_id PO ID.
+         * @param mixed $line  Raw PO line array.
+         * @return string Normalized Y-m-d date or empty string.
+         */
+        function lpr_allocator_resolve_line_eta( int $po_id, $line ): string {
+                if ( $po_id <= 0 ) {
+                        return '';
+                }
+
+                if ( is_array( $line ) ) {
+                        $eta_override = isset( $line['eta_override'] ) ? lpr_allocator_sanitize_ymd( (string) $line['eta_override'] ) : '';
+                        if ( '' !== $eta_override ) {
+                                return $eta_override;
+                        }
+                }
+
+                $po_eta = get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_ETA_DATE' ) ? PO_META_ETA_DATE : '_lpr_eta_date', true );
+                return lpr_allocator_sanitize_ymd( (string) $po_eta );
+        }
+}
+
 if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_update_order_line_etas_for_po' ) ) {
         /**
          * Recompute order line ETAs for orders linked to a PO.
