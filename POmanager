@@ -5461,6 +5461,234 @@ public static function update_line_eta( int $order_id ): void {
 
 if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
 	/**
+	 * Shared order timeline component for admin + customer order views.
+	 */
+	class Order_Timeline {
+
+		public static function init(): void {
+			add_action( 'woocommerce_order_details_after_order_table', array( __CLASS__, 'render_customer_timeline' ), 15 );
+		}
+
+		public static function render_customer_timeline( $order ): void {
+			if ( ! ( $order instanceof \WC_Order ) ) {
+				return;
+			}
+
+			echo self::render( $order, false );
+		}
+
+		public static function render_admin_timeline( \WC_Order $order ): void {
+			echo self::render( $order, true );
+		}
+
+		protected static function render( \WC_Order $order, bool $is_admin ): string {
+			$timeline = self::build_timeline( $order );
+			if ( empty( $timeline ) ) {
+				return '';
+			}
+
+			$wrapper_class = $is_admin ? 'lpr-order-timeline lpr-order-timeline-admin' : 'lpr-order-timeline';
+			$html  = '<div class="' . esc_attr( $wrapper_class ) . '">';
+			$html .= '<h3>' . esc_html__( 'Order timeline', 'lpr-backorder-allocator' ) . '</h3>';
+			$html .= '<ol>';
+
+			foreach ( $timeline as $step ) {
+				$done  = ! empty( $step['done'] );
+				$label = isset( $step['label'] ) ? (string) $step['label'] : '';
+				$date  = isset( $step['date'] ) ? (string) $step['date'] : '';
+				$meta  = isset( $step['meta'] ) ? (string) $step['meta'] : '';
+
+				$html .= '<li class="' . esc_attr( $done ? 'is-done' : 'is-pending' ) . '">';
+				$html .= '<span class="lpr-dot" aria-hidden="true"></span>';
+				$html .= '<div class="lpr-step">';
+				$html .= '<strong>' . esc_html( $label ) . '</strong>';
+				if ( '' !== $date ) {
+					$html .= '<div class="lpr-date">' . esc_html( $date ) . '</div>';
+				}
+				if ( '' !== $meta ) {
+					$html .= '<div class="lpr-meta">' . esc_html( $meta ) . '</div>';
+				}
+				$html .= '</div></li>';
+			}
+
+			$html .= '</ol></div>';
+			$html .= self::styles();
+
+			return $html;
+		}
+
+		protected static function build_timeline( \WC_Order $order ): array {
+			$items = $order->get_items( 'line_item' );
+			$allocation_rows = array();
+			foreach ( $items as $item ) {
+				if ( ! ( $item instanceof \WC_Order_Item_Product ) ) {
+					continue;
+				}
+				$rows = $item->get_meta( defined( __NAMESPACE__ . '\\ORDER_ITEM_META_ALLOCATIONS' ) ? ORDER_ITEM_META_ALLOCATIONS : 'lpr_allocations', true );
+				if ( is_array( $rows ) ) {
+					$allocation_rows = array_merge( $allocation_rows, $rows );
+				}
+			}
+
+			$po_allocated_ts = self::first_allocation_timestamp( $allocation_rows );
+			$received_ts     = self::first_received_timestamp( $allocation_rows );
+			$eta_updated_ts  = self::eta_updated_timestamp( $order );
+			$placed_ts       = $order->get_date_created() ? $order->get_date_created()->getTimestamp() : 0;
+			$shipped_ts      = self::shipped_timestamp( $order );
+
+			return array(
+				array(
+					'label' => __( 'Order placed', 'lpr-backorder-allocator' ),
+					'date'  => self::date_from_ts( $placed_ts ),
+					'done'  => $placed_ts > 0,
+				),
+				array(
+					'label' => __( 'PO allocated', 'lpr-backorder-allocator' ),
+					'date'  => self::date_from_ts( $po_allocated_ts ),
+					'done'  => $po_allocated_ts > 0,
+				),
+				array(
+					'label' => __( 'ETA updated', 'lpr-backorder-allocator' ),
+					'date'  => self::date_from_ts( $eta_updated_ts ),
+					'done'  => $eta_updated_ts > 0,
+				),
+				array(
+					'label' => __( 'Received', 'lpr-backorder-allocator' ),
+					'date'  => self::date_from_ts( $received_ts ),
+					'done'  => $received_ts > 0,
+				),
+				array(
+					'label' => __( 'Shipped', 'lpr-backorder-allocator' ),
+					'date'  => self::date_from_ts( $shipped_ts ),
+					'done'  => $shipped_ts > 0,
+				),
+			);
+		}
+
+		protected static function first_allocation_timestamp( array $rows ): int {
+			$timestamps = array();
+			foreach ( $rows as $row ) {
+				if ( ! is_array( $row ) ) {
+					continue;
+				}
+				$qty = isset( $row['qty_allocated'] ) ? (int) $row['qty_allocated'] : 0;
+				if ( $qty <= 0 ) {
+					continue;
+				}
+				$candidate = isset( $row['allocated_at'] ) ? (string) $row['allocated_at'] : '';
+				if ( '' === $candidate && isset( $row['status_changed_at'] ) ) {
+					$candidate = (string) $row['status_changed_at'];
+				}
+				$ts = self::to_timestamp( $candidate );
+				if ( $ts > 0 ) {
+					$timestamps[] = $ts;
+				}
+			}
+
+			return empty( $timestamps ) ? 0 : (int) min( $timestamps );
+		}
+
+		protected static function first_received_timestamp( array $rows ): int {
+			$timestamps = array();
+			foreach ( $rows as $row ) {
+				if ( ! is_array( $row ) ) {
+					continue;
+				}
+				$status = isset( $row['status'] ) ? sanitize_key( (string) $row['status'] ) : '';
+				if ( 'received' !== $status ) {
+					continue;
+				}
+				$candidate = isset( $row['status_changed_at'] ) ? (string) $row['status_changed_at'] : '';
+				$ts        = self::to_timestamp( $candidate );
+				if ( $ts > 0 ) {
+					$timestamps[] = $ts;
+				}
+			}
+
+			return empty( $timestamps ) ? 0 : (int) min( $timestamps );
+		}
+
+		protected static function eta_updated_timestamp( \WC_Order $order ): int {
+			$notes_ts = array();
+			if ( function_exists( 'wc_get_order_notes' ) ) {
+				$notes = wc_get_order_notes(
+					array(
+						'order_id' => (int) $order->get_id(),
+						'type'     => 'internal',
+					)
+				);
+				foreach ( $notes as $note ) {
+					$content = isset( $note->content ) ? (string) $note->content : '';
+					if ( false === stripos( $content, 'ETA changed for' ) ) {
+						continue;
+					}
+					if ( isset( $note->date_created ) && $note->date_created instanceof \WC_DateTime ) {
+						$notes_ts[] = $note->date_created->getTimestamp();
+					}
+				}
+			}
+
+			if ( ! empty( $notes_ts ) ) {
+				return (int) max( $notes_ts );
+			}
+
+			$eta_email_meta_key = defined( __NAMESPACE__ . '\\ORDER_META_LAST_ETA_EMAIL' ) ? ORDER_META_LAST_ETA_EMAIL : '_lpr_last_eta_email';
+			return (int) $order->get_meta( $eta_email_meta_key, true );
+		}
+
+		protected static function shipped_timestamp( \WC_Order $order ): int {
+			if ( ! $order->has_status( array( 'completed', 'shipped' ) ) ) {
+				return 0;
+			}
+
+			if ( $order->get_date_completed() ) {
+				return $order->get_date_completed()->getTimestamp();
+			}
+
+			if ( $order->get_date_modified() ) {
+				return $order->get_date_modified()->getTimestamp();
+			}
+
+			return 0;
+		}
+
+		protected static function to_timestamp( string $value ): int {
+			$value = trim( $value );
+			if ( '' === $value ) {
+				return 0;
+			}
+
+			$ts = strtotime( $value );
+			if ( false === $ts || $ts <= 0 ) {
+				return 0;
+			}
+
+			return (int) $ts;
+		}
+
+		protected static function date_from_ts( int $timestamp ): string {
+			if ( $timestamp <= 0 ) {
+				return '';
+			}
+
+			return lpr_allocator_format_store_date( gmdate( 'Y-m-d H:i:s', $timestamp ), true );
+		}
+
+		protected static function styles(): string {
+			static $done = false;
+			if ( $done ) {
+				return '';
+			}
+			$done = true;
+
+			return '<style>.lpr-order-timeline{margin:16px 0;padding:14px;border:1px solid #e2e8f0;border-radius:8px;background:#fff}.lpr-order-timeline h3{margin:0 0 10px}.lpr-order-timeline ol{list-style:none;margin:0;padding:0}.lpr-order-timeline li{display:flex;gap:10px;position:relative;padding:0 0 14px 0}.lpr-order-timeline li:last-child{padding-bottom:0}.lpr-order-timeline .lpr-dot{width:10px;height:10px;border-radius:50%;background:#cbd5e1;margin-top:6px;display:inline-block}.lpr-order-timeline .is-done .lpr-dot{background:#16a34a}.lpr-order-timeline .lpr-step{padding-bottom:0}.lpr-order-timeline .lpr-date{font-size:12px;color:#334155;margin-top:2px}.lpr-order-timeline .lpr-meta{font-size:12px;color:#64748b}.lpr-order-timeline-admin{margin-top:0}</style>';
+		}
+	}
+	Order_Timeline::init();
+
+
+
+	/**
 	 * Order admin metabox rendering allocations & ETA per line.
 	 */
 	class Order_Allocations_Metabox {
@@ -5735,6 +5963,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
                         $css .= '.lpr-force-controls{margin-top:6px;padding-left:18px;}';
                         $css .= '.lpr-force-row input[type=number]{width:70px;margin-left:6px}';
                         echo '<style type="text/css">' . esc_html( $css ) . '</style>';
+
+                        if ( class_exists( __NAMESPACE__ . '\\Order_Timeline' ) ) {
+                                Order_Timeline::render_admin_timeline( $order );
+                        }
 
 			echo '<table class="widefat striped lpr-alloc-eta">';
 			echo '<thead><tr>';
