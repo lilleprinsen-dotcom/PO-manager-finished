@@ -17337,12 +17337,12 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
                                 return false;
                         }
 
-                        $token = isset( $_POST['incoming_token'] ) ? (string) wp_unslash( $_POST['incoming_token'] ) : '';
+                        $token = isset( $_POST['incoming_token'] ) ? self::normalize_token( (string) wp_unslash( $_POST['incoming_token'] ) ) : '';
                         if ( self::validate_token( $token ) ) {
                                 return true;
                         }
 
-                        if ( isset( $_COOKIE[ self::COOKIE_KEY ] ) && self::validate_token( (string) wp_unslash( $_COOKIE[ self::COOKIE_KEY ] ) ) ) {
+                        if ( isset( $_COOKIE[ self::COOKIE_KEY ] ) && self::validate_token( self::normalize_token( (string) wp_unslash( $_COOKIE[ self::COOKIE_KEY ] ) ) ) ) {
                                 return true;
                         }
 
@@ -17356,7 +17356,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
                         $url = home_url( '/incoming?view=allocations&po=' . absint( $po_id ) );
 
                         if ( $token ) {
-                                $url = add_query_arg( array( 'incoming_token' => rawurlencode( $token ) ), $url );
+                                $url = add_query_arg( array( 'incoming_token' => $token ), $url );
                         }
 
                         return $url;
@@ -17382,8 +17382,22 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
                         return base64_encode( $data . '|' . $hash );
                 }
 
+                protected static function normalize_token( string $token ): string {
+                        $token = trim( $token );
+                        if ( '' === $token ) {
+                                return '';
+                        }
+
+                        $token = rawurldecode( $token );
+                        $token = str_replace( ' ', '+', $token );
+                        $token = strtr( $token, '-_', '+/' );
+
+                        return $token;
+                }
+
                 protected static function validate_token( string $token ): bool {
-                        $decoded = base64_decode( $token );
+                        $token   = self::normalize_token( $token );
+                        $decoded = base64_decode( $token, true );
                         if ( ! $decoded || false === strpos( $decoded, '|' ) ) {
                                 return false;
                         }
@@ -17433,8 +17447,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
                         $error = '';
                         $token = '';
 
-                        if ( isset( $_GET['incoming_token'] ) && self::validate_token( (string) wp_unslash( $_GET['incoming_token'] ) ) ) {
-                                $token = (string) wp_unslash( $_GET['incoming_token'] );
+                        if ( isset( $_GET['incoming_token'] ) && self::validate_token( self::normalize_token( (string) wp_unslash( $_GET['incoming_token'] ) ) ) ) {
+                                $token = self::normalize_token( (string) wp_unslash( $_GET['incoming_token'] ) );
                                 setcookie( self::COOKIE_KEY, $token, time() + self::TOKEN_TTL, '/', '', is_ssl(), true );
 
                                 return array(
@@ -17445,8 +17459,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
                                 );
                         }
 
-                        if ( isset( $_COOKIE[ self::COOKIE_KEY ] ) && self::validate_token( (string) wp_unslash( $_COOKIE[ self::COOKIE_KEY ] ) ) ) {
-                                $token = (string) wp_unslash( $_COOKIE[ self::COOKIE_KEY ] );
+                        if ( isset( $_COOKIE[ self::COOKIE_KEY ] ) && self::validate_token( self::normalize_token( (string) wp_unslash( $_COOKIE[ self::COOKIE_KEY ] ) ) ) ) {
+                                $token = self::normalize_token( (string) wp_unslash( $_COOKIE[ self::COOKIE_KEY ] ) );
                                 return array(
                                         'authorized' => true,
                                         'user'       => self::$active_user,
