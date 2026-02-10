@@ -14712,7 +14712,12 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Orders_Page' ) ) {
                                 <?php else : ?>
                                         <?php foreach ( $subset as $order ) : ?>
                                                 <?php
-                                                $order_link   = ! empty( $order['order_url'] ) ? '<a href="' . esc_url( $order['order_url'] ) . '">#' . esc_html( $order['order_number'] ) . '</a>' : '#' . esc_html( $order['order_number'] );
+                                                $order_id     = isset( $order['order_id'] ) ? (int) $order['order_id'] : 0;
+                                                $order_url    = isset( $order['order_url'] ) ? (string) $order['order_url'] : '';
+                                                if ( '' === $order_url && $order_id > 0 && function_exists( 'admin_url' ) ) {
+                                                        $order_url = admin_url( 'post.php?post=' . $order_id . '&action=edit' );
+                                                }
+                                                $order_link   = '' !== $order_url ? '<a href="' . esc_url( $order_url ) . '">#' . esc_html( $order['order_number'] ) . '</a>' : '#' . esc_html( $order['order_number'] );
                                                 $outstanding  = isset( $order['outstanding_backorder'] ) ? (int) $order['outstanding_backorder'] : 0;
                                                 $order_badge  = $outstanding > 0 ? 'lpr-badge lpr-badge-warning' : 'lpr-badge lpr-badge-success';
                                                 $order_label  = $outstanding > 0 ? sprintf( __( 'Backordered qty outstanding: %d', 'lpr-backorder-allocator' ), $outstanding ) : __( 'Fully allocated', 'lpr-backorder-allocator' );
