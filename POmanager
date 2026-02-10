@@ -1834,6 +1834,384 @@ if ( ! class_exists( __NAMESPACE__ . '\Email_Notification_Preview' ) ) {
 }
 
 
+
+/**
+ * Admin page: reorder recommendations with stockout reminders and supplier risk.
+ */
+if ( ! class_exists( __NAMESPACE__ . '\Reorder_Recommendations_Page' ) ) {
+        class Reorder_Recommendations_Page {
+
+                public static function init(): void {
+                        add_action( 'admin_menu', array( __CLASS__, 'register_page' ) );
+                }
+
+                public static function register_page(): void {
+                        add_submenu_page(
+                                ADMIN_MENU_SLUG,
+                                __( 'Reorder Recommendations', 'lpr-backorder-allocator' ),
+                                __( 'Reorder Recommendations', 'lpr-backorder-allocator' ),
+                                'manage_woocommerce',
+                                'lpr-reorder-recommendations',
+                                array( __CLASS__, 'render' ),
+                                6
+                        );
+                }
+
+                protected static function collect_supplier_lead_times( int $lookback_days ): array {
+                        $per_supplier = array();
+                        $global       = array();
+                        $cutoff_ts    = strtotime( '-' . max( 30, $lookback_days ) . ' days', time() );
+                        $po_type      = defined( __NAMESPACE__ . '\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po';
+                        $statuses     = array( 'publish', 'draft', 'future', 'private', 'pending', 'lpr-open', 'lpr-partial', 'lpr-closed' );
+
+                        $query = new \WP_Query(
+                                array(
+                                        'post_type'      => $po_type,
+                                        'post_status'    => $statuses,
+                                        'posts_per_page' => 300,
+                                        'fields'         => 'ids',
+                                        'orderby'        => 'date',
+                                        'order'          => 'DESC',
+                                        'no_found_rows'  => true,
+                                )
+                        );
+
+                        foreach ( (array) $query->posts as $po_id ) {
+                                $po_id      = (int) $po_id;
+                                $created_ts = (int) get_post_time( 'U', true, $po_id );
+                                if ( $created_ts > 0 && $created_ts < $cutoff_ts ) {
+                                        continue;
+                                }
+
+                                $supplier = (string) get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_SUPPLIER_NAME' ) ? PO_META_SUPPLIER_NAME : '_lpr_supplier_name', true );
+                                $supplier = '' !== trim( $supplier ) ? trim( $supplier ) : __( 'Unknown supplier', 'lpr-backorder-allocator' );
+                                $eta      = lpr_allocator_sanitize_ymd( (string) get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_ETA_DATE' ) ? PO_META_ETA_DATE : '_lpr_eta_date', true ) );
+
+                                if ( '' === $eta || $created_ts <= 0 ) {
+                                        continue;
+                                }
+
+                                $eta_ts = lpr_allocator_date_to_timestamp( $eta );
+                                if ( $eta_ts <= 0 ) {
+                                        continue;
+                                }
+
+                                $lead_days = (int) ceil( max( 0, $eta_ts - $created_ts ) / DAY_IN_SECONDS );
+
+                                if ( ! isset( $per_supplier[ $supplier ] ) ) {
+                                        $per_supplier[ $supplier ] = array(
+                                                'samples'      => array(),
+                                                'overdue_open' => 0,
+                                                'open_total'   => 0,
+                                        );
+                                }
+
+                                $per_supplier[ $supplier ]['samples'][] = $lead_days;
+                                $global[]                               = $lead_days;
+
+                                $is_open_status = in_array( get_post_status( $po_id ), lpr_allocator_live_po_statuses(), true );
+                                if ( $is_open_status ) {
+                                        $per_supplier[ $supplier ]['open_total']++;
+                                        if ( $eta_ts < current_time( 'timestamp' ) ) {
+                                                $per_supplier[ $supplier ]['overdue_open']++;
+                                        }
+                                }
+                        }
+
+                        $summary = array();
+                        foreach ( $per_supplier as $supplier => $row ) {
+                                $samples = array_map( 'intval', (array) $row['samples'] );
+                                if ( empty( $samples ) ) {
+                                        continue;
+                                }
+                                $mean = array_sum( $samples ) / count( $samples );
+                                $std  = self::std_dev( $samples, $mean );
+                                $summary[ $supplier ] = array(
+                                        'avg_lead'      => (int) round( $mean ),
+                                        'std_lead'      => (int) round( $std ),
+                                        'sample_count'  => count( $samples ),
+                                        'overdue_ratio' => (int) $row['open_total'] > 0 ? ( (int) $row['overdue_open'] / (int) $row['open_total'] ) : 0,
+                                );
+                        }
+
+                        $global_mean = ! empty( $global ) ? (int) round( array_sum( $global ) / count( $global ) ) : 14;
+                        $global_std  = ! empty( $global ) ? (int) round( self::std_dev( $global, array_sum( $global ) / count( $global ) ) ) : 4;
+
+                        return array(
+                                'suppliers' => $summary,
+                                'global'    => array(
+                                        'avg_lead'     => max( 3, $global_mean ),
+                                        'std_lead'     => max( 1, $global_std ),
+                                        'sample_count' => count( $global ),
+                                ),
+                        );
+                }
+
+                protected static function std_dev( array $values, float $mean ): float {
+                        if ( count( $values ) < 2 ) {
+                                return 0.0;
+                        }
+                        $variance = 0.0;
+                        foreach ( $values as $v ) {
+                                $variance += ( (float) $v - $mean ) ** 2;
+                        }
+                        return sqrt( $variance / count( $values ) );
+                }
+
+                protected static function gather_product_demand( int $lookback_days ): array {
+                        if ( ! function_exists( 'wc_get_orders' ) ) {
+                                return array();
+                        }
+
+                        $rows         = array();
+                        $page         = 1;
+                        $per_page     = 50;
+                        $after_string = gmdate( 'Y-m-d H:i:s', strtotime( '-' . max( 30, $lookback_days ) . ' days' ) );
+
+                        do {
+                                $orders = wc_get_orders(
+                                        array(
+                                                'status'       => array( 'wc-processing', 'wc-completed', 'wc-on-hold' ),
+                                                'limit'        => $per_page,
+                                                'paged'        => $page,
+                                                'date_created' => '>=' . $after_string,
+                                                'return'       => 'objects',
+                                                'orderby'      => 'date',
+                                                'order'        => 'DESC',
+                                        )
+                                );
+
+                                if ( empty( $orders ) ) {
+                                        break;
+                                }
+
+                                foreach ( $orders as $order ) {
+                                        if ( ! $order instanceof \WC_Order ) {
+                                                continue;
+                                        }
+
+                                        $order_ts = $order->get_date_created() ? (int) $order->get_date_created()->getTimestamp() : 0;
+                                        $day_key  = $order_ts > 0 ? wp_date( 'Y-m-d', $order_ts ) : '';
+
+                                        foreach ( $order->get_items( 'line_item' ) as $item ) {
+                                                if ( ! $item instanceof \WC_Order_Item_Product ) {
+                                                        continue;
+                                                }
+                                                $target_id = (int) ( $item->get_variation_id() ?: $item->get_product_id() );
+                                                $qty       = max( 0, (int) $item->get_quantity() );
+                                                if ( $target_id <= 0 || $qty <= 0 ) {
+                                                        continue;
+                                                }
+
+                                                if ( ! isset( $rows[ $target_id ] ) ) {
+                                                        $rows[ $target_id ] = array(
+                                                                'qty_total'   => 0,
+                                                                'order_days'  => array(),
+                                                                'order_count' => 0,
+                                                        );
+                                                }
+
+                                                $rows[ $target_id ]['qty_total'] += $qty;
+                                                $rows[ $target_id ]['order_count']++;
+                                                if ( '' !== $day_key ) {
+                                                        $rows[ $target_id ]['order_days'][ $day_key ] = true;
+                                                }
+                                        }
+                                }
+
+                                if ( count( $orders ) < $per_page ) {
+                                        break;
+                                }
+                                $page++;
+                        } while ( true );
+
+                        return $rows;
+                }
+
+                protected static function build_recommendations( int $lookback_days ): array {
+                        $demand      = self::gather_product_demand( $lookback_days );
+                        $lead_stats  = self::collect_supplier_lead_times( $lookback_days * 2 );
+                        $rows        = array();
+                        $today_ts    = current_time( 'timestamp' );
+
+                        foreach ( $demand as $product_id => $stat ) {
+                                $qty_total = (int) ( $stat['qty_total'] ?? 0 );
+                                if ( $qty_total <= 0 ) {
+                                        continue;
+                                }
+
+                                $product = function_exists( 'wc_get_product' ) ? wc_get_product( (int) $product_id ) : null;
+                                if ( ! ( $product instanceof \WC_Product ) ) {
+                                        continue;
+                                }
+
+                                $avg_daily = $qty_total / max( 1, $lookback_days );
+                                if ( $avg_daily <= 0.01 ) {
+                                        continue;
+                                }
+
+                                $order_days = array_keys( (array) ( $stat['order_days'] ?? array() ) );
+                                sort( $order_days );
+                                $cycle_days = 0;
+                                if ( count( $order_days ) >= 2 ) {
+                                        $gaps = array();
+                                        for ( $i = 1; $i < count( $order_days ); $i++ ) {
+                                                $prev = strtotime( $order_days[ $i - 1 ] );
+                                                $curr = strtotime( $order_days[ $i ] );
+                                                if ( $prev && $curr && $curr > $prev ) {
+                                                        $gaps[] = max( 1, (int) round( ( $curr - $prev ) / DAY_IN_SECONDS ) );
+                                                }
+                                        }
+                                        if ( ! empty( $gaps ) ) {
+                                                sort( $gaps );
+                                                $cycle_days = (int) $gaps[ (int) floor( count( $gaps ) / 2 ) ];
+                                        }
+                                }
+                                if ( $cycle_days <= 0 ) {
+                                        $cycle_days = (int) max( 3, round( 30 / max( 0.1, $avg_daily ) ) );
+                                }
+
+                                $on_hand = $product->managing_stock() ? max( 0, (int) $product->get_stock_quantity() ) : 0;
+                                $snapshot = class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ? Incoming_Stock_Indexer::get_product_snapshot( (int) $product_id ) : array( 'qty' => 0, 'details' => array(), 'eta' => '' );
+                                $incoming_qty = max( 0, (int) ( $snapshot['qty'] ?? 0 ) );
+
+                                $supplier  = __( 'Unknown supplier', 'lpr-backorder-allocator' );
+                                $lead_row  = $lead_stats['global'];
+                                $next_eta  = lpr_allocator_sanitize_ymd( (string) ( $snapshot['eta'] ?? '' ) );
+
+                                if ( ! empty( $snapshot['details'] ) ) {
+                                        $first_entry = (array) reset( $snapshot['details'] );
+                                        $po_id       = isset( $first_entry['po_id'] ) ? (int) $first_entry['po_id'] : 0;
+                                        if ( $po_id > 0 ) {
+                                                $maybe_supplier = (string) get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_SUPPLIER_NAME' ) ? PO_META_SUPPLIER_NAME : '_lpr_supplier_name', true );
+                                                if ( '' !== trim( $maybe_supplier ) ) {
+                                                        $supplier = trim( $maybe_supplier );
+                                                }
+                                        }
+                                }
+
+                                if ( isset( $lead_stats['suppliers'][ $supplier ] ) ) {
+                                        $lead_row = $lead_stats['suppliers'][ $supplier ];
+                                }
+
+                                $lead_days    = max( 3, (int) ( $lead_row['avg_lead'] ?? 14 ) );
+                                $lead_std     = max( 1, (int) ( $lead_row['std_lead'] ?? 4 ) );
+                                $stockout_day = (int) floor( $on_hand / $avg_daily );
+                                $stockout_ts  = $today_ts + ( max( 0, $stockout_day ) * DAY_IN_SECONDS );
+
+                                $recommended_order_ts = $stockout_ts - ( ( $lead_days + 2 ) * DAY_IN_SECONDS );
+                                $reminder_ts          = $recommended_order_ts - ( max( 1, (int) ceil( $lead_days * 0.2 ) ) * DAY_IN_SECONDS );
+
+                                $window_start = $stockout_ts - ( $lead_std * DAY_IN_SECONDS );
+                                $window_end   = $stockout_ts + ( $lead_std * DAY_IN_SECONDS );
+
+                                $confidence = 55;
+                                $confidence += min( 25, (int) ( ( $stat['order_count'] ?? 0 ) * 2 ) );
+                                $confidence += min( 15, (int) ( ( $lead_row['sample_count'] ?? 0 ) * 2 ) );
+                                $confidence -= min( 20, $lead_std * 2 );
+                                $confidence = max( 10, min( 98, $confidence ) );
+
+                                $risk = __( 'Low risk', 'lpr-backorder-allocator' );
+                                $overdue_ratio = (float) ( $lead_row['overdue_ratio'] ?? 0 );
+                                if ( $overdue_ratio >= 0.35 || $lead_std >= 10 ) {
+                                        $risk = __( 'High risk: volatile lead times or overdue open POs.', 'lpr-backorder-allocator' );
+                                } elseif ( $overdue_ratio >= 0.15 || $lead_std >= 6 ) {
+                                        $risk = __( 'Medium risk: lead times are somewhat inconsistent.', 'lpr-backorder-allocator' );
+                                }
+
+                                $rows[] = array(
+                                        'product_id'        => (int) $product_id,
+                                        'product_label'     => $product->get_formatted_name(),
+                                        'supplier'          => $supplier,
+                                        'avg_daily'         => round( $avg_daily, 2 ),
+                                        'cycle_days'        => $cycle_days,
+                                        'on_hand'           => $on_hand,
+                                        'incoming_qty'      => $incoming_qty,
+                                        'next_eta'          => $next_eta,
+                                        'stockout_window'   => lpr_allocator_format_store_date( wp_date( 'd-m-Y', $window_start ) ) . ' – ' . lpr_allocator_format_store_date( wp_date( 'd-m-Y', $window_end ) ),
+                                        'recommended_order' => lpr_allocator_format_store_date( wp_date( 'd-m-Y', $recommended_order_ts ) ),
+                                        'reminder_date'     => lpr_allocator_format_store_date( wp_date( 'd-m-Y', $reminder_ts ) ),
+                                        'confidence'        => $confidence,
+                                        'risk_note'         => $risk,
+                                );
+                        }
+
+                        usort(
+                                $rows,
+                                static function ( array $a, array $b ): int {
+                                        return (float) ( $a['confidence'] ?? 0 ) <=> (float) ( $b['confidence'] ?? 0 );
+                                }
+                        );
+
+                        return array_slice( $rows, 0, 60 );
+                }
+
+                public static function render(): void {
+                        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                                wp_die( esc_html__( 'Insufficient permissions.', 'lpr-backorder-allocator' ) );
+                        }
+
+                        $lookback_days = isset( $_GET['lookback_days'] ) ? max( 30, min( 365, absint( $_GET['lookback_days'] ) ) ) : 90; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $rows          = self::build_recommendations( $lookback_days );
+                        ?>
+                        <div class="wrap">
+                                <h1><?php echo esc_html__( 'Reorder Recommendations', 'lpr-backorder-allocator' ); ?></h1>
+                                <p class="description"><?php echo esc_html__( 'Analyzes customer reorder cycles and supplier lead times to predict stockout windows and recommend order dates.', 'lpr-backorder-allocator' ); ?></p>
+
+                                <form method="get" style="margin:12px 0 18px;">
+                                        <input type="hidden" name="page" value="lpr-reorder-recommendations" />
+                                        <label>
+                                                <?php esc_html_e( 'Lookback days:', 'lpr-backorder-allocator' ); ?>
+                                                <input type="number" min="30" max="365" step="1" name="lookback_days" value="<?php echo esc_attr( (string) $lookback_days ); ?>" />
+                                        </label>
+                                        <button type="submit" class="button button-secondary"><?php esc_html_e( 'Refresh', 'lpr-backorder-allocator' ); ?></button>
+                                </form>
+
+                                <table class="widefat striped fixed">
+                                        <thead>
+                                                <tr>
+                                                        <th><?php esc_html_e( 'Product', 'lpr-backorder-allocator' ); ?></th>
+                                                        <th><?php esc_html_e( 'Supplier', 'lpr-backorder-allocator' ); ?></th>
+                                                        <th class="num"><?php esc_html_e( 'Avg Daily Demand', 'lpr-backorder-allocator' ); ?></th>
+                                                        <th class="num"><?php esc_html_e( 'Reorder Cycle (days)', 'lpr-backorder-allocator' ); ?></th>
+                                                        <th class="num"><?php esc_html_e( 'On Hand', 'lpr-backorder-allocator' ); ?></th>
+                                                        <th class="num"><?php esc_html_e( 'Incoming Free', 'lpr-backorder-allocator' ); ?></th>
+                                                        <th><?php esc_html_e( 'Likely Stockout Window', 'lpr-backorder-allocator' ); ?></th>
+                                                        <th><?php esc_html_e( 'Recommended Order Date', 'lpr-backorder-allocator' ); ?></th>
+                                                        <th><?php esc_html_e( 'Reminder Date', 'lpr-backorder-allocator' ); ?></th>
+                                                        <th><?php esc_html_e( 'Confidence', 'lpr-backorder-allocator' ); ?></th>
+                                                        <th><?php esc_html_e( 'Supplier Risk Note', 'lpr-backorder-allocator' ); ?></th>
+                                                </tr>
+                                        </thead>
+                                        <tbody>
+                                                <?php if ( empty( $rows ) ) : ?>
+                                                        <tr><td colspan="11"><?php esc_html_e( 'No recommendation data available yet. Add recent orders and supplier PO ETAs to improve forecast quality.', 'lpr-backorder-allocator' ); ?></td></tr>
+                                                <?php else : ?>
+                                                        <?php foreach ( $rows as $row ) : ?>
+                                                                <tr>
+                                                                        <td><?php echo esc_html( (string) $row['product_label'] ); ?></td>
+                                                                        <td><?php echo esc_html( (string) $row['supplier'] ); ?></td>
+                                                                        <td class="num"><?php echo esc_html( number_format_i18n( (float) $row['avg_daily'], 2 ) ); ?></td>
+                                                                        <td class="num"><?php echo esc_html( (string) (int) $row['cycle_days'] ); ?></td>
+                                                                        <td class="num"><?php echo esc_html( (string) (int) $row['on_hand'] ); ?></td>
+                                                                        <td class="num"><?php echo esc_html( (string) (int) $row['incoming_qty'] ); ?></td>
+                                                                        <td><?php echo esc_html( (string) $row['stockout_window'] ); ?></td>
+                                                                        <td><strong><?php echo esc_html( (string) $row['recommended_order'] ); ?></strong></td>
+                                                                        <td><?php echo esc_html( (string) $row['reminder_date'] ); ?></td>
+                                                                        <td><?php echo esc_html( (string) (int) $row['confidence'] ); ?>%</td>
+                                                                        <td><?php echo esc_html( (string) $row['risk_note'] ); ?></td>
+                                                                </tr>
+                                                        <?php endforeach; ?>
+                                                <?php endif; ?>
+                                        </tbody>
+                                </table>
+                        </div>
+                        <?php
+                }
+        }
+        Reorder_Recommendations_Page::init();
+}
+
 /* SELF-CHECK:
 - Added namespaced constants for all required meta keys; guarded with defined().
 - Implemented Settings class with option key `lpr_allocator_settings`, defaults (order_statuses ['processing','on-hold'], inform_customer_eta=false, frontend_extra_pool=false, branding fields incl. brand_primary_color '#1a1a1a', email_footer_text_no), getter merges defaults, update() enforces autoload=no on first write.
