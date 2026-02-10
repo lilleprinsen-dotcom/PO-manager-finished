@@ -2837,7 +2837,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Cart_Eta_Summary' ) ) {
                                 return;
                         }
 
-                        echo '<tr class="lpr-cart-eta-summary-row"><th>' . esc_html__( 'Estimated availability', 'lpr-backorder-allocator' ) . '</th><td data-title="' . esc_attr__( 'Estimated availability', 'lpr-backorder-allocator' ) . '">' . self::build_summary_markup( $summary ) . '</td></tr>';
+                        echo '<tr class="lpr-cart-eta-summary-row"><th>' . esc_html__( 'Forventet utsendelsesdato', 'lpr-backorder-allocator' ) . '</th><td data-title="' . esc_attr__( 'Forventet utsendelsesdato', 'lpr-backorder-allocator' ) . '">' . self::build_summary_markup( $summary ) . '</td></tr>';
                 }
 
                 /**
@@ -2849,7 +2849,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Cart_Eta_Summary' ) ) {
                                 return;
                         }
 
-                        echo '<tr class="lpr-checkout-eta-summary-row"><th>' . esc_html__( 'Estimated availability', 'lpr-backorder-allocator' ) . '</th><td>' . self::build_summary_markup( $summary ) . '</td></tr>';
+                        echo '<tr class="lpr-checkout-eta-summary-row"><th>' . esc_html__( 'Forventet utsendelsesdato', 'lpr-backorder-allocator' ) . '</th><td>' . self::build_summary_markup( $summary ) . '</td></tr>';
                 }
 
                 /**
@@ -2865,7 +2865,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Cart_Eta_Summary' ) ) {
                 }
 
                 /**
-                 * Build aggregate estimate and confidence details from cart lines.
+                 * Build cart-level shipment estimate based on latest incoming ETA.
+                 *
+                 * We ship all cart lines together, so we surface the latest ETA from
+                 * backordered lines as the expected shipment date.
                  *
                  * @return array<string,mixed>
                  */
@@ -2879,15 +2882,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Cart_Eta_Summary' ) ) {
                                 return array();
                         }
 
-                        $weighted_total = 0;
-                        $weighted_qty   = 0;
-                        $eta_qty        = 0;
-                        $total_qty      = 0;
-                        $timestamps     = array();
+                        $latest_eta_ts = 0;
 
                         foreach ( $items as $cart_item ) {
-                                $line_qty  = max( 0, (int) ( $cart_item['quantity'] ?? 0 ) );
-                                $total_qty += $line_qty;
+                                $line_qty = max( 0, (int) ( $cart_item['quantity'] ?? 0 ) );
 
                                 if ( $line_qty <= 0 ) {
                                         continue;
@@ -2917,44 +2915,15 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Cart_Eta_Summary' ) ) {
                                         continue;
                                 }
 
-                                $timestamps[]   = (int) $timestamp;
-                                $weighted_total += (int) $timestamp * $line_qty;
-                                $weighted_qty   += $line_qty;
-                                $eta_qty        += $line_qty;
+                                $latest_eta_ts = max( $latest_eta_ts, (int) $timestamp );
                         }
 
-                        if ( $weighted_qty <= 0 ) {
+                        if ( $latest_eta_ts <= 0 ) {
                                 return array();
                         }
 
-                        $estimate_ts = (int) round( $weighted_total / $weighted_qty );
-                        sort( $timestamps );
-                        $spread_days = 0;
-                        if ( count( $timestamps ) > 1 ) {
-                                $spread_days = (int) round( ( (int) end( $timestamps ) - (int) reset( $timestamps ) ) / DAY_IN_SECONDS );
-                        }
-
-                        $coverage = $total_qty > 0 ? ( $eta_qty / $total_qty ) : 0;
-
-                        $confidence = __( 'Low', 'lpr-backorder-allocator' );
-                        if ( $coverage >= 0.9 && $spread_days <= 2 ) {
-                                $confidence = __( 'High', 'lpr-backorder-allocator' );
-                        } elseif ( $coverage >= 0.6 && $spread_days <= 7 ) {
-                                $confidence = __( 'Medium', 'lpr-backorder-allocator' );
-                        }
-
-                        $assumptions = sprintf(
-                                /* translators: 1: covered quantity, 2: total cart quantity, 3: date spread in days */
-                                __( 'Assumes in-stock lines ship now and backordered lines follow current incoming ETAs (%1$d/%2$d units covered; ETA spread %3$d days).', 'lpr-backorder-allocator' ),
-                                (int) $eta_qty,
-                                (int) $total_qty,
-                                max( 0, (int) $spread_days )
-                        );
-
                         return array(
-                                'estimate'    => wp_date( get_option( 'date_format' ), $estimate_ts ),
-                                'confidence'  => $confidence,
-                                'assumptions' => $assumptions,
+                                'estimate' => wp_date( get_option( 'date_format' ), $latest_eta_ts ),
                         );
                 }
 
@@ -2964,24 +2933,19 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Cart_Eta_Summary' ) ) {
                  * @param array<string,mixed> $summary
                  */
                 protected static function build_summary_markup( array $summary ): string {
-                        $estimate    = isset( $summary['estimate'] ) ? (string) $summary['estimate'] : '';
-                        $confidence  = isset( $summary['confidence'] ) ? (string) $summary['confidence'] : '';
-                        $assumptions = isset( $summary['assumptions'] ) ? (string) $summary['assumptions'] : '';
+                        $estimate = isset( $summary['estimate'] ) ? (string) $summary['estimate'] : '';
 
                         if ( '' === $estimate ) {
                                 return '';
                         }
 
                         return sprintf(
-                                '<div class="lpr-cart-eta-summary"><strong>%1$s</strong> <span class="lpr-cart-eta-confidence">%2$s: %3$s</span><br /><small>%4$s</small></div>',
+                                '<div class="lpr-cart-eta-summary"><strong>%1$s</strong></div>',
                                 sprintf(
-                                        /* translators: %s: best estimate date */
-                                        esc_html__( 'Best estimate: %s', 'lpr-backorder-allocator' ),
+                                        /* translators: %s: expected shipment date */
+                                        esc_html__( 'Forventet utsendelsesdato: %s', 'lpr-backorder-allocator' ),
                                         esc_html( $estimate )
-                                ),
-                                esc_html__( 'Confidence', 'lpr-backorder-allocator' ),
-                                esc_html( $confidence ),
-                                esc_html( $assumptions )
+                                )
                         );
                 }
         }
