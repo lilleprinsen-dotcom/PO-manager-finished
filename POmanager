@@ -132,24 +132,24 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                                 'brand_support_email'   => '',
                                 'brand_support_phone'   => '',
                                 'email_footer_text_no'  => '',
-                                'eta_email_subject'     => __( 'Your order ETA has been updated', 'lpr-backorder-allocator' ),
-                                'eta_email_intro'       => __( 'We’ve updated the expected arrival for the items below:', 'lpr-backorder-allocator' ),
-                                'email_eta_disclaimer'  => __( 'All dates are estimates; delays can occur.', 'lpr-backorder-allocator' ),
-                                'email_progress_heading'           => __( 'Order progress', 'lpr-backorder-allocator' ),
-                                'email_progress_subheading'        => __( 'A quick view of where your order stands.', 'lpr-backorder-allocator' ),
-                                'email_progress_complete_label'    => __( '%complete%% complete', 'lpr-backorder-allocator' ),
-                                'email_status_label_order_placed'  => __( 'Order placed', 'lpr-backorder-allocator' ),
-                                'email_status_label_po_allocated'  => __( 'PO allocated', 'lpr-backorder-allocator' ),
-                                'email_status_label_eta_received'  => __( 'ETA received', 'lpr-backorder-allocator' ),
-                                'email_status_label_delivery'      => __( 'Estimated delivery', 'lpr-backorder-allocator' ),
-                                'email_status_done_label'          => __( 'Completed', 'lpr-backorder-allocator' ),
-                                'email_status_pending_label'       => __( 'Pending', 'lpr-backorder-allocator' ),
-                                'email_updated_heading'            => __( 'Updated items', 'lpr-backorder-allocator' ),
-                                'email_overview_heading'           => __( 'Backordered items', 'lpr-backorder-allocator' ),
-                                'email_table_heading_item'         => __( 'Item', 'lpr-backorder-allocator' ),
-                                'email_table_heading_previous'     => __( 'Previous', 'lpr-backorder-allocator' ),
-                                'email_table_heading_new_eta'      => __( 'New ETA', 'lpr-backorder-allocator' ),
-                                'email_unallocated_label'          => __( 'Unallocated', 'lpr-backorder-allocator' ),
+                                'eta_email_subject'     => __( 'Oppdatert ETA for bestilling %order_number%', 'lpr-backorder-allocator' ),
+                                'eta_email_intro'       => __( 'Vi har oppdatert forventet ankomst for varene under i bestilling %order_number%:', 'lpr-backorder-allocator' ),
+                                'email_eta_disclaimer'  => __( 'Alle datoer er estimater, og forsinkelser kan forekomme.', 'lpr-backorder-allocator' ),
+                                'email_progress_heading'           => __( 'Bestillingsstatus', 'lpr-backorder-allocator' ),
+                                'email_progress_subheading'        => __( 'En rask oversikt over hvor bestillingen din står.', 'lpr-backorder-allocator' ),
+                                'email_progress_complete_label'    => __( '%complete%% fullført', 'lpr-backorder-allocator' ),
+                                'email_status_label_order_placed'  => __( 'Bestilling mottatt', 'lpr-backorder-allocator' ),
+                                'email_status_label_po_allocated'  => __( 'Innkjøpsordre allokert', 'lpr-backorder-allocator' ),
+                                'email_status_label_eta_received'  => __( 'ETA mottatt', 'lpr-backorder-allocator' ),
+                                'email_status_label_delivery'      => __( 'Estimert levering', 'lpr-backorder-allocator' ),
+                                'email_status_done_label'          => __( 'Fullført', 'lpr-backorder-allocator' ),
+                                'email_status_pending_label'       => __( 'Avventer', 'lpr-backorder-allocator' ),
+                                'email_updated_heading'            => __( 'Oppdaterte varer', 'lpr-backorder-allocator' ),
+                                'email_overview_heading'           => __( 'Restnoterte varer', 'lpr-backorder-allocator' ),
+                                'email_table_heading_item'         => __( 'Vare', 'lpr-backorder-allocator' ),
+                                'email_table_heading_previous'     => __( 'Tidligere', 'lpr-backorder-allocator' ),
+                                'email_table_heading_new_eta'      => __( 'Ny ETA', 'lpr-backorder-allocator' ),
+                                'email_unallocated_label'          => __( 'Ikke allokert', 'lpr-backorder-allocator' ),
                                 'incoming_mobile_users'            => array(),
                         );
                 }
@@ -1949,7 +1949,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Email_Notification_Preview' ) ) {
                                 '%customer_name%' => __( 'Customer', 'lpr-backorder-allocator' ),
                         );
 
-                        $subject         = __( 'Your order ETA has been updated', 'lpr-backorder-allocator' );
+                        $subject         = __( 'Oppdatert ETA for bestilling %order_number%', 'lpr-backorder-allocator' );
                         $body            = '';
                         $sample_overview = $sample_rows;
                         if ( class_exists( __NAMESPACE__ . '\ETA' ) ) {
@@ -4159,51 +4159,6 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_requested_delivery_ready
         }
 }
 
-if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_item_fulfillment_confidence' ) ) {
-        /**
-         * Calculate a fulfillment confidence score for a line item.
-         *
-         * @return array{score:int,label:string}
-         */
-        function lpr_allocator_item_fulfillment_confidence( \WC_Order_Item_Product $item, ?\WC_Order $order = null ): array {
-                $force_qty = (int) $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_FORCE_ALLOCATION' ) ? ORDER_ITEM_META_FORCE_ALLOCATION : '_lpr_force_allocation', true );
-                $desired   = function_exists( __NAMESPACE__ . '\lpr_allocator_calc_backorder_desired' ) ? lpr_allocator_calc_backorder_desired( $item ) : max( 0, (int) $item->get_quantity() );
-                $allocated = function_exists( __NAMESPACE__ . '\lpr_allocator_get_item_allocated_active' ) ? lpr_allocator_get_item_allocated_active( $item ) : 0;
-                $target    = max( $desired, $force_qty );
-                $coverage  = $target > 0 ? min( 1, $allocated / $target ) : 1;
-
-                $line_eta  = (string) $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_LINE_ETA' ) ? ORDER_ITEM_META_LINE_ETA : '_lpr_line_eta', true );
-                $eta_clean = lpr_allocator_sanitize_ymd( $line_eta );
-                $eta_score = '' !== $eta_clean ? 1.0 : 0.4;
-
-                $window_score = 1.0;
-                if ( $order instanceof \WC_Order ) {
-                        $meta         = lpr_allocator_order_requested_delivery_meta( $order );
-                        $window_start = (string) ( $meta['window_start'] ?? '' );
-                        $window_end   = (string) ( $meta['window_end'] ?? '' );
-
-                        if ( '' !== $window_start || '' !== $window_end ) {
-                                if ( '' === $eta_clean ) {
-                                        $window_score = 0.5;
-                                } elseif ( '' !== $window_start && lpr_allocator_compare_dates( $eta_clean, $window_start ) < 0 ) {
-                                        $window_score = 0.85;
-                                } elseif ( '' !== $window_end && lpr_allocator_compare_dates( $eta_clean, $window_end ) > 0 ) {
-                                        $window_score = 0.2;
-                                }
-                        }
-                }
-
-                $score = (int) round( 100 * ( ( 0.6 * $coverage ) + ( 0.25 * $eta_score ) + ( 0.15 * $window_score ) ) );
-                $score = max( 0, min( 100, $score ) );
-                $label = $score >= 80 ? __( 'High', 'lpr-backorder-allocator' ) : ( $score >= 50 ? __( 'Medium', 'lpr-backorder-allocator' ) : __( 'Low', 'lpr-backorder-allocator' ) );
-
-                return array(
-                        'score' => $score,
-                        'label' => $label,
-                );
-        }
-}
-
 if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_touch_allocation_status' ) ) {
         /**
          * Update an allocation row status and stamp the change time.
@@ -6165,8 +6120,8 @@ public static function update_line_eta( int $order_id ): void {
                         $defaults = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::defaults() : array();
                         $settings = array_replace( $defaults, $settings );
 
-                        $subject_tpl   = (string) ( $settings['eta_email_subject'] ?? ( $defaults['eta_email_subject'] ?? __( 'Your order ETA has been updated', 'lpr-backorder-allocator' ) ) );
-                        $intro_tpl     = (string) ( $settings['eta_email_intro'] ?? ( $defaults['eta_email_intro'] ?? __( 'We’ve updated the expected arrival for the items below:', 'lpr-backorder-allocator' ) ) );
+                        $subject_tpl   = (string) ( $settings['eta_email_subject'] ?? ( $defaults['eta_email_subject'] ?? __( 'Oppdatert ETA for bestilling %order_number%', 'lpr-backorder-allocator' ) ) );
+                        $intro_tpl     = (string) ( $settings['eta_email_intro'] ?? ( $defaults['eta_email_intro'] ?? __( 'Vi har oppdatert forventet ankomst for varene under i bestilling %order_number%:', 'lpr-backorder-allocator' ) ) );
                         $logo          = (string) ( $settings['brand_logo_url']       ?? '' );
                         $color         = (string) ( $settings['brand_primary_color']  ?? '#1a1a1a' );
                         $foot          = (string) ( $settings['email_footer_text_no'] ?? '' );
@@ -6174,20 +6129,20 @@ public static function update_line_eta( int $order_id ): void {
                         $progress_head = (string) ( $settings['email_progress_heading'] ?? ( $defaults['email_progress_heading'] ?? '' ) );
                         $progress_sub  = (string) ( $settings['email_progress_subheading'] ?? ( $defaults['email_progress_subheading'] ?? '' ) );
                         $progress_ring = (string) ( $settings['email_progress_complete_label'] ?? ( $defaults['email_progress_complete_label'] ?? '%complete%%' ) );
-                        $status_done   = (string) ( $settings['email_status_done_label'] ?? ( $defaults['email_status_done_label'] ?? __( 'Completed', 'lpr-backorder-allocator' ) ) );
-                        $status_pending = (string) ( $settings['email_status_pending_label'] ?? ( $defaults['email_status_pending_label'] ?? __( 'Pending', 'lpr-backorder-allocator' ) ) );
-                        $updated_heading   = (string) ( $settings['email_updated_heading'] ?? ( $defaults['email_updated_heading'] ?? __( 'Updated items', 'lpr-backorder-allocator' ) ) );
-                        $overview_heading  = (string) ( $settings['email_overview_heading'] ?? ( $defaults['email_overview_heading'] ?? __( 'Backordered items', 'lpr-backorder-allocator' ) ) );
-                        $th_item           = (string) ( $settings['email_table_heading_item'] ?? ( $defaults['email_table_heading_item'] ?? __( 'Item', 'lpr-backorder-allocator' ) ) );
-                        $th_prev           = (string) ( $settings['email_table_heading_previous'] ?? ( $defaults['email_table_heading_previous'] ?? __( 'Previous', 'lpr-backorder-allocator' ) ) );
-                        $th_new            = (string) ( $settings['email_table_heading_new_eta'] ?? ( $defaults['email_table_heading_new_eta'] ?? __( 'New ETA', 'lpr-backorder-allocator' ) ) );
+                        $status_done   = (string) ( $settings['email_status_done_label'] ?? ( $defaults['email_status_done_label'] ?? __( 'Fullført', 'lpr-backorder-allocator' ) ) );
+                        $status_pending = (string) ( $settings['email_status_pending_label'] ?? ( $defaults['email_status_pending_label'] ?? __( 'Avventer', 'lpr-backorder-allocator' ) ) );
+                        $updated_heading   = (string) ( $settings['email_updated_heading'] ?? ( $defaults['email_updated_heading'] ?? __( 'Oppdaterte varer', 'lpr-backorder-allocator' ) ) );
+                        $overview_heading  = (string) ( $settings['email_overview_heading'] ?? ( $defaults['email_overview_heading'] ?? __( 'Restnoterte varer', 'lpr-backorder-allocator' ) ) );
+                        $th_item           = (string) ( $settings['email_table_heading_item'] ?? ( $defaults['email_table_heading_item'] ?? __( 'Vare', 'lpr-backorder-allocator' ) ) );
+                        $th_prev           = (string) ( $settings['email_table_heading_previous'] ?? ( $defaults['email_table_heading_previous'] ?? __( 'Tidligere', 'lpr-backorder-allocator' ) ) );
+                        $th_new            = (string) ( $settings['email_table_heading_new_eta'] ?? ( $defaults['email_table_heading_new_eta'] ?? __( 'Ny ETA', 'lpr-backorder-allocator' ) ) );
                         $status_labels     = array(
-                                'order' => (string) ( $settings['email_status_label_order_placed'] ?? ( $defaults['email_status_label_order_placed'] ?? __( 'Order placed', 'lpr-backorder-allocator' ) ) ),
-                                'po'    => (string) ( $settings['email_status_label_po_allocated'] ?? ( $defaults['email_status_label_po_allocated'] ?? __( 'PO allocated', 'lpr-backorder-allocator' ) ) ),
-                                'eta'   => (string) ( $settings['email_status_label_eta_received'] ?? ( $defaults['email_status_label_eta_received'] ?? __( 'ETA received', 'lpr-backorder-allocator' ) ) ),
-                                'delivery' => (string) ( $settings['email_status_label_delivery'] ?? ( $defaults['email_status_label_delivery'] ?? __( 'Estimated delivery', 'lpr-backorder-allocator' ) ) ),
+                                'order' => (string) ( $settings['email_status_label_order_placed'] ?? ( $defaults['email_status_label_order_placed'] ?? __( 'Bestilling mottatt', 'lpr-backorder-allocator' ) ) ),
+                                'po'    => (string) ( $settings['email_status_label_po_allocated'] ?? ( $defaults['email_status_label_po_allocated'] ?? __( 'Innkjøpsordre allokert', 'lpr-backorder-allocator' ) ) ),
+                                'eta'   => (string) ( $settings['email_status_label_eta_received'] ?? ( $defaults['email_status_label_eta_received'] ?? __( 'ETA mottatt', 'lpr-backorder-allocator' ) ) ),
+                                'delivery' => (string) ( $settings['email_status_label_delivery'] ?? ( $defaults['email_status_label_delivery'] ?? __( 'Estimert levering', 'lpr-backorder-allocator' ) ) ),
                         );
-                        $unallocated_label = (string) ( $settings['email_unallocated_label'] ?? ( $defaults['email_unallocated_label'] ?? __( 'Unallocated', 'lpr-backorder-allocator' ) ) );
+                        $unallocated_label = (string) ( $settings['email_unallocated_label'] ?? ( $defaults['email_unallocated_label'] ?? __( 'Ikke allokert', 'lpr-backorder-allocator' ) ) );
 
                         $subject = self::apply_email_tokens( $subject_tpl, $tokens );
                         $intro   = self::apply_email_tokens( $intro_tpl, $tokens );
@@ -6340,14 +6295,14 @@ public static function update_line_eta( int $order_id ): void {
                                         $po_state  = 'partial';
                                         $po_detail = sprintf(
                                                 /* translators: 1: allocated lines, 2: total lines */
-                                                __( 'Partially allocated (%1$d of %2$d lines)', 'lpr-backorder-allocator' ),
+                                                __( 'Delvis allokert (%1$d av %2$d linjer)', 'lpr-backorder-allocator' ),
                                                 $allocated_lines,
                                                 $backorder_lines
                                         );
                                 } else {
                                         $po_detail = sprintf(
                                                 /* translators: %d: number of backordered lines */
-                                                __( 'Awaiting allocation (%d lines)', 'lpr-backorder-allocator' ),
+                                                __( 'Venter på allokering (%d linjer)', 'lpr-backorder-allocator' ),
                                                 $backorder_lines
                                         );
                                 }
@@ -6355,27 +6310,27 @@ public static function update_line_eta( int $order_id ): void {
 
                         $steps = array(
                                 array(
-                                        'label'    => $labels['order'] ?? __( 'Order placed', 'lpr-backorder-allocator' ),
+                                        'label'    => $labels['order'] ?? __( 'Bestilling mottatt', 'lpr-backorder-allocator' ),
                                         'complete' => true,
                                         'detail'   => $order_date,
                                         'type'     => 'order',
                                 ),
                                 array(
-                                        'label'    => $labels['po'] ?? __( 'PO allocated', 'lpr-backorder-allocator' ),
+                                        'label'    => $labels['po'] ?? __( 'Innkjøpsordre allokert', 'lpr-backorder-allocator' ),
                                         'complete' => 'complete' === $po_state,
                                         'detail'   => $po_detail,
                                         'state'    => $po_state,
                                         'type'     => 'po',
                                 ),
                                 array(
-                                        'label'    => $labels['eta'] ?? __( 'ETA received', 'lpr-backorder-allocator' ),
+                                        'label'    => $labels['eta'] ?? __( 'ETA mottatt', 'lpr-backorder-allocator' ),
                                         'complete' => $eta_received,
                                         'detail'   => $eta_received ? $eta_label : $pending_label,
                                         'state'    => $eta_state,
                                         'type'     => 'eta',
                                 ),
                                 array(
-                                        'label'    => $labels['delivery'] ?? __( 'Estimated delivery', 'lpr-backorder-allocator' ),
+                                        'label'    => $labels['delivery'] ?? __( 'Estimert levering', 'lpr-backorder-allocator' ),
                                         'complete' => $delivery_complete,
                                         'detail'   => $delivery_detail,
                                         'state'    => $ship_state,
@@ -7022,7 +6977,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
                         }
 
                         $settings = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : Settings::defaults();
-                        $unallocated = (string) ( $settings['email_unallocated_label'] ?? __( 'Unallocated', 'lpr-backorder-allocator' ) );
+                        $unallocated = (string) ( $settings['email_unallocated_label'] ?? __( 'Ikke allokert', 'lpr-backorder-allocator' ) );
 
                         foreach ( $order->get_items( 'line_item' ) as $item ) {
                                 if ( ! $item instanceof \WC_Order_Item_Product ) {
@@ -7205,7 +7160,6 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
 			echo '<th>' . esc_html__( 'Item', 'lpr-backorder-allocator' ) . '</th>';
 			echo '<th>' . esc_html__( 'Qty', 'lpr-backorder-allocator' ) . '</th>';
 			echo '<th>' . esc_html__( 'ETA', 'lpr-backorder-allocator' ) . '</th>';
-			echo '<th>' . esc_html__( 'Confidence', 'lpr-backorder-allocator' ) . '</th>';
 			echo '<th>' . esc_html__( 'Allocations', 'lpr-backorder-allocator' ) . '</th>';
 			echo '</tr></thead><tbody>';
 
@@ -7227,7 +7181,6 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
                                 $allocs    = $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_ALLOCATIONS' ) ? ORDER_ITEM_META_ALLOCATIONS : 'lpr_allocations', true );
                                 $needs     = class_exists( __NAMESPACE__ . '\Backorder' ) ? Backorder::needs_allocation( $item ) : false;
                                 $force_qty = (int) $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_FORCE_ALLOCATION' ) ? ORDER_ITEM_META_FORCE_ALLOCATION : '_lpr_force_allocation', true );
-                                $confidence = function_exists( __NAMESPACE__ . '\lpr_allocator_item_fulfillment_confidence' ) ? lpr_allocator_item_fulfillment_confidence( $item, $order ) : array( 'score' => 0, 'label' => __( 'Low', 'lpr-backorder-allocator' ) );
 
                                 echo '<tr>';
                                 echo '<td>';
@@ -7269,7 +7222,6 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
                                         echo '<td class="lpr-unallocated">' . esc_html__( 'Unallocated', 'lpr-backorder-allocator' ) . '</td>';
                                 }
 
-                                echo '<td>' . esc_html( sprintf( '%1$d%% (%2$s)', (int) ( $confidence['score'] ?? 0 ), (string) ( $confidence['label'] ?? '' ) ) ) . '</td>';
 
 				echo '<td>';
 				if ( is_array( $allocs ) && ! empty( $allocs ) ) {
@@ -7522,7 +7474,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
                         $rows        = array();
                         $eta_meta    = defined( __NAMESPACE__ . '\ORDER_ITEM_META_LINE_ETA' ) ? ORDER_ITEM_META_LINE_ETA : '_lpr_line_eta';
                         $settings    = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array();
-                        $unallocated = (string) ( $settings['email_unallocated_label'] ?? __( 'Unallocated', 'lpr-backorder-allocator' ) );
+                        $unallocated = (string) ( $settings['email_unallocated_label'] ?? __( 'Ikke allokert', 'lpr-backorder-allocator' ) );
 
                         foreach ( $order->get_items( 'line_item' ) as $item ) {
                                 if ( ! $item instanceof \WC_Order_Item_Product ) {
@@ -7547,30 +7499,17 @@ if ( ! class_exists( __NAMESPACE__ . '\Order_Allocations_Metabox' ) ) {
                                 $allocation_label = '';
                                 if ( $target_qty > 0 ) {
                                         if ( $allocated_qty >= $target_qty ) {
-                                                $allocation_label = __( 'Allocated in full', 'lpr-backorder-allocator' );
+                                                $allocation_label = __( 'Fullt allokert', 'lpr-backorder-allocator' );
                                         } elseif ( $allocated_qty > 0 ) {
                                                 $allocation_label = sprintf(
                                                         /* translators: 1: allocated quantity, 2: ordered quantity */
-                                                        __( 'Partially allocated (%1$d of %2$d)', 'lpr-backorder-allocator' ),
+                                                        __( 'Delvis allokert (%1$d av %2$d)', 'lpr-backorder-allocator' ),
                                                         $allocated_qty,
                                                         $target_qty
                                                 );
                                         } else {
-                                                $allocation_label = __( 'Awaiting allocation', 'lpr-backorder-allocator' );
+                                                $allocation_label = __( 'Venter på allokering', 'lpr-backorder-allocator' );
                                         }
-                                }
-
-                                $confidence = function_exists( __NAMESPACE__ . '\lpr_allocator_item_fulfillment_confidence' ) ? lpr_allocator_item_fulfillment_confidence( $item, $order ) : array( 'score' => 0, 'label' => __( 'Low', 'lpr-backorder-allocator' ) );
-                                $confidence_label = sprintf(
-                                        /* translators: 1: score percentage, 2: confidence label */
-                                        __( 'Fulfillment confidence: %1$d%% (%2$s)', 'lpr-backorder-allocator' ),
-                                        (int) ( $confidence['score'] ?? 0 ),
-                                        (string) ( $confidence['label'] ?? '' )
-                                );
-                                if ( '' !== $allocation_label ) {
-                                        $allocation_label .= ' · ' . $confidence_label;
-                                } else {
-                                        $allocation_label = $confidence_label;
                                 }
 
                                 $rows[] = array(
