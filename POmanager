@@ -3107,6 +3107,7 @@ if ( ! class_exists( __NAMESPACE__ . '\\Supplier_PO_Print_PDF' ) ) {
                                                         const qtyReceived = parseQty($row.find('input[name*="[qty_received]"]').val());
                                                         const etaOverride = ($row.find('input[name*="[eta_override]"]').val() || '').trim();
                                                         const qtyStock = Math.max(0, qtyIncoming - qtyAllocated);
+                                                        const hasSpecificEta = etaOverride !== '';
 
                                                         if (product || qtyIncoming || qtyAllocated || qtyReceived || etaOverride) {
                                                                 lines.push({
@@ -3115,6 +3116,7 @@ if ( ! class_exists( __NAMESPACE__ . '\\Supplier_PO_Print_PDF' ) ) {
                                                                         qtyAllocated,
                                                                         qtyStock,
                                                                         etaOverride,
+                                                                        hasSpecificEta,
                                                                         qtyReceived
                                                                 });
                                                         }
@@ -3135,19 +3137,26 @@ if ( ! class_exists( __NAMESPACE__ . '\\Supplier_PO_Print_PDF' ) ) {
                                         }
 
                                         function renderPrintable(data){
-                                                const lineRows = data.lines.map(function(line){
+                                                const lineRows = data.lines.map(function(line, index){
+                                                        const etaLabel = line.hasSpecificEta
+                                                                ? line.etaOverride
+                                                                : '<?php echo esc_js( __( 'Ready now', 'lpr-backorder-allocator' ) ); ?>';
+                                                        const lineHint = line.hasSpecificEta
+                                                                ? '<?php echo esc_js( __( 'Expected later', 'lpr-backorder-allocator' ) ); ?>'
+                                                                : '<?php echo esc_js( __( 'Available now', 'lpr-backorder-allocator' ) ); ?>';
                                                         return '<tr>' +
+                                                                '<td class="line-index">'+ (index + 1) +'</td>' +
                                                                 '<td class="product">'+ escapeHtml(line.product || '<?php echo esc_js( __( 'Product', 'lpr-backorder-allocator' ) ); ?>') +'</td>' +
                                                                 '<td class="num">'+ line.qtyIncoming +'</td>' +
+                                                                '<td class="num qty-warehouse">'+ line.qtyAllocated +'</td>' +
+                                                                '<td class="num qty-stock">'+ line.qtyStock +'</td>' +
                                                                 '<td class="num">'+ line.qtyReceived +'</td>' +
-                                                                '<td class="num">'+ line.qtyAllocated +'</td>' +
-                                                                '<td class="num">'+ line.qtyStock +'</td>' +
-                                                                '<td>'+ escapeHtml(line.etaOverride) +'</td>' +
+                                                                '<td><div>'+ escapeHtml(etaLabel) +'</div><div class="eta-hint">'+ escapeHtml(lineHint) +'</div></td>' +
                                                         '</tr>';
                                                 }).join('');
 
                                                 const noteBlock = data.note ? '<div class="lpr-po-print-note"><strong><?php echo esc_js( __( 'Note', 'lpr-backorder-allocator' ) ); ?>:</strong><p>'+ escapeHtml(data.note) +'</p></div>' : '';
-                                                const linesHtml = lineRows || '<tr><td class="empty" colspan="6"><?php echo esc_js( __( 'No PO lines available.', 'lpr-backorder-allocator' ) ); ?></td></tr>';
+                                                const linesHtml = lineRows || '<tr><td class="empty" colspan="7"><?php echo esc_js( __( 'No PO lines available.', 'lpr-backorder-allocator' ) ); ?></td></tr>';
                                                 const statusText = (data.status || '<?php echo esc_js( __( 'Open', 'lpr-backorder-allocator' ) ); ?>').toUpperCase();
 
                                                 return `<!doctype html>
@@ -3173,9 +3182,15 @@ if ( ! class_exists( __NAMESPACE__ . '\\Supplier_PO_Print_PDF' ) ) {
                                                         table { width: 100%; border-collapse: collapse; margin-top: 10px; table-layout: fixed; }
                                                         table th { text-align: left; background: #0b5394; color: #fff; padding: 6px 6px; font-size: 11px; letter-spacing: 0.2px; }
                                                         table td { padding: 6px 6px; border-bottom: 1px solid #e2e8f0; font-size: 12px; }
+                                                        table tbody tr:nth-child(even) { background: #f8fbff; }
                                                         table td.product { font-size: 11px; line-height: 1.25; }
+                                                        table td.line-index { width: 30px; text-align: center; font-weight: 700; color: #1b4f8a; }
                                                         table td.num { text-align: right; font-variant-numeric: tabular-nums; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace; }
+                                                        table td.qty-warehouse { background: #fff2e8; font-weight: 700; }
+                                                        table td.qty-stock { background: #ebf8f0; font-weight: 700; }
+                                                        table td .eta-hint { font-size: 10px; color: #5f6b77; margin-top: 2px; }
                                                         table td.empty { text-align: center; color: #555; font-style: italic; }
+                                                        .lpr-po-eta-info { margin-top: 8px; padding: 8px 10px; border-left: 3px solid #0b5394; background: #f5f9ff; font-size: 11px; color: #1f3448; }
                                                         .lpr-po-totals { margin-top: 14px; display: flex; gap: 12px; flex-wrap: wrap; }
                                                         .lpr-po-totals .card { flex: 1 1 180px; background: #0b5394; color: #fff; padding: 12px 14px; border-radius: 8px; }
                                                         .lpr-po-totals .card .label { font-size: 12px; text-transform: uppercase; letter-spacing: 0.6px; opacity: 0.9; margin-bottom: 4px; }
@@ -3209,21 +3224,31 @@ if ( ! class_exists( __NAMESPACE__ . '\\Supplier_PO_Print_PDF' ) ) {
                                                                 <table>
                                                                         <thead>
                                                                                 <tr>
+                                                                                        <th>#</th>
                                                                                         <th><?php echo esc_js( __( 'Product line', 'lpr-backorder-allocator' ) ); ?></th>
                                                                                         <th><?php echo esc_js( __( 'Ordered', 'lpr-backorder-allocator' ) ); ?></th>
-                                                                                        <th><?php echo esc_js( __( 'Received', 'lpr-backorder-allocator' ) ); ?></th>
-                                                                                        <th><?php echo esc_js( __( 'Allocated', 'lpr-backorder-allocator' ) ); ?></th>
+                                                                                        <th><?php echo esc_js( __( 'For warehouse', 'lpr-backorder-allocator' ) ); ?></th>
                                                                                         <th><?php echo esc_js( __( 'For stock', 'lpr-backorder-allocator' ) ); ?></th>
+                                                                                        <th><?php echo esc_js( __( 'Received', 'lpr-backorder-allocator' ) ); ?></th>
                                                                                         <th><?php echo esc_js( __( 'ETA', 'lpr-backorder-allocator' ) ); ?></th>
                                                                                 </tr>
                                                                         </thead>
                                                                         <tbody>${linesHtml}</tbody>
                                                                 </table>
+                                                                <div class="lpr-po-eta-info"><?php echo esc_js( __( 'Lines with a specific ETA are listed last so it is clear these units may arrive later.', 'lpr-backorder-allocator' ) ); ?></div>
 
                                                                 <div class="lpr-po-totals">
                                                                         <div class="card">
                                                                                 <div class="label"><?php echo esc_js( __( 'Total incoming', 'lpr-backorder-allocator' ) ); ?></div>
                                                                                 <div class="value">${data.totalIncoming}</div>
+                                                                        </div>
+                                                                        <div class="card">
+                                                                                <div class="label"><?php echo esc_js( __( 'Units for warehouse', 'lpr-backorder-allocator' ) ); ?></div>
+                                                                                <div class="value">${data.totalWarehouse}</div>
+                                                                        </div>
+                                                                        <div class="card">
+                                                                                <div class="label"><?php echo esc_js( __( 'Units for stock', 'lpr-backorder-allocator' ) ); ?></div>
+                                                                                <div class="value">${data.totalStock}</div>
                                                                         </div>
                                                                 </div>
 
@@ -3235,12 +3260,21 @@ if ( ! class_exists( __NAMESPACE__ . '\\Supplier_PO_Print_PDF' ) ) {
 
                                         function openPrint(){
                                                 const header = collectHeader();
-                                                const lines = collectLines();
+                                                const lines = collectLines().sort(function(a, b){
+                                                        if (a.hasSpecificEta === b.hasSpecificEta) {
+                                                                return a.product.localeCompare(b.product);
+                                                        }
+                                                        return a.hasSpecificEta ? 1 : -1;
+                                                });
                                                 const totalIncoming = lines.reduce(function(sum, line){ return sum + line.qtyIncoming; }, 0);
+                                                const totalWarehouse = lines.reduce(function(sum, line){ return sum + line.qtyAllocated; }, 0);
+                                                const totalStock = lines.reduce(function(sum, line){ return sum + line.qtyStock; }, 0);
                                                 const html = renderPrintable({
                                                         ...header,
                                                         lines,
                                                         totalIncoming,
+                                                        totalWarehouse,
+                                                        totalStock,
                                                         generatedOn: new Date().toLocaleString()
                                                 });
 
