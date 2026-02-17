@@ -122,6 +122,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                                 'frontend_notice_template'      => __( '%qty% units expected (ETA %eta%)', 'lpr-backorder-allocator' ),
                                 'frontend_notice_color'         => '#2f855a',
                                 'frontend_cart_notice_template' => __( 'Next free stock: %qty% units expected (ETA %eta%)', 'lpr-backorder-allocator' ),
+                                'frontend_checkout_eta_summary' => true,
                                 'frontend_refresh_interval'     => 900,
                                 'backorder_index_interval'      => 21600,
                                 'auto_allocation_interval'      => 0,
@@ -215,6 +216,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                         $inform = ! empty( $raw['inform_customer_eta'] );
                         $front  = ! empty( $raw['frontend_extra_pool'] );
                         $emoji  = isset( $raw['frontend_notice_emoji'] ) ? (bool) $raw['frontend_notice_emoji'] : $defaults['frontend_notice_emoji'];
+                        $checkout_eta = isset( $raw['frontend_checkout_eta_summary'] ) ? (bool) $raw['frontend_checkout_eta_summary'] : (bool) $defaults['frontend_checkout_eta_summary'];
 
                         $notice_tpl = isset( $raw['frontend_notice_template'] ) ? wp_kses_post( $raw['frontend_notice_template'] ) : '';
                         if ( '' === trim( $notice_tpl ) ) {
@@ -378,6 +380,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                                 'frontend_notice_template' => $notice_tpl,
                                 'frontend_notice_color'    => $notice_color,
                                 'frontend_cart_notice_template' => $cart_notice_tpl,
+                                'frontend_checkout_eta_summary' => (bool) $checkout_eta,
                                 'frontend_refresh_interval' => (int) $interval,
                                 'backorder_index_interval' => (int) $index_interval,
                                 'auto_allocation_interval' => (int) $alloc_interval,
@@ -688,6 +691,15 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                         'placeholder' => $defaults['frontend_cart_notice_template'],
                                         'default'     => $defaults['frontend_cart_notice_template'],
                                 ),
+
+                                array(
+                                        'title'   => __( 'Show estimated shipment date in checkout', 'lpr-backorder-allocator' ),
+                                        'desc'    => __( 'Show the estimated shipment date summary on checkout only.', 'lpr-backorder-allocator' ),
+                                        'id'      => 'lpr_allocator_frontend_checkout_eta_summary',
+                                        'type'    => 'checkbox',
+                                        'default' => 'yes',
+                                ),
+
 
                                 array(
                                         'title'   => __( 'Storefront refresh interval', 'lpr-backorder-allocator' ),
@@ -1042,6 +1054,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                 'lpr_allocator_frontend_notice_template'   => (string) $settings['frontend_notice_template'],
                                 'lpr_allocator_frontend_notice_color'      => (string) $settings['frontend_notice_color'],
                                 'lpr_allocator_frontend_cart_notice_template' => (string) $settings['frontend_cart_notice_template'],
+                                'lpr_allocator_frontend_checkout_eta_summary' => $settings['frontend_checkout_eta_summary'] ? 'yes' : 'no',
                                 'lpr_allocator_frontend_refresh_interval'  => (int) $settings['frontend_refresh_interval'],
                                 'lpr_allocator_backorder_index_interval'   => (int) $settings['backorder_index_interval'],
                                 'lpr_allocator_auto_allocation_interval'   => (int) $settings['auto_allocation_interval'],
@@ -1371,6 +1384,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                         $raw['frontend_notice_template']    = isset( $_POST['lpr_allocator_frontend_notice_template'] ) ? (string) wp_unslash( $_POST['lpr_allocator_frontend_notice_template'] ) : $settings['frontend_notice_template'];
                         $raw['frontend_notice_color']       = isset( $_POST['lpr_allocator_frontend_notice_color'] ) ? (string) wp_unslash( $_POST['lpr_allocator_frontend_notice_color'] ) : $settings['frontend_notice_color'];
                         $raw['frontend_cart_notice_template'] = isset( $_POST['lpr_allocator_frontend_cart_notice_template'] ) ? (string) wp_unslash( $_POST['lpr_allocator_frontend_cart_notice_template'] ) : $settings['frontend_cart_notice_template'];
+                        $raw['frontend_checkout_eta_summary'] = ! empty( $_POST['lpr_allocator_frontend_checkout_eta_summary'] );
                         $raw['frontend_refresh_interval']   = isset( $_POST['lpr_allocator_frontend_refresh_interval'] ) ? (int) $_POST['lpr_allocator_frontend_refresh_interval'] : $settings['frontend_refresh_interval'];
                         $raw['backorder_index_interval']    = isset( $_POST['lpr_allocator_backorder_index_interval'] ) ? (int) $_POST['lpr_allocator_backorder_index_interval'] : $settings['backorder_index_interval'];
                         $raw['auto_allocation_interval']    = isset( $_POST['lpr_allocator_auto_allocation_interval'] ) ? (int) $_POST['lpr_allocator_auto_allocation_interval'] : $settings['auto_allocation_interval'];
@@ -2858,9 +2872,26 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Cart_Eta_Summary' ) ) {
                         }
 
                         add_action( 'woocommerce_cart_totals_before_order_total', array( __CLASS__, 'render_cart_totals_row' ), 15 );
-                        add_action( 'woocommerce_review_order_before_order_total', array( __CLASS__, 'render_checkout_totals_row' ), 15 );
-                        add_action( 'woocommerce_before_checkout_form', array( __CLASS__, 'render_checkout_summary' ), 8 );
+
+                        if ( self::checkout_summary_enabled() ) {
+                                add_action( 'woocommerce_review_order_before_order_total', array( __CLASS__, 'render_checkout_totals_row' ), 15 );
+                                add_action( 'woocommerce_before_checkout_form', array( __CLASS__, 'render_checkout_summary' ), 8 );
+                        }
                 }
+
+                /**
+                 * Whether checkout ETA summary output is enabled.
+                 */
+                protected static function checkout_summary_enabled(): bool {
+                        if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
+                                return true;
+                        }
+
+                        $settings = Settings::get();
+
+                        return ! isset( $settings['frontend_checkout_eta_summary'] ) || ! empty( $settings['frontend_checkout_eta_summary'] );
+                }
+
 
                 /**
                  * Ensure output only runs on storefront flows.
