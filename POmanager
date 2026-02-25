@@ -216,7 +216,16 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                         $inform = ! empty( $raw['inform_customer_eta'] );
                         $front  = ! empty( $raw['frontend_extra_pool'] );
                         $emoji  = isset( $raw['frontend_notice_emoji'] ) ? (bool) $raw['frontend_notice_emoji'] : $defaults['frontend_notice_emoji'];
-                        $checkout_eta = isset( $raw['frontend_checkout_eta_summary'] ) ? (bool) $raw['frontend_checkout_eta_summary'] : (bool) $defaults['frontend_checkout_eta_summary'];
+                        if ( isset( $raw['frontend_checkout_eta_summary'] ) ) {
+                                $checkout_eta_raw = $raw['frontend_checkout_eta_summary'];
+                                if ( function_exists( 'wc_string_to_bool' ) && is_string( $checkout_eta_raw ) ) {
+                                        $checkout_eta = wc_string_to_bool( $checkout_eta_raw );
+                                } else {
+                                        $checkout_eta = in_array( strtolower( (string) $checkout_eta_raw ), array( '1', 'yes', 'true', 'on' ), true );
+                                }
+                        } else {
+                                $checkout_eta = (bool) $defaults['frontend_checkout_eta_summary'];
+                        }
 
                         $notice_tpl = isset( $raw['frontend_notice_template'] ) ? wp_kses_post( $raw['frontend_notice_template'] ) : '';
                         if ( '' === trim( $notice_tpl ) ) {
@@ -2889,7 +2898,16 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Cart_Eta_Summary' ) ) {
 
                         $settings = Settings::get();
 
-                        return ! isset( $settings['frontend_checkout_eta_summary'] ) || ! empty( $settings['frontend_checkout_eta_summary'] );
+                        if ( ! isset( $settings['frontend_checkout_eta_summary'] ) ) {
+                                return true;
+                        }
+
+                        $setting = $settings['frontend_checkout_eta_summary'];
+                        if ( function_exists( 'wc_string_to_bool' ) && is_string( $setting ) ) {
+                                return wc_string_to_bool( $setting );
+                        }
+
+                        return in_array( strtolower( (string) $setting ), array( '1', 'yes', 'true', 'on' ), true );
                 }
 
 
