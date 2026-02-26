@@ -12071,7 +12071,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                         );
 
                         if ( class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ) {
-                                Incoming_Stock_Indexer::refresh_all();
+                                Incoming_Stock_Indexer::refresh_now();
                         }
 
                         if ( function_exists( __NAMESPACE__ . '\lpr_allocator_maybe_close_po' ) ) {
@@ -12102,7 +12102,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                         if ( $changed ) {
                                 update_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', $po_lines );
                                 if ( class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ) {
-                                        Incoming_Stock_Indexer::refresh_all();
+                                        Incoming_Stock_Indexer::refresh_now();
                                 }
                         }
 
@@ -12347,7 +12347,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                         );
 
                         if ( class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ) {
-                                Incoming_Stock_Indexer::refresh_all();
+                                Incoming_Stock_Indexer::refresh_now();
                         }
 
                         // Run the receipt immediately to ensure inventory is updated even before the async worker runs.
@@ -13591,6 +13591,13 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ) {
                         if ( ! function_exists( 'as_schedule_recurring_action' ) && ! wp_next_scheduled( self::ACTION_HOOK ) ) {
                                 wp_schedule_single_event( time() + self::get_interval(), self::ACTION_HOOK );
                         }
+                }
+
+                /**
+                 * Public trigger for immediate incoming-stock snapshot rebuilds.
+                 */
+                public static function refresh_now(): void {
+                        self::refresh_all();
                 }
 
                 /**
