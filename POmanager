@@ -12350,26 +12350,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                 Incoming_Stock_Indexer::refresh_now();
                         }
 
-                        // Run the receipt immediately to ensure inventory is updated even before the async worker runs.
-                        try {
-                                self::process_receipt( $po_id, $receipt_id );
-                        } catch ( \Throwable $e ) {
-                                // Avoid surfacing fatal errors to the AJAX caller; the queued action will still run.
-                                if ( defined( 'WP_DEBUG' ) && WP_DEBUG ) {
-                                        error_log( sprintf( 'LPR allocator receipt sync failure: %s', $e->getMessage() ) );
-                                }
-
-                                lpr_allocator_log_event(
-                                        'receipt_sync_exception',
-                                        array(
-                                                'po_id'      => $po_id,
-                                                'receipt_id' => $receipt_id,
-                                                'message'    => $e->getMessage(),
-                                        )
-                                );
-                        }
-
-                        $message = __( 'Job scheduled. Stock will update asynchronously.', 'lpr-backorder-allocator' );
+                        $message = __( 'Receipt queued successfully.', 'lpr-backorder-allocator' );
                         wp_send_json_success(
                                 array(
                                         'message' => $message,
@@ -17873,7 +17854,6 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
                                                                 }
                                                                 statusEl.textContent = resp.data && resp.data.message ? resp.data.message : '<?php echo esc_js( __( 'Receipt queued.', 'lpr-backorder-allocator' ) ); ?>';
                                                                 closeModal();
-                                                                window.location.reload();
                                                         }).catch(function(){ statusEl.textContent = '<?php echo esc_js( __( 'Unable to apply receipt.', 'lpr-backorder-allocator' ) ); ?>'; });
                                         });
                                 })();
