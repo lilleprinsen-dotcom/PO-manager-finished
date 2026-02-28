@@ -2507,6 +2507,110 @@ if ( ! class_exists( __NAMESPACE__ . '\Reorder_Recommendations_Page' ) ) {
         Reorder_Recommendations_Page::init();
 }
 
+
+if ( ! class_exists( __NAMESPACE__ . '\Gift_Progressive_Slider_Helper' ) ) {
+        /**
+         * Adds UX hints for progressive gift sliders that require selecting all gifts.
+         */
+        class Gift_Progressive_Slider_Helper {
+                public static function init(): void {
+                        add_action( 'wp_footer', array( __CLASS__, 'render_script' ), 99 );
+                }
+
+                public static function render_script(): void {
+                        if ( is_admin() ) {
+                                return;
+                        }
+
+                        $config = array(
+                                'requiredGifts' => 4,
+                                'titleText'     => __( 'Progressiv gavevelger: velg alle 4 gaver for å fortsette', 'lpr-backorder-allocator' ),
+                                'successText'   => __( 'Supert! Du har valgt alle 4 gaver. Klikk «Legg i handlekurven» for å legge valgene til i handlekurven.', 'lpr-backorder-allocator' ),
+                        );
+                        ?>
+                        <script>
+                        (function () {
+                                var config = <?php echo wp_json_encode( $config ); ?>;
+                                var sliderSelectors = [
+                                        '[data-gift-progressive-slider]',
+                                        '[data-progressive-gift-slider]',
+                                        '.gift-progressive-slider',
+                                        '.progressive-gift-slider'
+                                ];
+
+                                function getSelectedCount(container) {
+                                        var count = 0;
+                                        var boolSelector = 'input[type="checkbox"]:checked, input[type="radio"]:checked';
+                                        count += container.querySelectorAll(boolSelector).length;
+
+                                        container.querySelectorAll('button[aria-pressed="true"], .is-selected, .selected').forEach(function (node) {
+                                                if (!node.matches('input, label')) {
+                                                        count += 1;
+                                                }
+                                        });
+
+                                        return count;
+                                }
+
+                                function setHelpTitle(container) {
+                                        var titleNode = container.querySelector('[data-progressive-gift-title], .progressive-gift-title, .gift-chooser-title, h2, h3');
+                                        if (!titleNode || titleNode.getAttribute('data-lpr-progressive-title-set') === '1') {
+                                                return;
+                                        }
+                                        titleNode.textContent = config.titleText;
+                                        titleNode.setAttribute('data-lpr-progressive-title-set', '1');
+                                }
+
+                                function syncSuccessNotice(container) {
+                                        var required = parseInt(container.getAttribute('data-required-gifts') || config.requiredGifts, 10);
+                                        if (isNaN(required) || required < 1) {
+                                                required = config.requiredGifts;
+                                        }
+                                        var selected = getSelectedCount(container);
+
+                                        var notice = container.querySelector('.lpr-progressive-gift-success');
+                                        if (!notice) {
+                                                notice = document.createElement('div');
+                                                notice.className = 'lpr-progressive-gift-success';
+                                                notice.style.marginTop = '10px';
+                                                notice.style.fontWeight = '600';
+                                                notice.style.color = '#2f855a';
+                                                container.appendChild(notice);
+                                        }
+
+                                        if (selected >= required) {
+                                                notice.textContent = config.successText;
+                                                notice.style.display = 'block';
+                                        } else {
+                                                notice.style.display = 'none';
+                                                notice.textContent = '';
+                                        }
+                                }
+
+                                function syncAll() {
+                                        var selectors = sliderSelectors.join(', ');
+                                        document.querySelectorAll(selectors).forEach(function (container) {
+                                                setHelpTitle(container);
+                                                syncSuccessNotice(container);
+                                        });
+                                }
+
+                                document.addEventListener('change', syncAll);
+                                document.addEventListener('click', function () {
+                                        setTimeout(syncAll, 0);
+                                });
+                                document.addEventListener('DOMContentLoaded', syncAll);
+
+                                var observer = new MutationObserver(syncAll);
+                                observer.observe(document.body, { childList: true, subtree: true });
+                        })();
+                        </script>
+                        <?php
+                }
+        }
+        Gift_Progressive_Slider_Helper::init();
+}
+
 /* SELF-CHECK:
 - Added namespaced constants for all required meta keys; guarded with defined().
 - Implemented Settings class with option key `lpr_allocator_settings`, defaults (order_statuses ['processing','on-hold'], inform_customer_eta=false, frontend_extra_pool=false, branding fields incl. brand_primary_color '#1a1a1a', email_footer_text_no), getter merges defaults, update() enforces autoload=no on first write.
