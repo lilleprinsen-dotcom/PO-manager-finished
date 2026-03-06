@@ -11914,22 +11914,6 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                 return;
                         }
 
-                        if ( defined( __NAMESPACE__ . '\PO_STATUS_CLOSED' ) && PO_STATUS_CLOSED === get_post_status( $po_id ) ) {
-                                lpr_allocator_log_event(
-                                        'receipt_canceled_po_closed',
-                                        array(
-                                                'po_id'      => $po_id,
-                                                'receipt_id' => $receipt_id,
-                                        )
-                                );
-                                $receipts[ $receipt_index ]['status']  = 'canceled';
-                                $receipts[ $receipt_index ]['message'] = isset( $receipts[ $receipt_index ]['message'] ) ? (string) $receipts[ $receipt_index ]['message'] : '';
-                                $receipts[ $receipt_index ]['logs']    = isset( $receipts[ $receipt_index ]['logs'] ) && is_array( $receipts[ $receipt_index ]['logs'] ) ? $receipts[ $receipt_index ]['logs'] : array();
-                                $receipts[ $receipt_index ]['message'] = trim( $receipts[ $receipt_index ]['message'] . ' ' . __( 'Receipt canceled because the PO is closed.', 'lpr-backorder-allocator' ) );
-                                self::save_receipts( $po_id, $receipts );
-                                return;
-                        }
-
                         lpr_allocator_log_event(
                                 'receipt_processing_start',
                                 array(
