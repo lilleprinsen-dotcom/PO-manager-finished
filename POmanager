@@ -11749,12 +11749,15 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                         $closed_po_entries[] = $entry;
                                 }
                         }
+                        $closed_po_entries = array_slice( $closed_po_entries, 0, 10 );
+                        $entries           = array_slice( $entries, 0, 10 );
                         ?>
                         <div class="wrap lpr-received-stock-log-page">
                                 <h1><?php esc_html_e( 'Received stock log', 'lpr-backorder-allocator' ); ?></h1>
                                 <p><?php esc_html_e( 'Every stock receipt is listed separately, including job outcome and verification state.', 'lpr-backorder-allocator' ); ?></p>
 
                                 <h2><?php esc_html_e( 'PO closed receipt errors', 'lpr-backorder-allocator' ); ?></h2>
+                                <p><?php esc_html_e( 'Showing the latest 10 matching errors from all POs.', 'lpr-backorder-allocator' ); ?></p>
                                 <?php if ( empty( $closed_po_entries ) ) : ?>
                                         <p><?php esc_html_e( 'No receipt errors were found with "Receipt canceled because the PO is closed."', 'lpr-backorder-allocator' ); ?></p>
                                 <?php else : ?>
@@ -11798,6 +11801,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                         </table>
                                 <?php endif; ?>
 
+                                <p><?php esc_html_e( 'Showing the latest 10 receipt jobs across all POs.', 'lpr-backorder-allocator' ); ?></p>
                                 <?php if ( empty( $entries ) ) : ?>
                                         <div class="notice notice-info"><p><?php esc_html_e( 'No receipts have been logged yet.', 'lpr-backorder-allocator' ); ?></p></div>
                                 <?php else : ?>
@@ -11874,75 +11878,68 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                 protected static function collect_overview_entries(): array {
                         $entries      = array();
                         $po_post_type = defined( __NAMESPACE__ . '\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po';
-                        $paged        = 1;
+                        $po_ids       = get_posts(
+                                array(
+                                        'post_type'      => $po_post_type,
+                                        'post_status'    => 'any',
+                                        'posts_per_page' => -1,
+                                        'fields'         => 'ids',
+                                        'orderby'        => 'modified',
+                                        'order'          => 'DESC',
+                                        'no_found_rows'  => true,
+                                )
+                        );
 
-                        do {
-                                $query = new \WP_Query(
-                                        array(
-                                                'post_type'      => $po_post_type,
-                                                'post_status'    => 'any',
-                                                'posts_per_page' => 200,
-                                                'paged'          => $paged,
-                                                'fields'         => 'ids',
-                                                'orderby'        => 'modified',
-                                                'order'          => 'DESC',
-                                                'no_found_rows'  => true,
-                                        )
-                                );
+                        foreach ( (array) $po_ids as $po_id ) {
+                                $po_id    = (int) $po_id;
+                                $receipts = self::get_receipts( $po_id );
+                                if ( empty( $receipts ) ) {
+                                        continue;
+                                }
 
-                                foreach ( (array) $query->posts as $po_id ) {
-                                        $po_id    = (int) $po_id;
-                                        $receipts = self::get_receipts( $po_id );
-                                        if ( empty( $receipts ) ) {
+                                $po_number = (string) get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_PO_NUMBER' ) ? PO_META_PO_NUMBER : '_lpr_po_number', true );
+                                $supplier  = (string) get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_SUPPLIER_NAME' ) ? PO_META_SUPPLIER_NAME : '_lpr_supplier_name', true );
+
+                                foreach ( $receipts as $receipt ) {
+                                        if ( ! is_array( $receipt ) ) {
                                                 continue;
                                         }
 
-                                        $po_number = (string) get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_PO_NUMBER' ) ? PO_META_PO_NUMBER : '_lpr_po_number', true );
-                                        $supplier  = (string) get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_SUPPLIER_NAME' ) ? PO_META_SUPPLIER_NAME : '_lpr_supplier_name', true );
-
-                                        foreach ( $receipts as $receipt ) {
-                                                if ( ! is_array( $receipt ) ) {
-                                                        continue;
-                                                }
-
-                                                $status = self::resolve_receipt_status( $receipt );
-                                                if ( 'completed' === $status ) {
-                                                        $job_result = __( 'Yes', 'lpr-backorder-allocator' );
-                                                } elseif ( 'failed' === $status || 'canceled' === $status ) {
-                                                        $job_result = __( 'No', 'lpr-backorder-allocator' );
-                                                } else {
-                                                        $job_result = __( 'Pending', 'lpr-backorder-allocator' );
-                                                }
-
-                                                $verification = isset( $receipt['verification'] ) && is_array( $receipt['verification'] ) ? $receipt['verification'] : array();
-                                                if ( 'completed' === $status && ! empty( $verification ) ) {
-                                                        $verified = __( 'Yes', 'lpr-backorder-allocator' );
-                                                } elseif ( 'failed' === $status || 'canceled' === $status ) {
-                                                        $verified = __( 'No', 'lpr-backorder-allocator' );
-                                                } else {
-                                                        $verified = __( 'Pending', 'lpr-backorder-allocator' );
-                                                }
-
-                                                $datetime = ! empty( $receipt['created_at'] ) ? mysql2date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), (string) $receipt['created_at'] ) : '';
-                                                $job      = ! empty( $receipt['action_id'] ) ? '#' . absint( $receipt['action_id'] ) : __( 'n/a', 'lpr-backorder-allocator' );
-
-                                                $entries[] = array(
-                                                        'po_id'      => $po_id,
-                                                        'po_number'  => $po_number,
-                                                        'supplier'   => $supplier,
-                                                        'status'     => $status,
-                                                        'datetime'   => $datetime,
-                                                        'created_at' => (string) ( $receipt['created_at'] ?? '' ),
-                                                        'job'        => $job,
-                                                        'job_result' => $job_result,
-                                                        'verified'   => $verified,
-                                                        'receipt'    => $receipt,
-                                                );
+                                        $status = self::resolve_receipt_status( $receipt );
+                                        if ( 'completed' === $status ) {
+                                                $job_result = __( 'Yes', 'lpr-backorder-allocator' );
+                                        } elseif ( 'failed' === $status || 'canceled' === $status ) {
+                                                $job_result = __( 'No', 'lpr-backorder-allocator' );
+                                        } else {
+                                                $job_result = __( 'Pending', 'lpr-backorder-allocator' );
                                         }
-                                }
 
-                                $paged++;
-                        } while ( ! empty( $query->posts ) );
+                                        $verification = isset( $receipt['verification'] ) && is_array( $receipt['verification'] ) ? $receipt['verification'] : array();
+                                        if ( 'completed' === $status && ! empty( $verification ) ) {
+                                                $verified = __( 'Yes', 'lpr-backorder-allocator' );
+                                        } elseif ( 'failed' === $status || 'canceled' === $status ) {
+                                                $verified = __( 'No', 'lpr-backorder-allocator' );
+                                        } else {
+                                                $verified = __( 'Pending', 'lpr-backorder-allocator' );
+                                        }
+
+                                        $datetime = ! empty( $receipt['created_at'] ) ? mysql2date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), (string) $receipt['created_at'] ) : '';
+                                        $job      = ! empty( $receipt['action_id'] ) ? '#' . absint( $receipt['action_id'] ) : __( 'n/a', 'lpr-backorder-allocator' );
+
+                                        $entries[] = array(
+                                                'po_id'      => $po_id,
+                                                'po_number'  => $po_number,
+                                                'supplier'   => $supplier,
+                                                'status'     => $status,
+                                                'datetime'   => $datetime,
+                                                'created_at' => (string) ( $receipt['created_at'] ?? '' ),
+                                                'job'        => $job,
+                                                'job_result' => $job_result,
+                                                'verified'   => $verified,
+                                                'receipt'    => $receipt,
+                                        );
+                                }
+                        }
 
                         usort(
                                 $entries,
@@ -11951,7 +11948,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                 }
                         );
 
-                        return array_slice( $entries, 0, 300 );
+                        return $entries;
                 }
 
                 /**
