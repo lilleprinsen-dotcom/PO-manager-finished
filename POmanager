@@ -11840,12 +11840,6 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                         'fields'         => 'ids',
                                         'orderby'        => 'modified',
                                         'order'          => 'DESC',
-                                        'meta_query'     => array(
-                                                array(
-                                                        'key'     => defined( __NAMESPACE__ . '\PO_META_RECEIPTS' ) ? PO_META_RECEIPTS : '_lpr_po_receipts',
-                                                        'compare' => 'EXISTS',
-                                                ),
-                                        ),
                                         'no_found_rows'  => true,
                                 )
                         );
@@ -12132,11 +12126,66 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                  */
                 protected static function get_receipts( int $po_id ): array {
                         $receipts = get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_RECEIPTS' ) ? PO_META_RECEIPTS : '_lpr_po_receipts', true );
-                        if ( ! is_array( $receipts ) ) {
+                        if ( is_array( $receipts ) && ! empty( $receipts ) ) {
+                                return $receipts;
+                        }
+
+                        $po_lines = get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', true );
+                        if ( ! is_array( $po_lines ) ) {
                                 return array();
                         }
 
-                        return $receipts;
+                        $legacy_rows = array();
+                        foreach ( $po_lines as $line ) {
+                                if ( ! is_array( $line ) ) {
+                                        continue;
+                                }
+
+                                $qty_received = max( 0, (int) ( $line['qty_received'] ?? 0 ) );
+                                if ( $qty_received <= 0 ) {
+                                        continue;
+                                }
+
+                                $legacy_rows[] = array(
+                                        'product_id'   => (int) ( $line['product_id'] ?? 0 ),
+                                        'variation_id' => (int) ( $line['variation_id'] ?? 0 ),
+                                        'qty'          => $qty_received,
+                                        'stock_before' => null,
+                                        'stock_after'  => null,
+                                        'verification' => null,
+                                );
+                        }
+
+                        if ( empty( $legacy_rows ) ) {
+                                return array();
+                        }
+
+                        $created_at = (string) get_post_field( 'post_modified', $po_id );
+                        if ( '' === $created_at ) {
+                                $created_at = (string) get_post_field( 'post_date', $po_id );
+                        }
+
+                        return array(
+                                array(
+                                        'id'         => 'legacy-' . $po_id,
+                                        'status'     => 'completed',
+                                        'created_at' => $created_at,
+                                        'action_id'  => 0,
+                                        'message'    => __( 'Recovered from previously recorded received quantities before receipt logging was available.', 'lpr-backorder-allocator' ),
+                                        'lines'      => array_map(
+                                                static function ( array $row ): array {
+                                                        return array(
+                                                                'product_id'   => (int) ( $row['product_id'] ?? 0 ),
+                                                                'variation_id' => (int) ( $row['variation_id'] ?? 0 ),
+                                                                'qty'          => (int) ( $row['qty'] ?? 0 ),
+                                                        );
+                                                },
+                                                $legacy_rows
+                                        ),
+                                        'logs'       => $legacy_rows,
+                                        'legacy'     => true,
+                                ),
+                        );
                 }
 
                 /**
