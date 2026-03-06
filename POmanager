@@ -5593,7 +5593,7 @@ table.appendChild(tr);
                 }
 
                 /**
-                 * Ensure the list table "All" view includes custom PO statuses.
+                 * Ensure the list table "All" view includes custom PO statuses and support broad search terms.
                  */
                 public static function adjust_admin_request_statuses( array $vars ): array {
                         if ( ! is_admin() || ( $vars['post_type'] ?? '' ) !== CPT_SUPPLIER_PO ) {
@@ -5601,12 +5601,148 @@ table.appendChild(tr);
                         }
 
                         $requested_status = isset( $vars['post_status'] ) ? (string) $vars['post_status'] : '';
-                        if ( '' !== $requested_status && 'all' !== $requested_status ) {
-                                return $vars;
+                        if ( '' === $requested_status || 'all' === $requested_status ) {
+                                $vars['post_status'] = array( PO_STATUS_OPEN, PO_STATUS_PARTIAL, PO_STATUS_CLOSED, 'publish', 'draft', 'pending', 'private' );
                         }
 
-                        $vars['post_status'] = array( PO_STATUS_OPEN, PO_STATUS_PARTIAL, PO_STATUS_CLOSED, 'publish', 'draft', 'pending', 'private' );
+                        $search_term = isset( $vars['s'] ) ? sanitize_text_field( (string) $vars['s'] ) : '';
+                        if ( '' !== $search_term ) {
+                                $matched_ids = self::find_matching_po_ids( $search_term, (array) $vars['post_status'] );
+                                $vars['post__in'] = empty( $matched_ids ) ? array( 0 ) : $matched_ids;
+                                unset( $vars['s'] );
+                        }
+
                         return $vars;
+                }
+
+                /**
+                 * Resolve PO IDs that match search by PO title/ID, PO number, supplier fields, or line-item product SKU/name.
+                 */
+                protected static function find_matching_po_ids( string $search_term, array $post_statuses ): array {
+                        $needle = trim( $search_term );
+                        if ( '' === $needle ) {
+                                return array();
+                        }
+
+                        $needle_lower = function_exists( 'mb_strtolower' ) ? mb_strtolower( $needle ) : strtolower( $needle );
+                        $statuses     = array_values( array_filter( array_unique( array_map( 'sanitize_key', $post_statuses ) ) ) );
+                        if ( empty( $statuses ) ) {
+                                $statuses = array( PO_STATUS_OPEN, PO_STATUS_PARTIAL, PO_STATUS_CLOSED, 'publish', 'draft', 'pending', 'private' );
+                        }
+
+                        $ids = array();
+
+                        $page = 1;
+                        $per_page = 200;
+                        do {
+                                $query = new \WP_Query(
+                                        array(
+                                                'post_type'      => CPT_SUPPLIER_PO,
+                                                'post_status'    => $statuses,
+                                                'posts_per_page' => $per_page,
+                                                'paged'          => $page,
+                                                'fields'         => 'ids',
+                                                'orderby'        => 'ID',
+                                                'order'          => 'DESC',
+                                                'no_found_rows'  => true,
+                                        )
+                                );
+
+                                if ( empty( $query->posts ) ) {
+                                        break;
+                                }
+
+                                foreach ( $query->posts as $po_id ) {
+                                        if ( self::po_matches_search_term( (int) $po_id, $needle, $needle_lower ) ) {
+                                                $ids[] = (int) $po_id;
+                                        }
+                                }
+
+                                if ( count( $query->posts ) < $per_page ) {
+                                        break;
+                                }
+
+                                $page++;
+                        } while ( true );
+
+                        return array_values( array_unique( array_map( 'absint', $ids ) ) );
+                }
+
+                /**
+                 * Check whether a PO should match the supplier PO list-table search term.
+                 */
+                protected static function po_matches_search_term( int $po_id, string $needle, string $needle_lower ): bool {
+                        if ( $po_id <= 0 ) {
+                                return false;
+                        }
+
+                        if ( ctype_digit( $needle ) && (int) $needle === $po_id ) {
+                                return true;
+                        }
+
+                        $title = get_the_title( $po_id );
+                        if ( is_string( $title ) && '' !== $title && false !== strpos( function_exists( 'mb_strtolower' ) ? mb_strtolower( $title ) : strtolower( $title ), $needle_lower ) ) {
+                                return true;
+                        }
+
+                        $fields = array(
+                                (string) get_post_meta( $po_id, PO_META_PO_NUMBER, true ),
+                                (string) get_post_meta( $po_id, PO_META_SUPPLIER_NAME, true ),
+                                (string) get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_SUPPLIER_CONTACT' ) ? PO_META_SUPPLIER_CONTACT : '_lpr_supplier_contact', true ),
+                        );
+
+                        foreach ( $fields as $value ) {
+                                $value = trim( $value );
+                                if ( '' === $value ) {
+                                        continue;
+                                }
+
+                                $value_lower = function_exists( 'mb_strtolower' ) ? mb_strtolower( $value ) : strtolower( $value );
+                                if ( false !== strpos( $value_lower, $needle_lower ) ) {
+                                        return true;
+                                }
+                        }
+
+                        $lines = get_post_meta( $po_id, PO_META_LINES, true );
+                        if ( ! is_array( $lines ) ) {
+                                return false;
+                        }
+
+                        foreach ( $lines as $line ) {
+                                if ( ! is_array( $line ) ) {
+                                        continue;
+                                }
+
+                                $target_id = isset( $line['variation_id'] ) && (int) $line['variation_id'] > 0
+                                        ? (int) $line['variation_id']
+                                        : (int) ( $line['product_id'] ?? 0 );
+                                if ( $target_id <= 0 || ! function_exists( 'wc_get_product' ) ) {
+                                        continue;
+                                }
+
+                                $product = wc_get_product( $target_id );
+                                if ( ! ( $product instanceof \WC_Product ) ) {
+                                        continue;
+                                }
+
+                                $sku = trim( (string) $product->get_sku() );
+                                if ( '' !== $sku ) {
+                                        $sku_lower = function_exists( 'mb_strtolower' ) ? mb_strtolower( $sku ) : strtolower( $sku );
+                                        if ( false !== strpos( $sku_lower, $needle_lower ) ) {
+                                                return true;
+                                        }
+                                }
+
+                                $name = trim( (string) $product->get_formatted_name() );
+                                if ( '' !== $name ) {
+                                        $name_lower = function_exists( 'mb_strtolower' ) ? mb_strtolower( $name ) : strtolower( $name );
+                                        if ( false !== strpos( $name_lower, $needle_lower ) ) {
+                                                return true;
+                                        }
+                                }
+                        }
+
+                        return false;
                 }
 
                 public static function display_states( array $states, \WP_Post $post ): array {
