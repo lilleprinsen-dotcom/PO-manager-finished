@@ -11740,17 +11740,22 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                 echo '<div class="notice notice-error"><p>' . esc_html__( 'Unable to queue retry for this receipt.', 'lpr-backorder-allocator' ) . '</p></div>';
                         }
 
-                        $entries = self::collect_overview_entries();
-                        $closed_po_entries = array();
-                        foreach ( $entries as $entry ) {
-                                $entry_status  = isset( $entry['status'] ) ? (string) $entry['status'] : '';
-                                $entry_receipt = isset( $entry['receipt'] ) && is_array( $entry['receipt'] ) ? $entry['receipt'] : array();
-                                if ( self::is_closed_po_receipt_error( $entry_receipt, $entry_status ) ) {
-                                        $closed_po_entries[] = $entry;
-                                }
-                        }
-                        $closed_po_entries = array_slice( $closed_po_entries, 0, 10 );
-                        $entries           = array_slice( $entries, 0, 10 );
+					$entries = self::collect_overview_entries();
+					$failed_entries    = array();
+					$closed_po_entries = array();
+					foreach ( $entries as $entry ) {
+						$entry_status  = isset( $entry['status'] ) ? (string) $entry['status'] : '';
+						$entry_receipt = isset( $entry['receipt'] ) && is_array( $entry['receipt'] ) ? $entry['receipt'] : array();
+						if ( in_array( $entry_status, array( 'failed', 'canceled' ), true ) ) {
+							$failed_entries[] = $entry;
+						}
+						if ( self::is_closed_po_receipt_error( $entry_receipt, $entry_status ) ) {
+							$closed_po_entries[] = $entry;
+						}
+					}
+					$failed_entries    = array_slice( $failed_entries, 0, 10 );
+					$closed_po_entries = array_slice( $closed_po_entries, 0, 10 );
+					$entries           = array_slice( $entries, 0, 10 );
                         ?>
                         <div class="wrap lpr-received-stock-log-page">
                                 <h1><?php esc_html_e( 'Received stock log', 'lpr-backorder-allocator' ); ?></h1>
@@ -11867,6 +11872,56 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                                         </div>
                                                 <?php endforeach; ?>
                                         </div>
+                                <?php endif; ?>
+
+
+                                <h2><?php esc_html_e( 'Recent failed receipt jobs', 'lpr-backorder-allocator' ); ?></h2>
+                                <p><?php esc_html_e( 'Showing the latest 10 failed or canceled receipt jobs across all POs.', 'lpr-backorder-allocator' ); ?></p>
+                                <?php if ( empty( $failed_entries ) ) : ?>
+                                        <p><?php esc_html_e( 'No failed or canceled receipt jobs were found.', 'lpr-backorder-allocator' ); ?></p>
+                                <?php else : ?>
+                                        <table class="widefat striped" style="max-width:1100px;margin-bottom:16px;">
+                                                <thead>
+                                                <tr>
+                                                        <th><?php esc_html_e( 'Date', 'lpr-backorder-allocator' ); ?></th>
+                                                        <th><?php esc_html_e( 'PO', 'lpr-backorder-allocator' ); ?></th>
+                                                        <th><?php esc_html_e( 'Supplier', 'lpr-backorder-allocator' ); ?></th>
+                                                        <th><?php esc_html_e( 'Status', 'lpr-backorder-allocator' ); ?></th>
+                                                        <th><?php esc_html_e( 'Job', 'lpr-backorder-allocator' ); ?></th>
+                                                        <th><?php esc_html_e( 'Message', 'lpr-backorder-allocator' ); ?></th>
+                                                </tr>
+                                                </thead>
+                                                <tbody>
+                                                <?php foreach ( $failed_entries as $entry ) : ?>
+                                                        <?php
+                                                        $po_id      = (int) ( $entry['po_id'] ?? 0 );
+                                                        $po_url     = $po_id > 0 ? get_edit_post_link( $po_id, 'url' ) : '';
+                                                        $po_label   = (string) ( $entry['po_number'] ?? ( $po_id > 0 ? (string) $po_id : __( 'Unknown PO', 'lpr-backorder-allocator' ) ) );
+                                                        $supplier   = (string) ( $entry['supplier'] ?? '' );
+                                                        $status     = (string) ( $entry['status'] ?? '' );
+                                                        $status     = '' !== $status ? ucfirst( $status ) : __( 'Unknown', 'lpr-backorder-allocator' );
+                                                        $job        = (string) ( $entry['job'] ?? __( 'n/a', 'lpr-backorder-allocator' ) );
+                                                        $datetime   = (string) ( $entry['datetime'] ?? '' );
+                                                        $receipt    = isset( $entry['receipt'] ) && is_array( $entry['receipt'] ) ? $entry['receipt'] : array();
+                                                        $message    = isset( $receipt['message'] ) ? trim( (string) $receipt['message'] ) : '';
+                                                        ?>
+                                                        <tr>
+                                                                <td><?php echo esc_html( $datetime ); ?></td>
+                                                                <td>
+                                                                        <?php if ( $po_url ) : ?>
+                                                                                <a href="<?php echo esc_url( $po_url ); ?>"><?php echo esc_html( sprintf( __( 'PO %s', 'lpr-backorder-allocator' ), $po_label ) ); ?></a>
+                                                                        <?php else : ?>
+                                                                                <?php echo esc_html( sprintf( __( 'PO %s', 'lpr-backorder-allocator' ), $po_label ) ); ?>
+                                                                        <?php endif; ?>
+                                                                </td>
+                                                                <td><?php echo esc_html( $supplier ); ?></td>
+                                                                <td><?php echo esc_html( $status ); ?></td>
+                                                                <td><?php echo esc_html( $job ); ?></td>
+                                                                <td><?php echo '' !== $message ? esc_html( $message ) : '—'; ?></td>
+                                                        </tr>
+                                                <?php endforeach; ?>
+                                                </tbody>
+                                        </table>
                                 <?php endif; ?>
                         </div>
                         <?php
