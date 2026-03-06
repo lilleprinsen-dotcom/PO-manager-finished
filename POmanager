@@ -2934,6 +2934,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Cart_Eta_Summary' ) ) {
                  * Render in cart totals table.
                  */
                 public static function render_cart_totals_row(): void {
+                        if ( function_exists( 'is_checkout' ) && is_checkout() ) {
+                                return;
+                        }
+
                         $summary = self::build_summary();
                         if ( empty( $summary ) ) {
                                 return;
