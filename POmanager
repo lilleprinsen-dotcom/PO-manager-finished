@@ -11741,10 +11741,62 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                         }
 
                         $entries = self::collect_overview_entries();
+                        $closed_po_entries = array();
+                        foreach ( $entries as $entry ) {
+                                $entry_status  = isset( $entry['status'] ) ? (string) $entry['status'] : '';
+                                $entry_receipt = isset( $entry['receipt'] ) && is_array( $entry['receipt'] ) ? $entry['receipt'] : array();
+                                if ( self::is_closed_po_receipt_error( $entry_receipt, $entry_status ) ) {
+                                        $closed_po_entries[] = $entry;
+                                }
+                        }
                         ?>
                         <div class="wrap lpr-received-stock-log-page">
                                 <h1><?php esc_html_e( 'Received stock log', 'lpr-backorder-allocator' ); ?></h1>
                                 <p><?php esc_html_e( 'Every stock receipt is listed separately, including job outcome and verification state.', 'lpr-backorder-allocator' ); ?></p>
+
+                                <h2><?php esc_html_e( 'PO closed receipt errors', 'lpr-backorder-allocator' ); ?></h2>
+                                <?php if ( empty( $closed_po_entries ) ) : ?>
+                                        <p><?php esc_html_e( 'No receipt errors were found with "Receipt canceled because the PO is closed."', 'lpr-backorder-allocator' ); ?></p>
+                                <?php else : ?>
+                                        <table class="widefat striped" style="max-width:1100px;margin-bottom:16px;">
+                                                <thead>
+                                                <tr>
+                                                        <th><?php esc_html_e( 'Date', 'lpr-backorder-allocator' ); ?></th>
+                                                        <th><?php esc_html_e( 'PO', 'lpr-backorder-allocator' ); ?></th>
+                                                        <th><?php esc_html_e( 'Supplier', 'lpr-backorder-allocator' ); ?></th>
+                                                        <th><?php esc_html_e( 'Job', 'lpr-backorder-allocator' ); ?></th>
+                                                        <th><?php esc_html_e( 'Message', 'lpr-backorder-allocator' ); ?></th>
+                                                </tr>
+                                                </thead>
+                                                <tbody>
+                                                <?php foreach ( $closed_po_entries as $entry ) : ?>
+                                                        <?php
+                                                        $po_id      = (int) ( $entry['po_id'] ?? 0 );
+                                                        $po_url     = $po_id > 0 ? get_edit_post_link( $po_id, 'url' ) : '';
+                                                        $po_label   = (string) ( $entry['po_number'] ?? ( $po_id > 0 ? (string) $po_id : __( 'Unknown PO', 'lpr-backorder-allocator' ) ) );
+                                                        $supplier   = (string) ( $entry['supplier'] ?? '' );
+                                                        $job        = (string) ( $entry['job'] ?? __( 'n/a', 'lpr-backorder-allocator' ) );
+                                                        $datetime   = (string) ( $entry['datetime'] ?? '' );
+                                                        $receipt    = isset( $entry['receipt'] ) && is_array( $entry['receipt'] ) ? $entry['receipt'] : array();
+                                                        $message    = isset( $receipt['message'] ) ? (string) $receipt['message'] : '';
+                                                        ?>
+                                                        <tr>
+                                                                <td><?php echo esc_html( $datetime ); ?></td>
+                                                                <td>
+                                                                        <?php if ( $po_url ) : ?>
+                                                                                <a href="<?php echo esc_url( $po_url ); ?>"><?php echo esc_html( sprintf( __( 'PO %s', 'lpr-backorder-allocator' ), $po_label ) ); ?></a>
+                                                                        <?php else : ?>
+                                                                                <?php echo esc_html( sprintf( __( 'PO %s', 'lpr-backorder-allocator' ), $po_label ) ); ?>
+                                                                        <?php endif; ?>
+                                                                </td>
+                                                                <td><?php echo esc_html( $supplier ); ?></td>
+                                                                <td><?php echo esc_html( $job ); ?></td>
+                                                                <td><?php echo esc_html( $message ); ?></td>
+                                                        </tr>
+                                                <?php endforeach; ?>
+                                                </tbody>
+                                        </table>
+                                <?php endif; ?>
 
                                 <?php if ( empty( $entries ) ) : ?>
                                         <div class="notice notice-info"><p><?php esc_html_e( 'No receipts have been logged yet.', 'lpr-backorder-allocator' ); ?></p></div>
@@ -11766,17 +11818,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                                         $receipt_id = isset( $receipt['id'] ) ? (string) $receipt['id'] : '';
                                                         $retry_url  = '';
                                                         if ( $can_retry && $po_id > 0 && '' !== $receipt_id ) {
-                                                                $retry_url = wp_nonce_url(
-                                                                        add_query_arg(
-                                                                                array(
-                                                                                        'action'     => 'lpr_retry_receipt',
-                                                                                        'po_id'      => $po_id,
-                                                                                        'receipt_id' => rawurlencode( $receipt_id ),
-                                                                                ),
-                                                                                admin_url( 'admin-post.php' )
-                                                                        ),
-                                                                        'lpr_retry_receipt_' . $po_id . '_' . $receipt_id
-                                                                );
+                                                                $retry_url = self::get_retry_receipt_url( $po_id, $receipt_id );
                                                         }
                                                         ?>
                                                         <div class="lpr-po-receipt-entry" style="margin-bottom:16px;">
@@ -12032,6 +12074,9 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                 $datetime = ! empty( $receipt['created_at'] ) ? mysql2date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), $receipt['created_at'] ) : '';
                                 $job      = ! empty( $receipt['action_id'] ) ? '#' . absint( $receipt['action_id'] ) : __( 'n/a', 'lpr-backorder-allocator' );
                                 $verification = isset( $receipt['verification'] ) && is_array( $receipt['verification'] ) ? $receipt['verification'] : array();
+                                $receipt_id = isset( $receipt['id'] ) ? (string) $receipt['id'] : '';
+                                $can_retry_closed_po = self::is_closed_po_receipt_error( $receipt, $status ) && empty( $receipt['retry_queued_at'] );
+                                $retry_url = $can_retry_closed_po ? self::get_retry_receipt_url( (int) $post->ID, $receipt_id, true ) : '';
                                 echo '<div class="lpr-po-receipt-entry">';
                                 echo '<p><strong>' . esc_html( $datetime ) . '</strong> — ' . esc_html( ucfirst( $status ) ) . ' (' . esc_html__( 'Job', 'lpr-backorder-allocator' ) . ' ' . esc_html( $job ) . ')</p>';
                                 $verification_label = '';
@@ -12055,6 +12100,12 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                 echo '<p><strong>' . esc_html__( 'Stock verification', 'lpr-backorder-allocator' ) . ':</strong> ' . esc_html( $verification_label ) . '</p>';
                                 if ( ! empty( $receipt['message'] ) ) {
                                         echo '<p><em>' . esc_html( (string) $receipt['message'] ) . '</em></p>';
+                                }
+                                if ( ! empty( $receipt['retry_queued_at'] ) ) {
+                                        echo '<p><em>' . esc_html( sprintf( __( 'Retry queued at %s.', 'lpr-backorder-allocator' ), mysql2date( get_option( 'date_format' ) . ' ' . get_option( 'time_format' ), (string) $receipt['retry_queued_at'] ) ) ) . '</em></p>';
+                                }
+                                if ( '' !== $retry_url ) {
+                                        echo '<p><a class="button button-secondary" href="' . esc_url( $retry_url ) . '">' . esc_html__( 'Retry receipt job', 'lpr-backorder-allocator' ) . '</a></p>';
                                 }
 
                                 $rows = ! empty( $receipt['logs'] ) ? $receipt['logs'] : array();
@@ -12221,6 +12272,46 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                 }
 
                 /**
+                 * Determine whether a receipt failed because the PO was closed.
+                 */
+                protected static function is_closed_po_receipt_error( array $receipt, string $status = '' ): bool {
+                        $resolved_status = '' !== $status ? $status : self::resolve_receipt_status( $receipt );
+                        if ( ! in_array( $resolved_status, array( 'failed', 'canceled' ), true ) ) {
+                                return false;
+                        }
+
+                        $message = isset( $receipt['message'] ) ? strtolower( wp_strip_all_tags( (string) $receipt['message'] ) ) : '';
+                        if ( '' === $message ) {
+                                return false;
+                        }
+
+                        return false !== strpos( $message, 'po is closed' ) || false !== strpos( $message, 'receipt canceled because the po is closed' );
+                }
+
+                /**
+                 * Build retry URL for a receipt action.
+                 */
+                protected static function get_retry_receipt_url( int $po_id, string $receipt_id, bool $return_to_po = false ): string {
+                        if ( $po_id <= 0 || '' === $receipt_id ) {
+                                return '';
+                        }
+
+                        $args = array(
+                                'action'     => 'lpr_retry_receipt',
+                                'po_id'      => $po_id,
+                                'receipt_id' => rawurlencode( $receipt_id ),
+                        );
+                        if ( $return_to_po ) {
+                                $args['return_to'] = 'po';
+                        }
+
+                        return wp_nonce_url(
+                                add_query_arg( $args, admin_url( 'admin-post.php' ) ),
+                                'lpr_retry_receipt_' . $po_id . '_' . $receipt_id
+                        );
+                }
+
+                /**
                  * Handle retrying failed receipt jobs from the overview page.
                  */
                 public static function handle_retry_receipt(): void {
@@ -12231,17 +12322,16 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                         $po_id      = isset( $_GET['po_id'] ) ? absint( $_GET['po_id'] ) : 0; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
                         $receipt_id = isset( $_GET['receipt_id'] ) ? sanitize_text_field( wp_unslash( (string) $_GET['receipt_id'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
                         $nonce      = isset( $_GET['_wpnonce'] ) ? (string) $_GET['_wpnonce'] : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $return_to  = isset( $_GET['return_to'] ) ? sanitize_key( (string) $_GET['return_to'] ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
 
                         if ( $po_id <= 0 || '' === $receipt_id || ! wp_verify_nonce( $nonce, 'lpr_retry_receipt_' . $po_id . '_' . $receipt_id ) ) {
                                 wp_die( esc_html__( 'Invalid request.', 'lpr-backorder-allocator' ) );
                         }
 
-                        $redirect_url = add_query_arg(
-                                array(
-                                        'page' => 'lpr-received-stock-log',
-                                ),
-                                admin_url( 'admin.php' )
-                        );
+                        $redirect_url = 'po' === $return_to ? get_edit_post_link( $po_id, 'url' ) : add_query_arg( array( 'page' => 'lpr-received-stock-log' ), admin_url( 'admin.php' ) );
+                        if ( ! $redirect_url ) {
+                                $redirect_url = add_query_arg( array( 'page' => 'lpr-received-stock-log' ), admin_url( 'admin.php' ) );
+                        }
 
                         $receipts      = self::get_receipts( $po_id );
                         $receipt_index = null;
@@ -12266,6 +12356,17 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                         if ( ! in_array( $status, array( 'failed', 'canceled' ), true ) ) {
                                 wp_safe_redirect( add_query_arg( 'lpr_retry_receipt', 'not_failed', $redirect_url ) );
                                 exit;
+                        }
+
+                        $po_post = get_post( $po_id );
+                        if ( $po_post instanceof \WP_Post && defined( __NAMESPACE__ . '\PO_STATUS_CLOSED' ) && PO_STATUS_CLOSED === (string) $po_post->post_status ) {
+                                wp_update_post(
+                                        array(
+                                                'ID'          => $po_id,
+                                                'post_status' => defined( __NAMESPACE__ . '\PO_STATUS_OPEN' ) ? PO_STATUS_OPEN : 'open',
+                                        )
+                                );
+                                clean_post_cache( $po_id );
                         }
 
                         $action_id = self::enqueue_action( $po_id, $receipt_id );
