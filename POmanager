@@ -16576,6 +16576,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
 if ( ! class_exists( __NAMESPACE__ . '\PO_Import_Page' ) ) {
     class PO_Import_Page {
         protected const PREVIEW_TRANSIENT = 'lpr_po_import_preview_';
+        protected const PREVIEW_USERMETA  = '_lpr_po_import_preview_cache';
 
         public static function init(): void {
             add_action( 'admin_menu', array( __CLASS__, 'register_page' ) );
@@ -17162,6 +17163,28 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Import_Page' ) ) {
         protected static function store_preview( array $parsed ): string {
             $user_id = get_current_user_id();
             $key     = self::PREVIEW_TRANSIENT . $user_id . '_' . wp_generate_password( 6, false, false );
+
+            if ( $user_id > 0 ) {
+                $cache = get_user_meta( $user_id, self::PREVIEW_USERMETA, true );
+                if ( ! is_array( $cache ) ) {
+                    $cache = array();
+                }
+
+                $cache[ $key ] = array(
+                    'stored_at' => time(),
+                    'parsed'    => $parsed,
+                );
+
+                foreach ( $cache as $cache_key => $payload ) {
+                    $stored_at = isset( $payload['stored_at'] ) ? (int) $payload['stored_at'] : 0;
+                    if ( $stored_at <= 0 || ( time() - $stored_at ) > HOUR_IN_SECONDS ) {
+                        unset( $cache[ $cache_key ] );
+                    }
+                }
+
+                update_user_meta( $user_id, self::PREVIEW_USERMETA, $cache );
+            }
+
             set_transient( $key, $parsed, HOUR_IN_SECONDS );
             return $key;
         }
@@ -17169,9 +17192,44 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Import_Page' ) ) {
         protected static function load_preview( string $key ): ?array {
             $data = get_transient( $key );
             if ( ! is_array( $data ) ) {
-                return null;
+                $user_id = get_current_user_id();
+                if ( $user_id <= 0 ) {
+                    return null;
+                }
+
+                $cache = get_user_meta( $user_id, self::PREVIEW_USERMETA, true );
+                if ( ! is_array( $cache ) || empty( $cache[ $key ]['parsed'] ) || ! is_array( $cache[ $key ]['parsed'] ) ) {
+                    return null;
+                }
+
+                $stored_at = isset( $cache[ $key ]['stored_at'] ) ? (int) $cache[ $key ]['stored_at'] : 0;
+                if ( $stored_at <= 0 || ( time() - $stored_at ) > HOUR_IN_SECONDS ) {
+                    unset( $cache[ $key ] );
+                    update_user_meta( $user_id, self::PREVIEW_USERMETA, $cache );
+                    return null;
+                }
+
+                $data = $cache[ $key ]['parsed'];
             }
+
             return $data;
+        }
+
+        protected static function clear_preview( string $key ): void {
+            delete_transient( $key );
+
+            $user_id = get_current_user_id();
+            if ( $user_id <= 0 ) {
+                return;
+            }
+
+            $cache = get_user_meta( $user_id, self::PREVIEW_USERMETA, true );
+            if ( ! is_array( $cache ) || ! isset( $cache[ $key ] ) ) {
+                return;
+            }
+
+            unset( $cache[ $key ] );
+            update_user_meta( $user_id, self::PREVIEW_USERMETA, $cache );
         }
 
         protected static function handle_import( array $parsed, array &$messages, array &$errors ): void {
@@ -17321,7 +17379,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Import_Page' ) ) {
                         if ( ! empty( $parsed['pos'] ) ) {
                             self::handle_import( $parsed, $messages, $errors );
                         }
-                        delete_transient( $preview_key );
+                        self::clear_preview( $preview_key );
                     }
                 }
             }
