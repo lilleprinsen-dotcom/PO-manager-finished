@@ -16580,6 +16580,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Import_Page' ) ) {
         public static function init(): void {
             add_action( 'admin_menu', array( __CLASS__, 'register_page' ) );
             add_action( 'admin_post_lpr_po_import_template', array( __CLASS__, 'download_template' ) );
+            add_action( 'admin_enqueue_scripts', array( __CLASS__, 'enqueue_assets' ) );
         }
 
         public static function register_page(): void {
@@ -16592,6 +16593,19 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Import_Page' ) ) {
                 array( __CLASS__, 'render' ),
                 5
             );
+        }
+
+        /**
+         * Load WooCommerce enhanced select assets on the PO import page.
+         */
+        public static function enqueue_assets( $hook ): void {
+            $page = isset( $_GET['page'] ) ? sanitize_key( wp_unslash( $_GET['page'] ) ) : '';
+            if ( 'lpr-po-import' !== $page ) {
+                return;
+            }
+
+            wp_enqueue_style( 'woocommerce_admin_styles' );
+            wp_enqueue_script( 'wc-enhanced-select' );
         }
 
         protected static function allowed_statuses(): array {
@@ -17082,7 +17096,10 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Import_Page' ) ) {
                         continue;
                     }
 
-                    $product_id = isset( $line_update['product_id'] ) ? absint( $line_update['product_id'] ) : absint( $line['product_id'] ?? 0 );
+                    $selected_id = isset( $line_update['selected_product_id'] ) ? absint( $line_update['selected_product_id'] ) : 0;
+                    $product_id  = $selected_id > 0
+                        ? $selected_id
+                        : ( isset( $line_update['product_id'] ) ? absint( $line_update['product_id'] ) : absint( $line['product_id'] ?? 0 ) );
                     $sku        = isset( $line_update['sku'] ) ? sanitize_text_field( $line_update['sku'] ) : sanitize_text_field( $line['sku'] ?? '' );
                     if ( $product_id <= 0 && '' !== $sku && function_exists( 'wc_get_product_id_by_sku' ) ) {
                         $product_id = (int) wc_get_product_id_by_sku( $sku );
@@ -17414,7 +17431,20 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Import_Page' ) ) {
                                                     <?php endif; ?>
                                                 </td>
                                                 <td>
-                                                    <input type="number" min="1" name="lpr_po_import_lines[<?php echo esc_attr( $index ); ?>][<?php echo esc_attr( $line_index ); ?>][product_id]" value="<?php echo esc_attr( $line['product_id'] ); ?>" />
+                                                    <select
+                                                        class="wc-product-search lpr-import-product-search"
+                                                        name="lpr_po_import_lines[<?php echo esc_attr( $index ); ?>][<?php echo esc_attr( $line_index ); ?>][selected_product_id]"
+                                                        data-placeholder="<?php echo esc_attr__( 'Search for a product…', 'lpr-backorder-allocator' ); ?>"
+                                                        data-action="woocommerce_json_search_products_and_variations"
+                                                        data-minimum_input_length="1"
+                                                        data-allow_clear="true"
+                                                        style="width:100%;"
+                                                    >
+                                                        <?php if ( ! empty( $line['product_id'] ) && ! empty( $line['product_name'] ) ) : ?>
+                                                            <option value="<?php echo esc_attr( (string) $line['product_id'] ); ?>" selected="selected"><?php echo esc_html( $line['product_name'] ); ?></option>
+                                                        <?php endif; ?>
+                                                    </select>
+                                                    <input type="hidden" name="lpr_po_import_lines[<?php echo esc_attr( $index ); ?>][<?php echo esc_attr( $line_index ); ?>][product_id]" value="<?php echo esc_attr( $line['product_id'] ); ?>" />
                                                 </td>
                                                 <td>
                                                     <input type="text" name="lpr_po_import_lines[<?php echo esc_attr( $index ); ?>][<?php echo esc_attr( $line_index ); ?>][sku]" value="<?php echo esc_attr( $line['sku'] ); ?>" />
@@ -17439,6 +17469,19 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Import_Page' ) ) {
 
                         <p><button type="submit" class="button button-primary"><?php esc_html_e( 'Import purchase orders', 'lpr-backorder-allocator' ); ?></button></p>
                     </form>
+                    <script>
+                    (function($) {
+                        function bindImportProductSearch() {
+                            $(document.body).trigger('wc-enhanced-select-init');
+                            $('select.lpr-import-product-search').off('change.lprImport').on('change.lprImport', function() {
+                                var selected = $(this).val() || '';
+                                $(this).siblings('input[type="hidden"]').val(selected);
+                            });
+                        }
+
+                        bindImportProductSearch();
+                    })(jQuery);
+                    </script>
                 <?php endif; ?>
             </div>
             <?php
