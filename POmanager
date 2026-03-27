@@ -254,6 +254,75 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_openai_chat_request' ) )
                         'latency_ms' => $latency_ms,
                 );
         }
+
+        /**
+         * Extract assistant content text from different OpenAI response shapes.
+         *
+         * @param mixed $decoded Decoded OpenAI JSON payload.
+         * @return string
+         */
+        function lpr_allocator_extract_openai_content_text( $decoded ): string {
+                if ( ! is_array( $decoded ) ) {
+                        return '';
+                }
+
+                $parts = array();
+                $choices = isset( $decoded['choices'] ) && is_array( $decoded['choices'] ) ? $decoded['choices'] : array();
+                foreach ( $choices as $choice ) {
+                        if ( ! is_array( $choice ) ) {
+                                continue;
+                        }
+
+                        $content = '';
+                        if ( isset( $choice['message']['content'] ) ) {
+                                $content = $choice['message']['content'];
+                        } elseif ( isset( $choice['delta']['content'] ) ) {
+                                $content = $choice['delta']['content'];
+                        } elseif ( isset( $choice['text'] ) ) {
+                                $content = $choice['text'];
+                        }
+
+                        if ( is_string( $content ) ) {
+                                $content = trim( $content );
+                                if ( '' !== $content ) {
+                                        $parts[] = $content;
+                                }
+                                continue;
+                        }
+
+                        if ( is_array( $content ) ) {
+                                $chunk_parts = array();
+                                foreach ( $content as $chunk ) {
+                                        if ( is_string( $chunk ) ) {
+                                                $chunk = trim( $chunk );
+                                                if ( '' !== $chunk ) {
+                                                        $chunk_parts[] = $chunk;
+                                                }
+                                                continue;
+                                        }
+                                        if ( ! is_array( $chunk ) ) {
+                                                continue;
+                                        }
+                                        if ( isset( $chunk['text'] ) && is_string( $chunk['text'] ) ) {
+                                                $text = trim( $chunk['text'] );
+                                                if ( '' !== $text ) {
+                                                        $chunk_parts[] = $text;
+                                                }
+                                        } elseif ( isset( $chunk['content'] ) && is_string( $chunk['content'] ) ) {
+                                                $text = trim( $chunk['content'] );
+                                                if ( '' !== $text ) {
+                                                        $chunk_parts[] = $text;
+                                                }
+                                        }
+                                }
+                                if ( ! empty( $chunk_parts ) ) {
+                                        $parts[] = implode( "\n", $chunk_parts );
+                                }
+                        }
+                }
+
+                return trim( implode( "\n", $parts ) );
+        }
 }
 
 if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_parse_openai_chat_response' ) ) {
@@ -490,21 +559,18 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_parse_openai_chat_respon
                         return $normalized;
                 }
 
-                $content = $decoded['choices'][0]['message']['content'] ?? '';
-                if ( is_array( $content ) ) {
-                        $parts = array();
-                        foreach ( $content as $chunk ) {
-                                if ( is_array( $chunk ) && isset( $chunk['text'] ) ) {
-                                        $parts[] = (string) $chunk['text'];
-                                }
-                        }
-                        $content = implode( "\n", $parts );
+                if ( isset( $decoded['error']['message'] ) && '' !== trim( (string) $decoded['error']['message'] ) ) {
+                        $normalized['error_code']    = 'openai_error';
+                        $normalized['error_message'] = sanitize_text_field( (string) $decoded['error']['message'] );
+
+                        return $normalized;
                 }
 
+                $content = lpr_allocator_extract_openai_content_text( $decoded );
                 $normalized['assistant_text'] = trim( (string) $content );
                 if ( '' === $normalized['assistant_text'] ) {
                         $normalized['error_code']    = 'empty_response';
-                        $normalized['error_message'] = 'OpenAI returned an empty assistant response.';
+                        $normalized['error_message'] = 'OpenAI returned an empty assistant response (missing choices/message/content).';
                         return $normalized;
                 }
 
@@ -19809,12 +19875,28 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
 
                 protected static function normalize_ui_error( string $error_code, string $error_message ): array {
                         $code = 'unknown';
+                        $error_code_lc = strtolower( $error_code );
+                        $error_message_lc = strtolower( $error_message );
 
-                        if ( false !== strpos( $error_code, 'http_401' ) || false !== strpos( $error_code, 'invalid_api_key' ) ) {
+                        if ( false !== strpos( $error_code_lc, 'nonce' ) ) {
+                                $code = 'nonce_failure';
+                        } elseif ( false !== strpos( $error_code_lc, 'invalid_json' ) ) {
+                                $code = 'invalid_json';
+                        } elseif ( false !== strpos( $error_code_lc, 'empty_response' ) ) {
+                                $code = 'empty_response';
+                        } elseif ( false !== strpos( $error_code_lc, 'http_400' ) ) {
+                                $code = 'http_400';
+                        } elseif ( false !== strpos( $error_code_lc, 'http_500' ) ) {
+                                $code = 'http_500';
+                        } elseif ( false !== strpos( $error_code_lc, 'http_502' ) ) {
+                                $code = 'http_502';
+                        } elseif ( false !== strpos( $error_code_lc, 'http_503' ) ) {
+                                $code = 'http_503';
+                        } elseif ( false !== strpos( $error_code_lc, 'http_401' ) || false !== strpos( $error_code_lc, 'invalid_api_key' ) ) {
                                 $code = 'invalid_key';
-                        } elseif ( false !== strpos( $error_code, 'http_429' ) || false !== strpos( $error_code, 'rate_limit' ) ) {
+                        } elseif ( false !== strpos( $error_code_lc, 'http_429' ) || false !== strpos( $error_code_lc, 'rate_limit' ) ) {
                                 $code = 'rate_limit';
-                        } elseif ( false !== strpos( $error_code, 'timeout' ) || false !== strpos( $error_code, 'timed_out' ) || false !== strpos( strtolower( $error_message ), 'timed out' ) ) {
+                        } elseif ( false !== strpos( $error_code_lc, 'timeout' ) || false !== strpos( $error_code_lc, 'timed_out' ) || false !== strpos( $error_message_lc, 'timed out' ) ) {
                                 $code = 'timeout';
                         }
 
@@ -19826,6 +19908,20 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         $message = __( 'Rate limit reached. Please wait and try again.', 'lpr-backorder-allocator' );
                                 } elseif ( 'timeout' === $code ) {
                                         $message = __( 'Request timed out. Please retry in a moment.', 'lpr-backorder-allocator' );
+                                } elseif ( 'nonce_failure' === $code ) {
+                                        $message = __( 'Security check failed. Refresh and try again.', 'lpr-backorder-allocator' );
+                                } elseif ( 'invalid_json' === $code ) {
+                                        $message = __( 'OpenAI returned non-JSON.', 'lpr-backorder-allocator' );
+                                } elseif ( 'empty_response' === $code ) {
+                                        $message = __( 'OpenAI returned an empty assistant response.', 'lpr-backorder-allocator' );
+                                } elseif ( 'http_400' === $code ) {
+                                        $message = __( 'OpenAI rejected the request (HTTP 400).', 'lpr-backorder-allocator' );
+                                } elseif ( 'http_500' === $code ) {
+                                        $message = __( 'OpenAI server error (HTTP 500). Please retry shortly.', 'lpr-backorder-allocator' );
+                                } elseif ( 'http_502' === $code ) {
+                                        $message = __( 'OpenAI gateway error (HTTP 502). Please retry shortly.', 'lpr-backorder-allocator' );
+                                } elseif ( 'http_503' === $code ) {
+                                        $message = __( 'OpenAI service unavailable (HTTP 503). Please retry shortly.', 'lpr-backorder-allocator' );
                                 } else {
                                         $message = __( 'Assistant request failed. Please try again.', 'lpr-backorder-allocator' );
                                 }
@@ -19838,19 +19934,27 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                 }
 
                 public static function ajax_submit(): void {
-                        check_ajax_referer( 'lpr_ai_assistant_chat' );
+                        ob_start();
+                        try {
+                                $nonce_valid = check_ajax_referer( 'lpr_ai_assistant_chat', '_wpnonce', false );
+                                if ( false === $nonce_valid ) {
+                                        throw new \RuntimeException( 'nonce check failed' );
+                                }
 
-                        if ( ! current_user_can( 'manage_woocommerce' ) ) {
-                                wp_send_json_error(
-                                        array(
-                                                'error' => array(
-                                                        'code'    => 'unknown',
-                                                        'message' => __( 'You do not have permission to use the assistant.', 'lpr-backorder-allocator' ),
+                                if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                                        while ( ob_get_level() > 0 ) {
+                                                ob_end_clean();
+                                        }
+                                        wp_send_json_error(
+                                                array(
+                                                        'error' => array(
+                                                                'code'    => 'unknown',
+                                                                'message' => __( 'You do not have permission to use the assistant.', 'lpr-backorder-allocator' ),
+                                                        ),
                                                 ),
-                                        ),
-                                        403
-                                );
-                        }
+                                                403
+                                        );
+                                }
 
                         $user_id        = get_current_user_id();
                         $history_key    = self::history_meta_key();
@@ -19861,6 +19965,9 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         $latest_message = trim( $latest_message );
 
                         if ( '' === $latest_message ) {
+                                while ( ob_get_level() > 0 ) {
+                                        ob_end_clean();
+                                }
                                 wp_send_json_error(
                                         array(
                                                 'error' => array(
@@ -19876,6 +19983,9 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         $model    = isset( $settings['ai_model'] ) ? sanitize_text_field( (string) $settings['ai_model'] ) : $model;
                         $has_upload = ! empty( $_FILES['assistant_file'] ) && is_array( $_FILES['assistant_file'] );
                         if ( $has_upload && ! self::can_upload_assistant_file() ) {
+                                while ( ob_get_level() > 0 ) {
+                                        ob_end_clean();
+                                }
                                 wp_send_json_error(
                                         array(
                                                 'error' => array(
@@ -19899,6 +20009,9 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         ),
                                         'failed'
                                 );
+                                while ( ob_get_level() > 0 ) {
+                                        ob_end_clean();
+                                }
                                 wp_send_json_error(
                                         array(
                                                 'error' => array(
@@ -19913,6 +20026,9 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         if ( empty( $guard['ok'] ) ) {
                                 self::record_request_meta( $user_id, $model, 0.0, 'blocked' );
                                 $ui_error = self::normalize_ui_error( 'unknown', (string) ( $guard['error_message'] ?? '' ) );
+                                while ( ob_get_level() > 0 ) {
+                                        ob_end_clean();
+                                }
                                 wp_send_json_error( array( 'error' => $ui_error ), 400 );
                         }
 
@@ -19944,7 +20060,21 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 $ui_error = self::normalize_ui_error( (string) $parsed['error_code'], (string) $parsed['error_message'] );
                                 self::persist_chat_state( $user_id, $history, array_slice( $history, -$context_limit ) );
                                 self::record_request_meta( $user_id, $model, (float) ( $parsed['latency_ms'] ?? 0.0 ), 'error' );
-                                wp_send_json_error( array( 'error' => $ui_error ), 500 );
+                                $error_payload = array( 'error' => $ui_error );
+                                if ( current_user_can( 'manage_woocommerce' ) ) {
+                                        $diag_bits = array(
+                                                'source=openai',
+                                                'code=' . sanitize_key( (string) $parsed['error_code'] ),
+                                        );
+                                        if ( ! empty( $parsed['error_message'] ) ) {
+                                                $diag_bits[] = sanitize_text_field( substr( (string) $parsed['error_message'], 0, 120 ) );
+                                        }
+                                        $error_payload['error']['diagnostic'] = sanitize_text_field( implode( '; ', $diag_bits ) );
+                                }
+                                while ( ob_get_level() > 0 ) {
+                                        ob_end_clean();
+                                }
+                                wp_send_json_error( $error_payload, 500 );
                         }
 
                         $assistant_turn = array(
@@ -19967,14 +20097,39 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         $history   = $state['history'];
                         self::record_request_meta( $user_id, $model, (float) ( $parsed['latency_ms'] ?? 0.0 ), 'success' );
 
-                        wp_send_json_success(
-                                array(
-                                        'assistant'              => $assistant_turn,
-                                        'history'                => $history,
-                                        'draft_bundles'          => self::get_draft_bundles( $user_id ),
-                                        'reconciliation_summary' => $reconciliation_summary,
-                                )
-                        );
+                                while ( ob_get_level() > 0 ) {
+                                        ob_end_clean();
+                                }
+                                wp_send_json_success(
+                                        array(
+                                                'assistant'              => $assistant_turn,
+                                                'history'                => $history,
+                                                'draft_bundles'          => self::get_draft_bundles( $user_id ),
+                                                'reconciliation_summary' => $reconciliation_summary,
+                                        )
+                                );
+                        } catch ( \Throwable $e ) {
+                                $buffer = trim( (string) ob_get_clean() );
+                                $is_admin_debug = current_user_can( 'manage_woocommerce' );
+                                $diagnostic_parts = array();
+                                $diagnostic_parts[] = sanitize_text_field( (string) $e->getMessage() );
+                                if ( '' !== $buffer ) {
+                                        $diagnostic_parts[] = 'server emitted non-JSON output';
+                                }
+                                $diagnostic = implode( '; ', array_filter( $diagnostic_parts ) );
+                                $error_code = false !== stripos( (string) $e->getMessage(), 'nonce' ) ? 'nonce_failure' : 'unknown';
+                                $ui_error = self::normalize_ui_error( $error_code, '' );
+                                $payload = array(
+                                        'error' => array(
+                                                'code'    => (string) ( $ui_error['code'] ?? 'unknown' ),
+                                                'message' => (string) ( $ui_error['message'] ?? __( 'Assistant request failed. Please try again.', 'lpr-backorder-allocator' ) ),
+                                        ),
+                                );
+                                if ( $is_admin_debug && '' !== $diagnostic ) {
+                                        $payload['error']['diagnostic'] = sanitize_text_field( substr( $diagnostic, 0, 180 ) );
+                                }
+                                wp_send_json_error( $payload, 'nonce_failure' === $error_code ? 403 : 500 );
+                        }
                 }
 
                 public static function ajax_clear(): void {
@@ -20974,15 +21129,69 @@ function renderApplySummary(result) {
                                                         credentials: 'same-origin',
                                                         body: payload
                                                 }).then(function(response) {
-                                                        return response.json().catch(function() {
-                                                                return {};
+                                                        var contentType = response && response.headers ? (response.headers.get('content-type') || '') : '';
+                                                        var isJson = contentType.toLowerCase().indexOf('application/json') !== -1;
+                                                        if (!isJson) {
+                                                                return response.text().then(function(textBody) {
+                                                                        return {
+                                                                                ok: response.ok,
+                                                                                status: response.status,
+                                                                                parsed: null,
+                                                                                rawText: textBody || '',
+                                                                                isJson: false
+                                                                        };
+                                                                });
+                                                        }
+                                                        return response.json().then(function(parsed) {
+                                                                return {
+                                                                        ok: response.ok,
+                                                                        status: response.status,
+                                                                        parsed: parsed || {},
+                                                                        rawText: '',
+                                                                        isJson: true
+                                                                };
+                                                        }).catch(function() {
+                                                                return response.text().then(function(textBody) {
+                                                                        return {
+                                                                                ok: response.ok,
+                                                                                status: response.status,
+                                                                                parsed: null,
+                                                                                rawText: textBody || '',
+                                                                                isJson: false
+                                                                        };
+                                                                }).catch(function() {
+                                                                        return {
+                                                                                ok: response.ok,
+                                                                                status: response.status,
+                                                                                parsed: null,
+                                                                                rawText: '',
+                                                                                isJson: false
+                                                                        };
+                                                                });
                                                         });
-                                                }).then(function(result) {
-                                                        if (!result || !result.success) {
+                                                }).then(function(apiResult) {
+                                                        var result = apiResult && apiResult.parsed ? apiResult.parsed : null;
+                                                        if (!apiResult || !apiResult.ok || !result || !result.success) {
                                                                 var errorData = result && result.data && result.data.error ? result.data.error : null;
-                                                                var message = errorData && errorData.message
-                                                                        ? errorData.message
-                                                                        : '<?php echo esc_js( __( 'Assistant request failed. Please try again.', 'lpr-backorder-allocator' ) ); ?>';
+                                                                var diagnostic = errorData && errorData.diagnostic ? String(errorData.diagnostic) : '';
+                                                                var message = errorData && errorData.message ? errorData.message : '';
+                                                                if (!message && apiResult && !apiResult.isJson) {
+                                                                        message = '<?php echo esc_js( __( 'Server returned HTML instead of JSON.', 'lpr-backorder-allocator' ) ); ?>';
+                                                                        if (apiResult.status >= 400) {
+                                                                                message += ' (HTTP ' + apiResult.status + ')';
+                                                                        }
+                                                                }
+                                                                if (!message) {
+                                                                        message = '<?php echo esc_js( __( 'Assistant request failed. Please try again.', 'lpr-backorder-allocator' ) ); ?>';
+                                                                }
+                                                                if (diagnostic && <?php echo wp_json_encode( current_user_can( 'manage_woocommerce' ) ); ?>) {
+                                                                        message += '\n\nDiagnostic: ' + diagnostic;
+                                                                } else if (!diagnostic && apiResult && !apiResult.isJson && apiResult.rawText && <?php echo wp_json_encode( current_user_can( 'manage_woocommerce' ) ); ?>) {
+                                                                        var bodyPreview = String(apiResult.rawText).replace(/\s+/g, ' ').trim().slice(0, 180);
+                                                                        if (bodyPreview) {
+                                                                                message += '\n\nDiagnostic: non-JSON response from server: ' + bodyPreview;
+                                                                        }
+                                                                }
                                                                 window.alert(message);
                                                                 return;
                                                         }
