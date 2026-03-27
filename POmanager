@@ -150,6 +150,59 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_build_ai_chat_payload' )
         }
 }
 
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_generate_ai_assistant_reply' ) ) {
+        /**
+         * Generate an AI assistant reply from the latest user message and compact conversation context.
+         *
+         * @param string $latest_user_message Latest admin/user message.
+         * @param array  $conversation_context Prior compact turns (role/message pairs).
+         * @param array  $settings             Optional allocator settings.
+         * @return array{assistant_text:string,error_code:string,error_message:string,latency_ms:float}
+         */
+        function lpr_allocator_generate_ai_assistant_reply( string $latest_user_message, array $conversation_context = array(), array $settings = array() ): array {
+                $system_instruction = 'You are an internal assistant for PO allocator admins. Propose draft actions only and do not claim to make live updates.';
+                $model              = isset( $settings['ai_model'] ) ? sanitize_text_field( (string) $settings['ai_model'] ) : 'gpt-4o-mini';
+                $max_output_tokens  = isset( $settings['ai_max_output_tokens'] ) ? max( 64, (int) $settings['ai_max_output_tokens'] ) : 800;
+
+                $messages = array(
+                        array(
+                                'role'    => 'system',
+                                'content' => $system_instruction,
+                        ),
+                );
+
+                foreach ( $conversation_context as $turn ) {
+                        if ( ! is_array( $turn ) ) {
+                                continue;
+                        }
+                        $role    = isset( $turn['role'] ) ? sanitize_key( (string) $turn['role'] ) : '';
+                        $message = isset( $turn['message'] ) ? sanitize_textarea_field( (string) $turn['message'] ) : '';
+                        if ( ! in_array( $role, array( 'user', 'assistant' ), true ) || '' === $message ) {
+                                continue;
+                        }
+                        $messages[] = array(
+                                'role'    => $role,
+                                'content' => $message,
+                        );
+                }
+
+                $messages[] = array(
+                        'role'    => 'user',
+                        'content' => trim( $latest_user_message ),
+                );
+
+                $payload = array(
+                        'model'      => $model,
+                        'messages'   => $messages,
+                        'max_tokens' => $max_output_tokens,
+                );
+
+                $result = lpr_allocator_openai_chat_request( $payload, $settings );
+
+                return lpr_allocator_parse_openai_chat_response( $result['response'], (float) ( $result['latency_ms'] ?? 0.0 ) );
+        }
+}
+
 if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_openai_chat_request' ) ) {
         /**
          * Send a chat request to OpenAI using WordPress HTTP API.
@@ -18153,8 +18206,24 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Import_Page' ) ) {
 if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
         class AI_Assistant_Page {
 
+                public static function init(): void {
+                        add_action( 'wp_ajax_lpr_ai_assistant_submit', array( __CLASS__, 'ajax_submit' ) );
+                }
+
                 protected static function history_meta_key(): string {
                         return 'lpr_allocator_ai_assistant_history';
+                }
+
+                protected static function context_transient_key( int $user_id ): string {
+                        return 'lpr_allocator_ai_context_' . max( 0, $user_id );
+                }
+
+                protected static function history_limit(): int {
+                        return 20;
+                }
+
+                protected static function context_limit(): int {
+                        return 8;
                 }
 
                 protected static function normalize_history( $raw_history ): array {
@@ -18184,6 +18253,121 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         }
 
                         return $history;
+                }
+
+                protected static function normalize_ui_error( string $error_code, string $error_message ): array {
+                        $code = 'unknown';
+
+                        if ( false !== strpos( $error_code, 'http_401' ) || false !== strpos( $error_code, 'invalid_api_key' ) ) {
+                                $code = 'invalid_key';
+                        } elseif ( false !== strpos( $error_code, 'http_429' ) || false !== strpos( $error_code, 'rate_limit' ) ) {
+                                $code = 'rate_limit';
+                        } elseif ( false !== strpos( $error_code, 'timeout' ) || false !== strpos( $error_code, 'timed_out' ) || false !== strpos( strtolower( $error_message ), 'timed out' ) ) {
+                                $code = 'timeout';
+                        }
+
+                        $message = trim( $error_message );
+                        if ( '' === $message ) {
+                                if ( 'invalid_key' === $code ) {
+                                        $message = __( 'Invalid API key. Please verify AI assistant credentials in settings.', 'lpr-backorder-allocator' );
+                                } elseif ( 'rate_limit' === $code ) {
+                                        $message = __( 'Rate limit reached. Please wait and try again.', 'lpr-backorder-allocator' );
+                                } elseif ( 'timeout' === $code ) {
+                                        $message = __( 'Request timed out. Please retry in a moment.', 'lpr-backorder-allocator' );
+                                } else {
+                                        $message = __( 'Assistant request failed. Please try again.', 'lpr-backorder-allocator' );
+                                }
+                        }
+
+                        return array(
+                                'code'    => $code,
+                                'message' => $message,
+                        );
+                }
+
+                public static function ajax_submit(): void {
+                        check_ajax_referer( 'lpr_ai_assistant_chat' );
+
+                        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                                wp_send_json_error(
+                                        array(
+                                                'error' => array(
+                                                        'code'    => 'unknown',
+                                                        'message' => __( 'You do not have permission to use the assistant.', 'lpr-backorder-allocator' ),
+                                                ),
+                                        ),
+                                        403
+                                );
+                        }
+
+                        $user_id        = get_current_user_id();
+                        $history_key    = self::history_meta_key();
+                        $context_key    = self::context_transient_key( $user_id );
+                        $history_limit  = self::history_limit();
+                        $context_limit  = self::context_limit();
+                        $latest_message = isset( $_POST['message'] ) ? sanitize_textarea_field( wp_unslash( $_POST['message'] ) ) : '';
+                        $latest_message = trim( $latest_message );
+
+                        if ( '' === $latest_message ) {
+                                wp_send_json_error(
+                                        array(
+                                                'error' => array(
+                                                        'code'    => 'unknown',
+                                                        'message' => __( 'Please enter a message before sending.', 'lpr-backorder-allocator' ),
+                                                ),
+                                        ),
+                                        400
+                                );
+                        }
+
+                        $settings = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array();
+                        $guard    = lpr_allocator_validate_ai_guardrails( $latest_message, $settings );
+                        if ( empty( $guard['ok'] ) ) {
+                                $ui_error = self::normalize_ui_error( 'unknown', (string) ( $guard['error_message'] ?? '' ) );
+                                wp_send_json_error( array( 'error' => $ui_error ), 400 );
+                        }
+
+                        $history = self::normalize_history( get_user_meta( $user_id, $history_key, true ) );
+                        $context = get_transient( $context_key );
+                        if ( ! is_array( $context ) ) {
+                                $context = array_slice( $history, -$context_limit );
+                        }
+                        $context = self::normalize_history( $context );
+
+                        $parsed = lpr_allocator_generate_ai_assistant_reply( $latest_message, $context, $settings );
+
+                        $user_turn = array(
+                                'role'    => 'user',
+                                'message' => $latest_message,
+                                'time'    => wp_date( 'Y-m-d H:i:s' ),
+                        );
+                        $history[] = $user_turn;
+
+                        if ( ! empty( $parsed['error_code'] ) ) {
+                                $ui_error = self::normalize_ui_error( (string) $parsed['error_code'], (string) $parsed['error_message'] );
+                                $history  = array_slice( $history, -$history_limit );
+                                update_user_meta( $user_id, $history_key, $history );
+                                set_transient( $context_key, array_slice( $history, -$context_limit ), HOUR_IN_SECONDS );
+                                wp_send_json_error( array( 'error' => $ui_error ), 500 );
+                        }
+
+                        $assistant_turn = array(
+                                'role'    => 'assistant',
+                                'message' => (string) $parsed['assistant_text'],
+                                'time'    => wp_date( 'Y-m-d H:i:s' ),
+                        );
+
+                        $history[] = $assistant_turn;
+                        $history   = array_slice( $history, -$history_limit );
+                        update_user_meta( $user_id, $history_key, $history );
+                        set_transient( $context_key, array_slice( $history, -$context_limit ), HOUR_IN_SECONDS );
+
+                        wp_send_json_success(
+                                array(
+                                        'assistant' => $assistant_turn,
+                                        'history'   => $history,
+                                )
+                        );
                 }
 
                 public static function render(): void {
@@ -18278,7 +18462,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                                                                 <span class="description"><?php echo esc_html( $message['time'] ); ?></span>
                                                                                         <?php endif; ?>
                                                                                 </div>
-                                                                                <div style="white-space:pre-wrap;"><?php echo esc_html( $message['message'] ); ?></div>
+                                                                                <div class="lpr-ai-message-body" style="white-space:pre-wrap;"><?php echo esc_html( $message['message'] ); ?></div>
                                                                         </div>
                                                                 <?php endforeach; ?>
                                                         <?php endif; ?>
@@ -18312,19 +18496,122 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         if (!form) {
                                                 return;
                                         }
+
+                                        var historyRoot = document.getElementById('lpr-ai-history');
+                                        var messageInput = document.getElementById('lpr-ai-message');
                                         var sendButton = document.getElementById('lpr-ai-send');
                                         var loading = document.getElementById('lpr-ai-loading');
                                         var loadingText = document.getElementById('lpr-ai-loading-text');
-                                        form.addEventListener('submit', function() {
+                                        var nonceField = form.querySelector('input[name="_wpnonce"]');
+                                        var ajaxUrl = window.ajaxurl || '<?php echo esc_js( admin_url( 'admin-ajax.php' ) ); ?>';
+
+                                        function setLoading(active) {
                                                 if (sendButton) {
-                                                        sendButton.disabled = true;
+                                                        sendButton.disabled = !!active;
                                                 }
                                                 if (loading) {
-                                                        loading.classList.add('is-active');
+                                                        loading.classList.toggle('is-active', !!active);
                                                 }
                                                 if (loadingText) {
-                                                        loadingText.style.display = 'inline';
+                                                        loadingText.style.display = active ? 'inline' : 'none';
                                                 }
+                                        }
+
+                                        function createMessageNode(turn) {
+                                                var wrapper = document.createElement('div');
+                                                wrapper.style.margin = '0 0 12px';
+                                                wrapper.style.padding = '10px';
+                                                wrapper.style.border = '1px solid #e2e4e7';
+                                                wrapper.style.borderRadius = '4px';
+                                                wrapper.style.background = turn.role === 'assistant' ? '#f6f7f7' : '#fbfdff';
+
+                                                var head = document.createElement('div');
+                                                head.style.display = 'flex';
+                                                head.style.justifyContent = 'space-between';
+                                                head.style.gap = '12px';
+                                                head.style.marginBottom = '6px';
+
+                                                var label = document.createElement('strong');
+                                                label.textContent = turn.role === 'assistant' ? '<?php echo esc_js( __( 'Assistant', 'lpr-backorder-allocator' ) ); ?>' : '<?php echo esc_js( __( 'You', 'lpr-backorder-allocator' ) ); ?>';
+                                                head.appendChild(label);
+
+                                                if (turn.time) {
+                                                        var time = document.createElement('span');
+                                                        time.className = 'description';
+                                                        time.textContent = turn.time;
+                                                        head.appendChild(time);
+                                                }
+
+                                                var body = document.createElement('div');
+                                                body.className = 'lpr-ai-message-body';
+                                                body.style.whiteSpace = 'pre-wrap';
+                                                body.textContent = turn.message || '';
+
+                                                wrapper.appendChild(head);
+                                                wrapper.appendChild(body);
+
+                                                return wrapper;
+                                        }
+
+                                        function renderHistory(history) {
+                                                if (!historyRoot) {
+                                                        return;
+                                                }
+
+                                                historyRoot.innerHTML = '';
+                                                if (!history || !history.length) {
+                                                        var empty = document.createElement('p');
+                                                        empty.className = 'description';
+                                                        empty.style.margin = '0';
+                                                        empty.textContent = '<?php echo esc_js( __( 'No messages yet. Ask the assistant for a draft recommendation.', 'lpr-backorder-allocator' ) ); ?>';
+                                                        historyRoot.appendChild(empty);
+                                                        return;
+                                                }
+
+                                                history.forEach(function(turn) {
+                                                        historyRoot.appendChild(createMessageNode(turn));
+                                                });
+                                                historyRoot.scrollTop = historyRoot.scrollHeight;
+                                        }
+
+                                        form.addEventListener('submit', function(event) {
+                                                event.preventDefault();
+                                                setLoading(true);
+
+                                                var payload = new window.FormData();
+                                                payload.append('action', 'lpr_ai_assistant_submit');
+                                                payload.append('_wpnonce', nonceField ? nonceField.value : '');
+                                                payload.append('message', messageInput ? messageInput.value : '');
+
+                                                window.fetch(ajaxUrl, {
+                                                        method: 'POST',
+                                                        credentials: 'same-origin',
+                                                        body: payload
+                                                }).then(function(response) {
+                                                        return response.json().catch(function() {
+                                                                return {};
+                                                        });
+                                                }).then(function(result) {
+                                                        if (!result || !result.success) {
+                                                                var errorData = result && result.data && result.data.error ? result.data.error : null;
+                                                                var message = errorData && errorData.message
+                                                                        ? errorData.message
+                                                                        : '<?php echo esc_js( __( 'Assistant request failed. Please try again.', 'lpr-backorder-allocator' ) ); ?>';
+                                                                window.alert(message);
+                                                                return;
+                                                        }
+
+                                                        if (messageInput) {
+                                                                messageInput.value = '';
+                                                        }
+                                                        if (result.data && result.data.history) {
+                                                                renderHistory(result.data.history);
+                                                        }
+                                                }).catch(function() {
+                                                        window.alert('<?php echo esc_js( __( 'Assistant request failed. Please try again.', 'lpr-backorder-allocator' ) ); ?>');
+                                                }).finally(function() {
+                                                        setLoading(false);
+                                                });
                                         });
                                 })();
                                 </script>
@@ -18332,6 +18619,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         <?php
                 }
         }
+        AI_Assistant_Page::init();
 }
 
 /**
