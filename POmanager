@@ -18486,6 +18486,10 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         return 'lpr_allocator_ai_context_' . max( 0, $user_id );
                 }
 
+                protected static function product_context_meta_key(): string {
+                        return 'lpr_allocator_ai_assistant_last_resolved_product';
+                }
+
                 protected static function request_meta_key(): string {
                         return 'lpr_allocator_ai_assistant_request_meta';
                 }
@@ -18611,9 +18615,11 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         }
 
                         $inventory_markers = array(
-                                'incoming', 'open po', 'open purchase', 'purchase order', 'innkjøpsordre', 'åpne po',
-                                'påfyll', 'neste eta', 'eta', 'ledig', 'fri qty', 'free qty', 'qty free',
-                                'total incoming', 'hvilke po', 'har vi', 'kommer først',
+                                'incoming', 'open po', 'open purchase', 'purchase order', 'innkjøpsordre', 'åpne po', 'åpne innkjøpsordre',
+                                'påfyll', 'får vi påfyll', 'neste levering', 'levering på', 'kommer inn', 'inn igjen',
+                                'neste eta', 'første eta', 'hvilken po kommer først', 'kommer først',
+                                'ledig', 'fri qty', 'free qty', 'qty free', 'allokert', 'allocated',
+                                'total incoming', 'hvilke po', 'hvilke åpne', 'har vi incoming', 'incoming på',
                         );
                         foreach ( $inventory_markers as $needle ) {
                                 if ( false !== strpos( $text, $needle ) ) {
@@ -18621,7 +18627,33 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 }
                         }
 
+                        if ( preg_match( '/\b(n[åa]r|when)\b/ui', $text ) && preg_match( '/\b(kommer|komme|inn|igjen|levering|delivery|replenishment|p[åa]fyll|eta)\b/ui', $text ) ) {
+                                return true;
+                        }
+                        if ( preg_match( '/\b(hvor mange|how many)\b/ui', $text ) && preg_match( '/\b(fri|ledig|free|available|incoming|open)\b/ui', $text ) ) {
+                                return true;
+                        }
+                        if ( preg_match( '/\b(hvilk\w+|which|what)\b/ui', $text ) && preg_match( '/\b(po|innkj[øo]psordre|purchase order|incoming)\b/ui', $text ) ) {
+                                return true;
+                        }
+                        if ( preg_match( '/\b(denne|this|samme|same|den)\b/ui', $text ) && preg_match( '/\b(eta|incoming|p[åa]fyll|ledig|fri|po)\b/ui', $text ) ) {
+                                return true;
+                        }
+
                         return false;
+                }
+
+                protected static function inventory_query_intent( string $message ): array {
+                        $text = function_exists( 'mb_strtolower' ) ? mb_strtolower( trim( $message ) ) : strtolower( trim( $message ) );
+                        return array(
+                                'asks_eta'          => (bool) preg_match( '/\b(n[åa]r|when|neste|first|f[øo]rste)\b/ui', $text ) || false !== strpos( $text, 'eta' ) || false !== strpos( $text, 'levering' ) || false !== strpos( $text, 'påfyll' ),
+                                'asks_free_qty'     => (bool) preg_match( '/\b(fri|ledig|free|available|allokert|allocated)\b/ui', $text ),
+                                'asks_incoming'     => false !== strpos( $text, 'incoming' ) || false !== strpos( $text, 'innkjøpsordre' ) || false !== strpos( $text, 'purchase order' ) || false !== strpos( $text, 'open po' ) || false !== strpos( $text, 'åpne po' ),
+                                'asks_po_list'      => (bool) preg_match( '/\b(hvilke|which|list|detalj|breakdown)\b/ui', $text ) || false !== strpos( $text, 'åpne po' ),
+                                'asks_first_po'     => (bool) preg_match( '/\b(f[øo]rste|kommer f[øo]rst|first po|which po)\b/ui', $text ),
+                                'asks_total_qty'    => (bool) preg_match( '/\b(total|sum)\b/ui', $text ),
+                                'asks_yes_no'       => (bool) preg_match( '/\b(har vi|do we have|is there|er det)\b/ui', $text ),
+                        );
                 }
 
                 /**
@@ -18629,13 +18661,14 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                  *
                  * @return array{status:string,product_id:int,variation_id:int,target_id:int,matches:array<int,array{id:int,label:string,sku:string}>}
                  */
-                protected static function resolve_assistant_product_reference( string $message ): array {
+                protected static function resolve_assistant_product_reference( string $message, array $remembered = array() ): array {
                         $result = array(
                                 'status'       => 'not_found',
                                 'product_id'   => 0,
                                 'variation_id' => 0,
                                 'target_id'    => 0,
                                 'matches'      => array(),
+                                'source'       => '',
                         );
 
                         if ( ! function_exists( 'wc_get_product' ) || ! function_exists( 'wc_get_products' ) ) {
@@ -18646,6 +18679,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         $seen       = array();
                         $text       = trim( $message );
                         $text_lc    = function_exists( 'mb_strtolower' ) ? mb_strtolower( $text ) : strtolower( $text );
+                        $has_generic_pointer = (bool) preg_match( '/\b(for\s+denne|denne|this product|this|samme produkt|samme|den)\b/ui', $text_lc );
 
                         $add_candidate = static function ( int $id, int $score, string $reason ) use ( &$candidates, &$seen ): void {
                                 if ( $id <= 0 ) {
@@ -18663,6 +18697,13 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 }
                                 $candidates = array_values( $seen );
                         };
+
+                        if ( preg_match( '/\b(?:id|#)\s*(\d{1,9})\b/ui', $text, $id_inline_match ) ) {
+                                $id = absint( $id_inline_match[1] );
+                                if ( $id > 0 && wc_get_product( $id ) instanceof \WC_Product ) {
+                                        $add_candidate( $id, 100, 'id_token' );
+                                }
+                        }
 
                         if ( preg_match( '/(?:produkt(?:\s*id)?|product(?:\s*id)?)\s*[:#-]?\s*(\d{1,9})\b/i', $text, $id_match ) ) {
                                 $id = absint( $id_match[1] );
@@ -18688,6 +18729,18 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 }
                         }
 
+                        $tokenized = preg_split( '/[\s,;()]+/u', $text_lc );
+                        foreach ( (array) $tokenized as $token ) {
+                                $token = trim( (string) $token );
+                                if ( strlen( $token ) < 3 || ! preg_match( '/[a-z0-9]/i', $token ) ) {
+                                        continue;
+                                }
+                                $id_from_sku = function_exists( 'wc_get_product_id_by_sku' ) ? (int) wc_get_product_id_by_sku( $token ) : 0;
+                                if ( $id_from_sku > 0 ) {
+                                        $add_candidate( $id_from_sku, 96, 'sku_token' );
+                                }
+                        }
+
                         $title_exact_ids = get_posts(
                                 array(
                                         'post_type'      => array( 'product', 'product_variation' ),
@@ -18701,6 +18754,22 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 $add_candidate( (int) $id, 94, 'exact_title' );
                         }
 
+                        $normalized_text_title = trim( preg_replace( '/\s+/', ' ', (string) preg_replace( '/[^\p{L}\p{N}\s]+/u', ' ', $text_lc ) ) );
+                        if ( '' !== $normalized_text_title ) {
+                                $title_clean_ids = get_posts(
+                                        array(
+                                                'post_type'      => array( 'product', 'product_variation' ),
+                                                'post_status'    => array( 'publish', 'private' ),
+                                                'posts_per_page' => 10,
+                                                'fields'         => 'ids',
+                                                's'              => $normalized_text_title,
+                                        )
+                                );
+                                foreach ( (array) $title_clean_ids as $id ) {
+                                        $add_candidate( (int) $id, 86, 'normalized_title' );
+                                }
+                        }
+
                         $search_ids = get_posts(
                                 array(
                                         'post_type'      => array( 'product', 'product_variation' ),
@@ -18712,6 +18781,22 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         );
                         foreach ( (array) $search_ids as $id ) {
                                 $add_candidate( (int) $id, 78, 'search_match' );
+                        }
+
+                        $normalized_phrase = trim( (string) preg_replace( '/\b(?:n[åa]r|kommer|inn|igjen|incoming|open|po|produkt|product|sku|p[åa]fyll|eta|ledig|fri|qty|free|for|av|har|vi|hva|hvilke|hvilken|f[øo]rste|levering|samme|denne|this|total|hvor\s+mange|how\s+many|er|det|neste)\b/ui', ' ', $text ) );
+                        if ( '' !== $normalized_phrase && $normalized_phrase !== $text ) {
+                                $phrase_ids = get_posts(
+                                        array(
+                                                'post_type'      => array( 'product', 'product_variation' ),
+                                                'post_status'    => array( 'publish', 'private' ),
+                                                'posts_per_page' => 12,
+                                                'fields'         => 'ids',
+                                                's'              => $normalized_phrase,
+                                        )
+                                );
+                                foreach ( (array) $phrase_ids as $id ) {
+                                        $add_candidate( (int) $id, 84, 'stripped_phrase' );
+                                }
                         }
 
                         // Conservative fuzzy fallback only for short candidate sets and clear winner.
@@ -18742,6 +18827,16 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 }
                                 if ( $best_id > 0 && $best_distance <= 6 && ( $second_best - $best_distance ) >= 2 ) {
                                         $add_candidate( $best_id, 70, 'fuzzy_high_confidence' );
+                                }
+                        }
+
+                        if ( empty( $candidates ) ) {
+                                $remembered_target = isset( $remembered['target_id'] ) ? max( 0, (int) $remembered['target_id'] ) : 0;
+                                if ( $has_generic_pointer && $remembered_target > 0 && wc_get_product( $remembered_target ) instanceof \WC_Product ) {
+                                        $add_candidate( $remembered_target, 90, 'remembered_reference' );
+                                } elseif ( $has_generic_pointer ) {
+                                        $result['status'] = 'context_missing';
+                                        return $result;
                                 }
                         }
 
@@ -18793,6 +18888,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         }
 
                         $result['status'] = 'resolved';
+                        $result['source'] = 'detected';
                         if ( $chosen->is_type( 'variation' ) ) {
                                 $result['variation_id'] = $chosen_id;
                                 $result['product_id']   = (int) $chosen->get_parent_id();
@@ -18817,6 +18913,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         }
 
                         $fallback_id     = $variation_id > 0 ? $product_id : 0;
+                        $used_fallback   = false;
                         $next_extra_qty  = (int) get_post_meta( $target_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_QTY' ) ? PRODUCT_META_NEXT_EXTRA_QTY : '_lpr_next_extra_qty', true );
                         $next_extra_eta  = lpr_allocator_sanitize_ymd( (string) get_post_meta( $target_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_ETA' ) ? PRODUCT_META_NEXT_EXTRA_ETA : '_lpr_next_extra_eta', true ) );
                         $incoming_total  = (int) get_post_meta( $target_id, defined( __NAMESPACE__ . '\PRODUCT_META_INCOMING_TOTAL' ) ? PRODUCT_META_INCOMING_TOTAL : '_lpr_incoming_po_total', true );
@@ -18825,15 +18922,19 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         if ( $fallback_id > 0 ) {
                                 if ( $next_extra_qty <= 0 ) {
                                         $next_extra_qty = (int) get_post_meta( $fallback_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_QTY' ) ? PRODUCT_META_NEXT_EXTRA_QTY : '_lpr_next_extra_qty', true );
+                                        $used_fallback  = true;
                                 }
                                 if ( '' === $next_extra_eta ) {
                                         $next_extra_eta = lpr_allocator_sanitize_ymd( (string) get_post_meta( $fallback_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_ETA' ) ? PRODUCT_META_NEXT_EXTRA_ETA : '_lpr_next_extra_eta', true ) );
+                                        $used_fallback  = true;
                                 }
                                 if ( $incoming_total <= 0 ) {
                                         $incoming_total = (int) get_post_meta( $fallback_id, defined( __NAMESPACE__ . '\PRODUCT_META_INCOMING_TOTAL' ) ? PRODUCT_META_INCOMING_TOTAL : '_lpr_incoming_po_total', true );
+                                        $used_fallback  = true;
                                 }
                                 if ( ! is_array( $raw_details ) || empty( $raw_details ) ) {
                                         $raw_details = get_post_meta( $fallback_id, defined( __NAMESPACE__ . '\PRODUCT_META_INCOMING_DETAILS' ) ? PRODUCT_META_INCOMING_DETAILS : '_lpr_incoming_po_details', true );
+                                        $used_fallback  = true;
                                 }
                         }
 
@@ -18877,11 +18978,27 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 }
                         }
 
-                        $has_free_qty = false;
+                        $has_free_qty                    = false;
+                        $total_free_qty_across_open_pos  = 0;
+                        $po_count_with_free_qty          = 0;
+                        $first_po_with_free_qty          = array();
+                        $earliest_eta                    = '';
+                        $earliest_eta_with_free_qty      = '';
                         foreach ( $details as $detail ) {
+                                $eta_value = (string) ( $detail['eta'] ?? '' );
+                                if ( '' === $earliest_eta && '' !== $eta_value ) {
+                                        $earliest_eta = $eta_value;
+                                }
                                 if ( (int) ( $detail['qty_free'] ?? 0 ) > 0 ) {
                                         $has_free_qty = true;
-                                        break;
+                                        $total_free_qty_across_open_pos += (int) $detail['qty_free'];
+                                        ++$po_count_with_free_qty;
+                                        if ( empty( $first_po_with_free_qty ) ) {
+                                                $first_po_with_free_qty = $detail;
+                                        }
+                                        if ( '' === $earliest_eta_with_free_qty && '' !== $eta_value ) {
+                                                $earliest_eta_with_free_qty = $eta_value;
+                                        }
                                 }
                         }
 
@@ -18896,6 +19013,15 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 'open_po_details' => $details,
                                 'has_open_pos'    => ! empty( $details ),
                                 'has_free_qty'    => $has_free_qty,
+                                'po_count'        => count( $details ),
+                                'po_count_with_free_qty' => $po_count_with_free_qty,
+                                'total_free_qty_across_open_pos' => max( 0, $total_free_qty_across_open_pos ),
+                                'first_open_po'   => ! empty( $details ) ? (array) $details[0] : array(),
+                                'first_po_with_free_qty' => $first_po_with_free_qty,
+                                'earliest_eta'    => $earliest_eta,
+                                'earliest_eta_with_free_qty' => $earliest_eta_with_free_qty,
+                                'context_source'  => $variation_id > 0 ? ( $used_fallback ? 'variation_with_parent_fallback' : 'variation' ) : 'product',
+                                'used_parent_fallback' => $used_fallback,
                         );
                 }
 
@@ -18919,7 +19045,9 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                  * Deterministic informational reply for incoming/open-PO questions.
                  */
                 protected static function build_inventory_information_reply( string $message ): array {
-                        $resolved = self::resolve_assistant_product_reference( $message );
+                        $intent   = self::inventory_query_intent( $message );
+                        $remembered = self::get_remembered_product_context( get_current_user_id() );
+                        $resolved = self::resolve_assistant_product_reference( $message, $remembered );
                         if ( 'ambiguous' === ( $resolved['status'] ?? '' ) ) {
                                 $labels = array();
                                 foreach ( array_slice( (array) ( $resolved['matches'] ?? array() ), 0, 4 ) as $match ) {
@@ -18937,9 +19065,18 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 );
                         }
 
+                        if ( 'context_missing' === ( $resolved['status'] ?? '' ) ) {
+                                return array(
+                                        'assistant_text' => __( 'Jeg mangler produktkontekst for «denne/samme». Oppgi produktnavn, SKU eller produkt-ID først.', 'lpr-backorder-allocator' ),
+                                        'action_payload' => null,
+                                        'action_status'  => 'none',
+                                        'action_notice'  => '',
+                                );
+                        }
+
                         if ( 'resolved' !== ( $resolved['status'] ?? '' ) ) {
                                 return array(
-                                        'assistant_text' => __( 'Jeg finner ikke et entydig produkt i spørsmålet ditt. Oppgi gjerne produkt-ID, SKU eller eksakt produktnavn.', 'lpr-backorder-allocator' ),
+                                        'assistant_text' => __( 'Jeg fant ikke produktreferansen i spørsmålet. Oppgi gjerne produkt-ID, SKU eller eksakt produktnavn.', 'lpr-backorder-allocator' ),
                                         'action_payload' => null,
                                         'action_status'  => 'none',
                                         'action_notice'  => '',
@@ -18964,35 +19101,79 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         }
                         $lines[] = $header;
 
-                        $next_eta = trim( (string) ( $context['next_extra_eta'] ?? '' ) );
-                        $next_qty = max( 0, (int) ( $context['next_extra_qty'] ?? 0 ) );
-                        if ( '' !== $next_eta ) {
-                                $lines[] = sprintf( __( 'Neste ETA: %1$s (fri qty: %2$d).', 'lpr-backorder-allocator' ), $next_eta, $next_qty );
-                        } else {
-                                $lines[] = __( 'Neste ETA: ikke tilgjengelig i lagret incoming-data.', 'lpr-backorder-allocator' );
+                        $incoming_total = max( 0, (int) ( $context['incoming_total'] ?? 0 ) );
+                        $free_total     = max( 0, (int) ( $context['total_free_qty_across_open_pos'] ?? 0 ) );
+                        $earliest_eta   = trim( (string) ( $context['earliest_eta'] ?? '' ) );
+                        $earliest_eta_free = trim( (string) ( $context['earliest_eta_with_free_qty'] ?? '' ) );
+                        $po_count       = max( 0, (int) ( $context['po_count'] ?? 0 ) );
+                        $po_free_count  = max( 0, (int) ( $context['po_count_with_free_qty'] ?? 0 ) );
+
+                        if ( ! empty( $intent['asks_yes_no'] ) ) {
+                                if ( $incoming_total > 0 || $po_count > 0 ) {
+                                        $lines[] = __( 'Ja, produktet har incoming på åpne PO-er.', 'lpr-backorder-allocator' );
+                                } else {
+                                        $lines[] = __( 'Nei, jeg ser ingen incoming/open-PO-data for produktet.', 'lpr-backorder-allocator' );
+                                }
                         }
 
-                        $lines[] = sprintf( __( 'Total incoming (åpne PO-er): %d.', 'lpr-backorder-allocator' ), max( 0, (int) ( $context['incoming_total'] ?? 0 ) ) );
+                        if ( ! empty( $intent['asks_free_qty'] ) ) {
+                                $lines[] = sprintf( __( 'Total fri qty på åpne PO-er: %d.', 'lpr-backorder-allocator' ), $free_total );
+                                if ( '' !== $earliest_eta_free ) {
+                                        $lines[] = sprintf( __( 'Tidligste ETA med fri qty: %s.', 'lpr-backorder-allocator' ), $earliest_eta_free );
+                                } elseif ( $po_count > 0 ) {
+                                        $lines[] = __( 'Åpne PO-er finnes, men ingen har fri qty akkurat nå.', 'lpr-backorder-allocator' );
+                                }
+                        } elseif ( ! empty( $intent['asks_eta'] ) || ! empty( $intent['asks_first_po'] ) ) {
+                                if ( '' !== $earliest_eta_free ) {
+                                        $lines[] = sprintf( __( 'Neste ETA med fri qty: %s.', 'lpr-backorder-allocator' ), $earliest_eta_free );
+                                } elseif ( '' !== $earliest_eta ) {
+                                        $lines[] = sprintf( __( 'Tidligste registrerte ETA: %s.', 'lpr-backorder-allocator' ), $earliest_eta );
+                                } else {
+                                        $lines[] = __( 'Ingen ETA er registrert på åpne PO-rader.', 'lpr-backorder-allocator' );
+                                }
+                        } elseif ( ! empty( $intent['asks_total_qty'] ) || ! empty( $intent['asks_incoming'] ) ) {
+                                $lines[] = sprintf( __( 'Total incoming ordered qty (åpne PO-er): %d.', 'lpr-backorder-allocator' ), $incoming_total );
+                                $lines[] = sprintf( __( 'Total fri qty på åpne PO-er: %d.', 'lpr-backorder-allocator' ), $free_total );
+                        } else {
+                                $lines[] = sprintf( __( 'Total incoming ordered qty (åpne PO-er): %d.', 'lpr-backorder-allocator' ), $incoming_total );
+                                $lines[] = sprintf( __( 'Total fri qty på åpne PO-er: %d.', 'lpr-backorder-allocator' ), $free_total );
+                        }
 
                         if ( empty( $context['open_po_details'] ) ) {
                                 $lines[] = __( 'Ingen åpne PO-rader funnet for dette produktet.', 'lpr-backorder-allocator' );
                         } else {
-                                $with_free = array();
-                                foreach ( (array) $context['open_po_details'] as $row ) {
-                                        if ( (int) ( $row['qty_free'] ?? 0 ) > 0 ) {
-                                                $with_free[] = $row;
-                                        }
-                                }
-                                if ( empty( $with_free ) ) {
-                                        $lines[] = __( 'Det finnes åpne PO-er, men ingen med fri qty akkurat nå.', 'lpr-backorder-allocator' );
+                                if ( 0 === $po_free_count ) {
+                                        $lines[] = __( 'Det finnes åpne PO-er, men fri qty er 0 på alle nå.', 'lpr-backorder-allocator' );
                                 } else {
-                                        $lines[] = sprintf( __( 'Åpne PO-er med fri qty: %d.', 'lpr-backorder-allocator' ), count( $with_free ) );
+                                        $lines[] = sprintf( __( 'Åpne PO-er: %1$d totalt, %2$d med fri qty.', 'lpr-backorder-allocator' ), $po_count, $po_free_count );
                                 }
 
-                                $lines[] = __( 'PO-detaljer:', 'lpr-backorder-allocator' );
-                                foreach ( array_slice( (array) $context['open_po_details'], 0, 6 ) as $row ) {
+                                $details = (array) $context['open_po_details'];
+                                if ( ! empty( $intent['asks_free_qty'] ) ) {
+                                        usort(
+                                                $details,
+                                                static function ( $a, $b ) {
+                                                        $a_free = (int) ( $a['qty_free'] ?? 0 );
+                                                        $b_free = (int) ( $b['qty_free'] ?? 0 );
+                                                        if ( $a_free !== $b_free ) {
+                                                                return $b_free <=> $a_free;
+                                                        }
+                                                        return lpr_allocator_compare_dates( (string) ( $a['eta'] ?? '' ), (string) ( $b['eta'] ?? '' ) );
+                                                }
+                                        );
+                                }
+
+                                $lines[] = __( 'PO-detaljer (første 5):', 'lpr-backorder-allocator' );
+                                foreach ( array_slice( $details, 0, 5 ) as $row ) {
                                         $lines[] = '- ' . self::format_assistant_po_breakdown_row( (array) $row );
                                 }
+                                if ( count( $details ) > 5 ) {
+                                        $lines[] = sprintf( __( 'Viser 5 av %d åpne PO-rader.', 'lpr-backorder-allocator' ), count( $details ) );
+                                }
+                        }
+
+                        if ( ! empty( $context['used_parent_fallback'] ) ) {
+                                $lines[] = __( 'Merk: incoming-data kommer fra parent-produktet (variantnivå manglet egne data).', 'lpr-backorder-allocator' );
                         }
 
                         return array(
@@ -19000,6 +19181,47 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 'action_payload' => null,
                                 'action_status'  => 'none',
                                 'action_notice'  => '',
+                                'resolved_product' => array(
+                                        'product_id'   => (int) ( $resolved['product_id'] ?? 0 ),
+                                        'variation_id' => (int) ( $resolved['variation_id'] ?? 0 ),
+                                        'target_id'    => (int) ( $resolved['target_id'] ?? 0 ),
+                                        'product_name' => sanitize_text_field( (string) ( $context['product_name'] ?? '' ) ),
+                                        'sku'          => sanitize_text_field( (string) ( $context['sku'] ?? '' ) ),
+                                ),
+                        );
+                }
+
+                protected static function get_remembered_product_context( int $user_id ): array {
+                        $raw = get_user_meta( $user_id, self::product_context_meta_key(), true );
+                        if ( ! is_array( $raw ) ) {
+                                return array();
+                        }
+                        return array(
+                                'product_id'   => max( 0, (int) ( $raw['product_id'] ?? 0 ) ),
+                                'variation_id' => max( 0, (int) ( $raw['variation_id'] ?? 0 ) ),
+                                'target_id'    => max( 0, (int) ( $raw['target_id'] ?? 0 ) ),
+                                'product_name' => sanitize_text_field( (string) ( $raw['product_name'] ?? '' ) ),
+                                'sku'          => sanitize_text_field( (string) ( $raw['sku'] ?? '' ) ),
+                                'remembered_at'=> sanitize_text_field( (string) ( $raw['remembered_at'] ?? '' ) ),
+                        );
+                }
+
+                protected static function remember_product_context( int $user_id, array $resolved_product ): void {
+                        $target_id = max( 0, (int) ( $resolved_product['target_id'] ?? 0 ) );
+                        if ( $target_id <= 0 ) {
+                                return;
+                        }
+                        update_user_meta(
+                                $user_id,
+                                self::product_context_meta_key(),
+                                array(
+                                        'product_id'    => max( 0, (int) ( $resolved_product['product_id'] ?? 0 ) ),
+                                        'variation_id'  => max( 0, (int) ( $resolved_product['variation_id'] ?? 0 ) ),
+                                        'target_id'     => $target_id,
+                                        'product_name'  => sanitize_text_field( (string) ( $resolved_product['product_name'] ?? '' ) ),
+                                        'sku'           => sanitize_text_field( (string) ( $resolved_product['sku'] ?? '' ) ),
+                                        'remembered_at' => wp_date( 'c' ),
+                                )
                         );
                 }
 
@@ -19231,6 +19453,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                 protected static function clear_conversation_state( int $user_id ): void {
                         update_user_meta( $user_id, self::history_meta_key(), array() );
                         update_user_meta( $user_id, self::request_meta_key(), array() );
+                        delete_user_meta( $user_id, self::product_context_meta_key() );
                         delete_transient( self::context_transient_key( $user_id ) );
                 }
 
@@ -20473,6 +20696,9 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 $parsed['latency_ms']   = 0.0;
                                 $parsed['error_code']   = '';
                                 $parsed['error_message'] = '';
+                                if ( ! empty( $parsed['resolved_product'] ) && is_array( $parsed['resolved_product'] ) ) {
+                                        self::remember_product_context( $user_id, $parsed['resolved_product'] );
+                                }
                         } else {
                                 $parsed = lpr_allocator_generate_ai_assistant_reply( $latest_message, $context, $settings );
                         }
