@@ -18208,6 +18208,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
 
                 public static function init(): void {
                         add_action( 'wp_ajax_lpr_ai_assistant_submit', array( __CLASS__, 'ajax_submit' ) );
+                        add_action( 'wp_ajax_lpr_ai_assistant_clear', array( __CLASS__, 'ajax_clear' ) );
                 }
 
                 protected static function history_meta_key(): string {
@@ -18218,12 +18219,28 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         return 'lpr_allocator_ai_context_' . max( 0, $user_id );
                 }
 
+                protected static function request_meta_key(): string {
+                        return 'lpr_allocator_ai_assistant_request_meta';
+                }
+
                 protected static function history_limit(): int {
                         return 20;
                 }
 
                 protected static function context_limit(): int {
                         return 8;
+                }
+
+                protected static function history_size_limit_bytes(): int {
+                        return 65536;
+                }
+
+                protected static function request_meta_limit(): int {
+                        return 30;
+                }
+
+                protected static function request_meta_size_limit_bytes(): int {
+                        return 32768;
                 }
 
                 protected static function normalize_history( $raw_history ): array {
@@ -18253,6 +18270,94 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         }
 
                         return $history;
+                }
+
+                protected static function normalize_request_meta( $raw_log ): array {
+                        $log = array();
+                        if ( ! is_array( $raw_log ) ) {
+                                return $log;
+                        }
+
+                        foreach ( $raw_log as $entry ) {
+                                if ( ! is_array( $entry ) ) {
+                                        continue;
+                                }
+
+                                $timestamp = isset( $entry['timestamp'] ) ? sanitize_text_field( (string) $entry['timestamp'] ) : '';
+                                $user_id   = isset( $entry['user_id'] ) ? max( 0, (int) $entry['user_id'] ) : 0;
+                                $model     = isset( $entry['model'] ) ? sanitize_text_field( (string) $entry['model'] ) : '';
+                                $duration  = isset( $entry['duration'] ) ? round( (float) $entry['duration'], 2 ) : 0.0;
+                                $status    = isset( $entry['status'] ) ? sanitize_key( (string) $entry['status'] ) : '';
+
+                                if ( '' === $timestamp || '' === $status ) {
+                                        continue;
+                                }
+
+                                $log[] = array(
+                                        'timestamp' => $timestamp,
+                                        'user_id'   => $user_id,
+                                        'model'     => $model,
+                                        'duration'  => $duration,
+                                        'status'    => $status,
+                                );
+                        }
+
+                        return $log;
+                }
+
+                protected static function trim_by_size( array $items, int $max_bytes ): array {
+                        if ( $max_bytes < 1 ) {
+                                return $items;
+                        }
+
+                        while ( ! empty( $items ) ) {
+                                $encoded = wp_json_encode( $items );
+                                if ( false === $encoded || strlen( $encoded ) <= $max_bytes ) {
+                                        break;
+                                }
+                                array_shift( $items );
+                        }
+
+                        return $items;
+                }
+
+                protected static function persist_chat_state( int $user_id, array $history, array $context ): array {
+                        $history = self::normalize_history( $history );
+                        $history = array_slice( $history, -self::history_limit() );
+                        $history = self::trim_by_size( $history, self::history_size_limit_bytes() );
+                        $context = self::normalize_history( $context );
+                        $context = array_slice( $context, -self::context_limit() );
+                        $context = self::trim_by_size( $context, self::history_size_limit_bytes() );
+
+                        update_user_meta( $user_id, self::history_meta_key(), $history );
+                        set_transient( self::context_transient_key( $user_id ), $context, HOUR_IN_SECONDS );
+
+                        return array(
+                                'history' => $history,
+                                'context' => $context,
+                        );
+                }
+
+                protected static function record_request_meta( int $user_id, string $model, float $duration, string $status ): array {
+                        $request_log = self::normalize_request_meta( get_user_meta( $user_id, self::request_meta_key(), true ) );
+                        $request_log[] = array(
+                                'timestamp' => wp_date( 'c' ),
+                                'user_id'   => max( 0, $user_id ),
+                                'model'     => sanitize_text_field( $model ),
+                                'duration'  => round( max( 0.0, $duration ), 2 ),
+                                'status'    => sanitize_key( $status ),
+                        );
+                        $request_log = array_slice( $request_log, -self::request_meta_limit() );
+                        $request_log = self::trim_by_size( $request_log, self::request_meta_size_limit_bytes() );
+                        update_user_meta( $user_id, self::request_meta_key(), $request_log );
+
+                        return $request_log;
+                }
+
+                protected static function clear_conversation_state( int $user_id ): void {
+                        update_user_meta( $user_id, self::history_meta_key(), array() );
+                        update_user_meta( $user_id, self::request_meta_key(), array() );
+                        delete_transient( self::context_transient_key( $user_id ) );
                 }
 
                 protected static function normalize_ui_error( string $error_code, string $error_message ): array {
@@ -18303,8 +18408,8 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         $user_id        = get_current_user_id();
                         $history_key    = self::history_meta_key();
                         $context_key    = self::context_transient_key( $user_id );
-                        $history_limit  = self::history_limit();
                         $context_limit  = self::context_limit();
+                        $model          = 'gpt-4o-mini';
                         $latest_message = isset( $_POST['message'] ) ? sanitize_textarea_field( wp_unslash( $_POST['message'] ) ) : '';
                         $latest_message = trim( $latest_message );
 
@@ -18321,8 +18426,10 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         }
 
                         $settings = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array();
+                        $model    = isset( $settings['ai_model'] ) ? sanitize_text_field( (string) $settings['ai_model'] ) : $model;
                         $guard    = lpr_allocator_validate_ai_guardrails( $latest_message, $settings );
                         if ( empty( $guard['ok'] ) ) {
+                                self::record_request_meta( $user_id, $model, 0.0, 'blocked' );
                                 $ui_error = self::normalize_ui_error( 'unknown', (string) ( $guard['error_message'] ?? '' ) );
                                 wp_send_json_error( array( 'error' => $ui_error ), 400 );
                         }
@@ -18345,9 +18452,8 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
 
                         if ( ! empty( $parsed['error_code'] ) ) {
                                 $ui_error = self::normalize_ui_error( (string) $parsed['error_code'], (string) $parsed['error_message'] );
-                                $history  = array_slice( $history, -$history_limit );
-                                update_user_meta( $user_id, $history_key, $history );
-                                set_transient( $context_key, array_slice( $history, -$context_limit ), HOUR_IN_SECONDS );
+                                self::persist_chat_state( $user_id, $history, array_slice( $history, -$context_limit ) );
+                                self::record_request_meta( $user_id, $model, (float) ( $parsed['latency_ms'] ?? 0.0 ), 'error' );
                                 wp_send_json_error( array( 'error' => $ui_error ), 500 );
                         }
 
@@ -18358,14 +18464,40 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         );
 
                         $history[] = $assistant_turn;
-                        $history   = array_slice( $history, -$history_limit );
-                        update_user_meta( $user_id, $history_key, $history );
-                        set_transient( $context_key, array_slice( $history, -$context_limit ), HOUR_IN_SECONDS );
+                        $state     = self::persist_chat_state( $user_id, $history, array_slice( $history, -$context_limit ) );
+                        $history   = $state['history'];
+                        self::record_request_meta( $user_id, $model, (float) ( $parsed['latency_ms'] ?? 0.0 ), 'success' );
 
                         wp_send_json_success(
                                 array(
                                         'assistant' => $assistant_turn,
                                         'history'   => $history,
+                                )
+                        );
+                }
+
+                public static function ajax_clear(): void {
+                        check_ajax_referer( 'lpr_ai_assistant_chat' );
+
+                        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                                wp_send_json_error(
+                                        array(
+                                                'error' => array(
+                                                        'code'    => 'unknown',
+                                                        'message' => __( 'You do not have permission to clear the conversation.', 'lpr-backorder-allocator' ),
+                                                ),
+                                        ),
+                                        403
+                                );
+                        }
+
+                        $user_id = get_current_user_id();
+                        self::clear_conversation_state( $user_id );
+                        self::record_request_meta( $user_id, '', 0.0, 'cleared' );
+
+                        wp_send_json_success(
+                                array(
+                                        'history' => array(),
                                 )
                         );
                 }
@@ -18388,9 +18520,10 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 $action = isset( $_POST['lpr_ai_action'] ) ? sanitize_key( wp_unslash( $_POST['lpr_ai_action'] ) ) : 'send';
 
                                 if ( 'clear' === $action ) {
+                                        self::clear_conversation_state( $user_id );
+                                        self::record_request_meta( $user_id, '', 0.0, 'cleared' );
                                         $history = array();
-                                        update_user_meta( $user_id, $history_key, $history );
-                                        $notice = __( 'Chat history cleared.', 'lpr-backorder-allocator' );
+                                        $notice  = __( 'Conversation cleared.', 'lpr-backorder-allocator' );
                                 } else {
                                         $draft = isset( $_POST['lpr_ai_message'] ) ? sanitize_textarea_field( wp_unslash( $_POST['lpr_ai_message'] ) ) : '';
                                         $draft = trim( $draft );
@@ -18422,9 +18555,21 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                         $draft  = '';
                                                 }
 
-                                                update_user_meta( $user_id, $history_key, array_slice( $history, -20 ) );
-                                                $history = self::normalize_history( $history );
+                                                $state   = self::persist_chat_state( $user_id, $history, array_slice( $history, -self::context_limit() ) );
+                                                $history = $state['history'];
+                                                self::record_request_meta(
+                                                        $user_id,
+                                                        (string) ( $settings['ai_model'] ?? 'gpt-4o-mini' ),
+                                                        (float) ( $parsed['latency_ms'] ?? 0.0 ),
+                                                        empty( $parsed['error_code'] ) ? 'success' : 'error'
+                                                );
                                         } else {
+                                                self::record_request_meta(
+                                                        $user_id,
+                                                        (string) ( $settings['ai_model'] ?? 'gpt-4o-mini' ),
+                                                        0.0,
+                                                        'blocked'
+                                                );
                                                 $error = (string) ( $guard['error_message'] ?? __( 'Unable to send prompt.', 'lpr-backorder-allocator' ) );
                                         }
                                 }
@@ -18485,7 +18630,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                 <form method="post" action="" style="margin-top:10px;">
                                                         <?php wp_nonce_field( 'lpr_ai_assistant_chat', 'lpr_ai_nonce' ); ?>
                                                         <input type="hidden" name="lpr_ai_action" value="clear" />
-                                                        <button type="submit" class="button button-secondary"><?php echo esc_html__( 'Clear', 'lpr-backorder-allocator' ); ?></button>
+                                                        <button type="submit" class="button button-secondary" id="lpr-ai-clear"><?php echo esc_html__( 'Clear conversation', 'lpr-backorder-allocator' ); ?></button>
                                                 </form>
                                         </div>
                                 </div>
@@ -18503,6 +18648,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         var loading = document.getElementById('lpr-ai-loading');
                                         var loadingText = document.getElementById('lpr-ai-loading-text');
                                         var nonceField = form.querySelector('input[name="_wpnonce"]');
+                                        var clearButton = document.getElementById('lpr-ai-clear');
                                         var ajaxUrl = window.ajaxurl || '<?php echo esc_js( admin_url( 'admin-ajax.php' ) ); ?>';
 
                                         function setLoading(active) {
@@ -18572,6 +18718,49 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                         historyRoot.appendChild(createMessageNode(turn));
                                                 });
                                                 historyRoot.scrollTop = historyRoot.scrollHeight;
+                                        }
+
+                                        if (clearButton) {
+                                                clearButton.addEventListener('click', function(event) {
+                                                        event.preventDefault();
+                                                        var confirmed = window.confirm('<?php echo esc_js( __( 'Clear this conversation history?', 'lpr-backorder-allocator' ) ); ?>');
+                                                        if (!confirmed) {
+                                                                return;
+                                                        }
+
+                                                        var payload = new window.FormData();
+                                                        payload.append('action', 'lpr_ai_assistant_clear');
+                                                        payload.append('_wpnonce', nonceField ? nonceField.value : '');
+
+                                                        setLoading(true);
+                                                        window.fetch(ajaxUrl, {
+                                                                method: 'POST',
+                                                                credentials: 'same-origin',
+                                                                body: payload
+                                                        }).then(function(response) {
+                                                                return response.json().catch(function() {
+                                                                        return {};
+                                                                });
+                                                        }).then(function(result) {
+                                                                if (!result || !result.success) {
+                                                                        var errorData = result && result.data && result.data.error ? result.data.error : null;
+                                                                        var message = errorData && errorData.message
+                                                                                ? errorData.message
+                                                                                : '<?php echo esc_js( __( 'Unable to clear conversation right now.', 'lpr-backorder-allocator' ) ); ?>';
+                                                                        window.alert(message);
+                                                                        return;
+                                                                }
+
+                                                                if (messageInput) {
+                                                                        messageInput.value = '';
+                                                                }
+                                                                renderHistory([]);
+                                                        }).catch(function() {
+                                                                window.alert('<?php echo esc_js( __( 'Unable to clear conversation right now.', 'lpr-backorder-allocator' ) ); ?>');
+                                                        }).finally(function() {
+                                                                setLoading(false);
+                                                        });
+                                                });
                                         }
 
                                         form.addEventListener('submit', function(event) {
