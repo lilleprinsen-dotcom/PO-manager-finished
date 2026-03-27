@@ -1910,16 +1910,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                 public static function render_po_index_rebuild_field( array $field ): void {
                         $po_id      = isset( $_GET['po_id'] ) ? absint( wp_unslash( $_GET['po_id'] ) ) : 0; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
                         $redirect   = admin_url( 'admin.php?page=wc-settings&tab=' . self::TAB_ID );
-                        $action_url = wp_nonce_url(
-                                add_query_arg(
-                                        array(
-                                                'action'   => 'lpr_allocator_force_po_index_rebuild',
-                                                'redirect' => rawurlencode( $redirect ),
-                                        ),
-                                        admin_url( 'admin-post.php' )
-                                ),
-                                'lpr_allocator_force_po_index_rebuild'
-                        );
+                        $action_url = admin_url( 'admin-post.php' );
+                        $nonce      = wp_create_nonce( 'lpr_allocator_force_po_index_rebuild' );
 
                         ?>
                         <tr valign="top">
@@ -1930,30 +1922,17 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                         <fieldset>
                                                 <legend class="screen-reader-text"><span><?php echo esc_html( $field['title'] ); ?></span></legend>
                                                 <p class="description"><?php echo esc_html( $field['desc'] ); ?></p>
-                                                <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
-                                                        <input type="number" min="1" class="small-text" id="lpr-po-index-po-id" value="<?php echo $po_id ? esc_attr( $po_id ) : ''; ?>" />
-                                                        <button type="button" class="button" id="lpr-po-index-rebuild-btn"><?php echo esc_html__( 'Rebuild index', 'lpr-backorder-allocator' ); ?></button>
-                                                </div>
+                                                <form method="get" action="<?php echo esc_url( $action_url ); ?>" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;">
+                                                        <input type="hidden" name="action" value="lpr_allocator_force_po_index_rebuild" />
+                                                        <input type="hidden" name="redirect" value="<?php echo esc_attr( rawurlencode( $redirect ) ); ?>" />
+                                                        <input type="hidden" name="_wpnonce" value="<?php echo esc_attr( $nonce ); ?>" />
+                                                        <input type="number" min="1" class="small-text" id="lpr-po-index-po-id" name="po_id" value="<?php echo $po_id ? esc_attr( $po_id ) : ''; ?>" />
+                                                        <button type="submit" class="button"><?php echo esc_html__( 'Rebuild index', 'lpr-backorder-allocator' ); ?></button>
+                                                </form>
                                                 <p class="description" style="margin-top:4px;">
                                                         <?php esc_html_e( 'This scans order items for allocations and refreshes the PO index without changing quantities.', 'lpr-backorder-allocator' ); ?>
                                                 </p>
                                         </fieldset>
-                                        <script>
-                                                (function(){
-                                                        var btn = document.getElementById('lpr-po-index-rebuild-btn');
-                                                        var input = document.getElementById('lpr-po-index-po-id');
-                                                        if(!btn || !input){return;}
-                                                        var base = '<?php echo esc_js( $action_url ); ?>';
-                                                        btn.addEventListener('click', function(){
-                                                                var val = parseInt(input.value, 10) || 0;
-                                                                var target = base;
-                                                                if(val > 0){
-                                                                        target += '&po_id=' + encodeURIComponent(val);
-                                                                }
-                                                                window.location.href = target;
-                                                        });
-                                                })();
-                                        </script>
                                 </td>
                         </tr>
                         <?php
@@ -2047,13 +2026,15 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                  */
                 public static function render_ai_connection_test_field( array $field ): void {
                         $redirect   = admin_url( 'admin.php?page=wc-settings&tab=' . self::TAB_ID );
-                        $action_url = add_query_arg(
+                        $action_url = wp_nonce_url(
+                                add_query_arg(
                                 array(
                                         'action'   => 'lpr_allocator_test_ai_connection',
                                         'redirect' => rawurlencode( $redirect ),
-                                        '_wpnonce' => wp_create_nonce( 'lpr_allocator_test_ai_connection' ),
                                 ),
                                 admin_url( 'admin-post.php' )
+                                ),
+                                'lpr_allocator_test_ai_connection'
                         );
 
                         $status = isset( $_GET['lpr_ai_test_status'] ) ? sanitize_key( wp_unslash( $_GET['lpr_ai_test_status'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
@@ -2071,6 +2052,9 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                 } elseif ( 'timeout' === $status ) {
                                         $class   = 'notice-warning';
                                         $message = __( 'Connection timed out. Increase timeout or verify outbound network access.', 'lpr-backorder-allocator' );
+                                } elseif ( 'nonce_error' === $status ) {
+                                        $class   = 'notice-error';
+                                        $message = __( 'Security check failed. Please retry the connection test from this page.', 'lpr-backorder-allocator' );
                                 } else {
                                         $class   = 'notice-error';
                                         $message = __( 'Connection test failed. Verify the model, key, and endpoint reachability.', 'lpr-backorder-allocator' );
@@ -2086,19 +2070,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                 <td class="forminp">
                                         <fieldset>
                                                 <legend class="screen-reader-text"><span><?php echo esc_html( $field['title'] ); ?></span></legend>
-                                                <button type="button" class="button" id="lpr-ai-test-btn"><?php esc_html_e( 'Test connection', 'lpr-backorder-allocator' ); ?></button>
+                                                <a class="button" href="<?php echo esc_url( $action_url ); ?>"><?php esc_html_e( 'Test connection', 'lpr-backorder-allocator' ); ?></a>
                                                 <p class="description" style="margin-top:4px;"><?php echo esc_html( $field['desc'] ); ?></p>
                                                 <?php echo wp_kses_post( $notice_html ); ?>
                                         </fieldset>
-                                        <script>
-                                                (function(){
-                                                        var btn = document.getElementById('lpr-ai-test-btn');
-                                                        if(!btn){ return; }
-                                                        btn.addEventListener('click', function(){
-                                                                window.location.href = '<?php echo esc_js( $action_url ); ?>';
-                                                        });
-                                                })();
-                                        </script>
                                 </td>
                         </tr>
                         <?php
@@ -2114,7 +2089,17 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
 
                         $nonce = isset( $_REQUEST['_wpnonce'] ) ? (string) $_REQUEST['_wpnonce'] : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
                         if ( ! wp_verify_nonce( $nonce, 'lpr_allocator_test_ai_connection' ) ) {
-                                wp_die( esc_html__( 'Invalid request.', 'lpr-backorder-allocator' ) );
+                                $fallback_redirect = admin_url( 'admin.php?page=wc-settings&tab=' . self::TAB_ID );
+                                $redirect          = isset( $_REQUEST['redirect'] ) ? rawurldecode( (string) wp_unslash( $_REQUEST['redirect'] ) ) : $fallback_redirect; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                                $redirect          = wp_validate_redirect( $redirect, $fallback_redirect );
+                                $redirect          = add_query_arg(
+                                        array(
+                                                'lpr_ai_test_status' => 'nonce_error',
+                                        ),
+                                        $redirect
+                                );
+                                wp_safe_redirect( $redirect );
+                                exit;
                         }
 
                         $redirect = isset( $_REQUEST['redirect'] ) ? rawurldecode( (string) wp_unslash( $_REQUEST['redirect'] ) ) : admin_url( 'admin.php?page=wc-settings&tab=' . self::TAB_ID ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended
