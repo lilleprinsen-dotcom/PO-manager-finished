@@ -18425,6 +18425,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                 public static function init(): void {
                         add_action( 'wp_ajax_lpr_ai_assistant_submit', array( __CLASS__, 'ajax_submit' ) );
                         add_action( 'wp_ajax_lpr_ai_assistant_clear', array( __CLASS__, 'ajax_clear' ) );
+                        add_action( 'wp_ajax_lpr_ai_assistant_confirm_draft', array( __CLASS__, 'ajax_confirm_draft' ) );
                 }
 
                 protected static function history_meta_key(): string {
@@ -18437,6 +18438,18 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
 
                 protected static function request_meta_key(): string {
                         return 'lpr_allocator_ai_assistant_request_meta';
+                }
+
+                protected static function draft_bundle_meta_key(): string {
+                        return 'lpr_allocator_ai_assistant_draft_bundles';
+                }
+
+                protected static function draft_bundle_archive_meta_key(): string {
+                        return 'lpr_allocator_ai_assistant_draft_archive';
+                }
+
+                protected static function apply_result_meta_key(): string {
+                        return 'lpr_allocator_ai_assistant_last_apply_result';
                 }
 
                 protected static function history_limit(): int {
@@ -18457,6 +18470,14 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
 
                 protected static function request_meta_size_limit_bytes(): int {
                         return 32768;
+                }
+
+                protected static function draft_bundle_limit(): int {
+                        return 25;
+                }
+
+                protected static function draft_archive_limit(): int {
+                        return 75;
                 }
 
                 protected static function normalize_history( $raw_history ): array {
@@ -18585,6 +18606,293 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         delete_transient( self::context_transient_key( $user_id ) );
                 }
 
+                protected static function normalize_draft_bundles( $raw_bundles ): array {
+                        $bundles = array();
+                        if ( ! is_array( $raw_bundles ) ) {
+                                return $bundles;
+                        }
+
+                        foreach ( $raw_bundles as $bundle ) {
+                                if ( ! is_array( $bundle ) ) {
+                                        continue;
+                                }
+                                $id          = sanitize_text_field( (string) ( $bundle['id'] ?? '' ) );
+                                $status      = sanitize_key( (string) ( $bundle['status'] ?? 'draft' ) );
+                                $action_type = sanitize_key( (string) ( $bundle['action_type'] ?? '' ) );
+                                $created_at  = sanitize_text_field( (string) ( $bundle['created_at'] ?? '' ) );
+                                $updated_at  = sanitize_text_field( (string) ( $bundle['updated_at'] ?? '' ) );
+                                $target      = sanitize_text_field( (string) ( $bundle['target_entity'] ?? '' ) );
+                                $safety      = sanitize_key( (string) ( $bundle['safety_behavior'] ?? 'stop_on_error' ) );
+                                $identifiers = isset( $bundle['identifiers'] ) && is_array( $bundle['identifiers'] ) ? $bundle['identifiers'] : array();
+                                $line_changes = isset( $bundle['line_changes'] ) && is_array( $bundle['line_changes'] ) ? array_values( $bundle['line_changes'] ) : array();
+                                $before_after = isset( $bundle['before_after'] ) && is_array( $bundle['before_after'] ) ? array_values( $bundle['before_after'] ) : array();
+                                $result       = isset( $bundle['result'] ) && is_array( $bundle['result'] ) ? $bundle['result'] : array();
+                                $audit        = isset( $bundle['audit'] ) && is_array( $bundle['audit'] ) ? $bundle['audit'] : array();
+
+                                if ( '' === $id || '' === $action_type ) {
+                                        continue;
+                                }
+
+                                if ( ! in_array( $status, array( 'draft', 'approved', 'applied', 'failed' ), true ) ) {
+                                        $status = 'draft';
+                                }
+                                if ( ! in_array( $safety, array( 'stop_on_error', 'continue_on_error' ), true ) ) {
+                                        $safety = 'stop_on_error';
+                                }
+
+                                $bundles[] = array(
+                                        'id'              => $id,
+                                        'status'          => $status,
+                                        'action_type'     => $action_type,
+                                        'target_entity'   => $target,
+                                        'identifiers'     => $identifiers,
+                                        'line_changes'    => $line_changes,
+                                        'before_after'    => $before_after,
+                                        'safety_behavior' => $safety,
+                                        'created_at'      => $created_at,
+                                        'updated_at'      => $updated_at,
+                                        'result'          => $result,
+                                        'audit'           => $audit,
+                                );
+                        }
+
+                        return $bundles;
+                }
+
+                protected static function get_draft_bundles( int $user_id ): array {
+                        return self::normalize_draft_bundles( get_user_meta( $user_id, self::draft_bundle_meta_key(), true ) );
+                }
+
+                protected static function persist_draft_bundles( int $user_id, array $bundles ): array {
+                        $bundles = self::normalize_draft_bundles( $bundles );
+                        $bundles = array_slice( $bundles, -self::draft_bundle_limit() );
+                        update_user_meta( $user_id, self::draft_bundle_meta_key(), $bundles );
+                        return $bundles;
+                }
+
+                protected static function parse_order_item_id( string $line_identifier ): int {
+                        $line_identifier = trim( $line_identifier );
+                        if ( '' === $line_identifier ) {
+                                return 0;
+                        }
+
+                        if ( preg_match( '/(?:item|order_item|line)[:#-]?(\d+)/i', $line_identifier, $matches ) ) {
+                                return absint( $matches[1] );
+                        }
+
+                        if ( preg_match( '/^\d+$/', $line_identifier ) ) {
+                                return absint( $line_identifier );
+                        }
+
+                        return 0;
+                }
+
+                protected static function parse_order_id( array $identifiers, string $line_identifier = '' ): int {
+                        if ( isset( $identifiers['order_id'] ) ) {
+                                return absint( $identifiers['order_id'] );
+                        }
+                        if ( preg_match( '/order[:#-]?(\d+)/i', $line_identifier, $matches ) ) {
+                                return absint( $matches[1] );
+                        }
+                        return 0;
+                }
+
+                protected static function build_before_after_map( string $action_type, array $identifiers, array $line_changes ): array {
+                        $rows = array();
+
+                        foreach ( $line_changes as $line_change ) {
+                                if ( ! is_array( $line_change ) ) {
+                                        continue;
+                                }
+
+                                $line_identifier = sanitize_text_field( (string) ( $line_change['line_identifier'] ?? '' ) );
+                                $before          = '';
+                                $after           = '';
+
+                                if ( 'update_eta_draft' === $action_type ) {
+                                        $item_id = self::parse_order_item_id( $line_identifier );
+                                        if ( $item_id > 0 ) {
+                                                $item = function_exists( 'wc_get_order_item' ) ? wc_get_order_item( $item_id ) : null;
+                                                if ( $item instanceof \WC_Order_Item_Product ) {
+                                                        $before = (string) $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_LINE_ETA' ) ? ORDER_ITEM_META_LINE_ETA : '_lpr_line_eta', true );
+                                                }
+                                        }
+                                        $after = sanitize_text_field( (string) ( $line_change['eta_date'] ?? '' ) );
+                                } elseif ( 'update_delivery_date_draft' === $action_type ) {
+                                        $order_id = self::parse_order_id( $identifiers, $line_identifier );
+                                        if ( $order_id > 0 ) {
+                                                $before = (string) get_post_meta( $order_id, defined( __NAMESPACE__ . '\ORDER_META_REQUESTED_DELIVERY' ) ? ORDER_META_REQUESTED_DELIVERY : '_lpr_requested_delivery_date', true );
+                                        }
+                                        $after = sanitize_text_field( (string) ( $line_change['delivery_date'] ?? '' ) );
+                                } elseif ( 'create_po_draft' === $action_type ) {
+                                        $before = 'n/a';
+                                        $qty    = isset( $line_change['quantity'] ) ? (float) $line_change['quantity'] : 0;
+                                        $after  = sprintf( 'qty %s', rtrim( rtrim( number_format( $qty, 2, '.', '' ), '0' ), '.' ) );
+                                }
+
+                                $rows[] = array(
+                                        'line_identifier' => $line_identifier,
+                                        'before'          => sanitize_text_field( (string) $before ),
+                                        'after'           => sanitize_text_field( (string) $after ),
+                                );
+                        }
+
+                        return $rows;
+                }
+
+                protected static function enqueue_draft_bundle( int $user_id, array $action_payload ): array {
+                        $action_type  = sanitize_key( (string) ( $action_payload['action_type'] ?? '' ) );
+                        $target       = sanitize_text_field( (string) ( $action_payload['target_entity'] ?? '' ) );
+                        $identifiers  = isset( $action_payload['identifiers'] ) && is_array( $action_payload['identifiers'] ) ? $action_payload['identifiers'] : array();
+                        $line_changes = isset( $action_payload['line_changes'] ) && is_array( $action_payload['line_changes'] ) ? array_values( $action_payload['line_changes'] ) : array();
+                        $now          = wp_date( 'c' );
+                        $bundle       = array(
+                                'id'              => function_exists( 'wp_generate_uuid4' ) ? wp_generate_uuid4() : uniqid( 'lpr_ai_bundle_', true ),
+                                'status'          => 'draft',
+                                'action_type'     => $action_type,
+                                'target_entity'   => $target,
+                                'identifiers'     => $identifiers,
+                                'line_changes'    => $line_changes,
+                                'before_after'    => self::build_before_after_map( $action_type, $identifiers, $line_changes ),
+                                'safety_behavior' => 'stop_on_error',
+                                'created_at'      => $now,
+                                'updated_at'      => $now,
+                                'result'          => array(),
+                                'audit'           => array(),
+                        );
+
+                        $bundles   = self::get_draft_bundles( $user_id );
+                        $bundles[] = $bundle;
+                        self::persist_draft_bundles( $user_id, $bundles );
+
+                        return $bundle;
+                }
+
+                protected static function execute_draft_bundle( array $bundle ): array {
+                        $action_type    = sanitize_key( (string) ( $bundle['action_type'] ?? '' ) );
+                        $identifiers    = isset( $bundle['identifiers'] ) && is_array( $bundle['identifiers'] ) ? $bundle['identifiers'] : array();
+                        $line_changes   = isset( $bundle['line_changes'] ) && is_array( $bundle['line_changes'] ) ? array_values( $bundle['line_changes'] ) : array();
+                        $safety_behavior = sanitize_key( (string) ( $bundle['safety_behavior'] ?? 'stop_on_error' ) );
+                        $stop_on_error  = 'continue_on_error' !== $safety_behavior;
+                        $results        = array();
+                        $errors         = array();
+                        $applied_count  = 0;
+                        $skipped_count  = 0;
+                        $had_error      = false;
+
+                        foreach ( $line_changes as $index => $line_change ) {
+                                $line_identifier = sanitize_text_field( (string) ( $line_change['line_identifier'] ?? '' ) );
+                                if ( $had_error && $stop_on_error ) {
+                                        $results[] = array(
+                                                'line_identifier' => $line_identifier,
+                                                'status'          => 'skipped',
+                                                'message'         => __( 'Skipped due to earlier failure and conservative safety mode.', 'lpr-backorder-allocator' ),
+                                        );
+                                        $skipped_count++;
+                                        continue;
+                                }
+
+                                try {
+                                        if ( 'update_eta_draft' === $action_type ) {
+                                                $item_id = self::parse_order_item_id( $line_identifier );
+                                                if ( $item_id <= 0 ) {
+                                                        throw new \RuntimeException( 'Missing order item identifier.' );
+                                                }
+                                                $item = function_exists( 'wc_get_order_item' ) ? wc_get_order_item( $item_id ) : null;
+                                                if ( ! ( $item instanceof \WC_Order_Item_Product ) ) {
+                                                        throw new \RuntimeException( 'Order item not found.' );
+                                                }
+                                                $eta = sanitize_text_field( (string) ( $line_change['eta_date'] ?? '' ) );
+                                                if ( ! lpr_allocator_is_valid_iso_date( $eta ) ) {
+                                                        throw new \RuntimeException( 'Invalid ETA date.' );
+                                                }
+                                                $item->update_meta_data( defined( __NAMESPACE__ . '\ORDER_ITEM_META_LINE_ETA' ) ? ORDER_ITEM_META_LINE_ETA : '_lpr_line_eta', $eta );
+                                                $item->save();
+                                        } elseif ( 'update_delivery_date_draft' === $action_type ) {
+                                                $order_id = self::parse_order_id( $identifiers, $line_identifier );
+                                                if ( $order_id <= 0 ) {
+                                                        throw new \RuntimeException( 'Missing order identifier.' );
+                                                }
+                                                $delivery_date = sanitize_text_field( (string) ( $line_change['delivery_date'] ?? '' ) );
+                                                if ( ! lpr_allocator_is_valid_iso_date( $delivery_date ) ) {
+                                                        throw new \RuntimeException( 'Invalid delivery date.' );
+                                                }
+                                                update_post_meta( $order_id, defined( __NAMESPACE__ . '\ORDER_META_REQUESTED_DELIVERY' ) ? ORDER_META_REQUESTED_DELIVERY : '_lpr_requested_delivery_date', $delivery_date );
+                                        } elseif ( 'create_po_draft' === $action_type ) {
+                                                if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_get_or_create_quick_po_for_user' ) ) {
+                                                        throw new \RuntimeException( 'PO draft helper is unavailable.' );
+                                                }
+                                                $po_id = lpr_allocator_get_or_create_quick_po_for_user();
+                                                if ( $po_id <= 0 ) {
+                                                        throw new \RuntimeException( 'Unable to create or load a PO draft.' );
+                                                }
+                                                $lines = get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', true );
+                                                if ( ! is_array( $lines ) ) {
+                                                        $lines = array();
+                                                }
+                                                $qty = isset( $line_change['quantity'] ) ? max( 0, (int) round( (float) $line_change['quantity'] ) ) : 0;
+                                                if ( $qty <= 0 ) {
+                                                        throw new \RuntimeException( 'Line quantity must be positive.' );
+                                                }
+                                                $product_id = absint( $line_identifier );
+                                                $matched    = false;
+                                                foreach ( $lines as &$existing_line ) {
+                                                        if ( ! is_array( $existing_line ) ) {
+                                                                continue;
+                                                        }
+                                                        if ( $product_id > 0 && isset( $existing_line['product_id'] ) && absint( $existing_line['product_id'] ) === $product_id ) {
+                                                                $existing_line['qty_ordered'] = max( 0, (int) ( $existing_line['qty_ordered'] ?? 0 ) ) + $qty;
+                                                                $matched = true;
+                                                                break;
+                                                        }
+                                                }
+                                                unset( $existing_line );
+                                                if ( ! $matched ) {
+                                                        $lines[] = array(
+                                                                'product_id'   => $product_id,
+                                                                'qty_ordered'  => $qty,
+                                                                'qty_received' => 0,
+                                                        );
+                                                }
+                                                update_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', $lines );
+                                        } else {
+                                                throw new \RuntimeException( 'Unsupported action type.' );
+                                        }
+
+                                        $applied_count++;
+                                        $results[] = array(
+                                                'line_identifier' => $line_identifier,
+                                                'status'          => 'applied',
+                                                'message'         => __( 'Applied successfully.', 'lpr-backorder-allocator' ),
+                                        );
+                                } catch ( \Throwable $t ) {
+                                        $had_error = true;
+                                        $message   = sanitize_text_field( $t->getMessage() );
+                                        $errors[]  = sprintf( 'Line %1$d (%2$s): %3$s', $index + 1, $line_identifier ?: 'n/a', $message ?: 'Unknown error' );
+                                        $results[] = array(
+                                                'line_identifier' => $line_identifier,
+                                                'status'          => 'failed',
+                                                'message'         => $message ?: __( 'Unknown error.', 'lpr-backorder-allocator' ),
+                                        );
+                                }
+                        }
+
+                        return array(
+                                'applied_count' => $applied_count,
+                                'skipped_count' => $skipped_count,
+                                'error_count'   => count( $errors ),
+                                'errors'        => $errors,
+                                'line_results'  => $results,
+                        );
+                }
+
+                protected static function archive_draft_bundle( int $user_id, array $bundle ): void {
+                        $archive   = self::normalize_draft_bundles( get_user_meta( $user_id, self::draft_bundle_archive_meta_key(), true ) );
+                        $archive[] = $bundle;
+                        $archive   = array_slice( $archive, -self::draft_archive_limit() );
+                        update_user_meta( $user_id, self::draft_bundle_archive_meta_key(), $archive );
+                }
+
                 protected static function normalize_ui_error( string $error_code, string $error_message ): array {
                         $code = 'unknown';
 
@@ -18690,6 +18998,11 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 'action_status' => sanitize_key( (string) ( $parsed['action_status'] ?? 'none' ) ),
                                 'action_notice' => sanitize_text_field( (string) ( $parsed['action_notice'] ?? '' ) ),
                         );
+                        if ( 'executable' === ( $assistant_turn['action_status'] ?? 'none' ) && is_array( $assistant_turn['action_payload'] ) ) {
+                                $queued_bundle                    = self::enqueue_draft_bundle( $user_id, $assistant_turn['action_payload'] );
+                                $assistant_turn['action_notice']  = trim( (string) $assistant_turn['action_notice'] . ' ' . __( 'Draft action queued in Draft Overview. Confirm explicitly to apply.', 'lpr-backorder-allocator' ) );
+                                $assistant_turn['draft_bundle_id'] = (string) ( $queued_bundle['id'] ?? '' );
+                        }
 
                         $history[] = $assistant_turn;
                         $state     = self::persist_chat_state( $user_id, $history, array_slice( $history, -$context_limit ) );
@@ -18698,8 +19011,9 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
 
                         wp_send_json_success(
                                 array(
-                                        'assistant' => $assistant_turn,
-                                        'history'   => $history,
+                                        'assistant'     => $assistant_turn,
+                                        'history'       => $history,
+                                        'draft_bundles' => self::get_draft_bundles( $user_id ),
                                 )
                         );
                 }
@@ -18730,6 +19044,88 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         );
                 }
 
+                public static function ajax_confirm_draft(): void {
+                        check_ajax_referer( 'lpr_ai_assistant_chat' );
+
+                        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                                wp_send_json_error(
+                                        array(
+                                                'error' => array(
+                                                        'code'    => 'unknown',
+                                                        'message' => __( 'You do not have permission to confirm draft actions.', 'lpr-backorder-allocator' ),
+                                                ),
+                                        ),
+                                        403
+                                );
+                        }
+
+                        $bundle_id = isset( $_POST['bundle_id'] ) ? sanitize_text_field( wp_unslash( $_POST['bundle_id'] ) ) : '';
+                        if ( '' === $bundle_id ) {
+                                wp_send_json_error(
+                                        array(
+                                                'error' => array(
+                                                        'code'    => 'unknown',
+                                                        'message' => __( 'Missing draft bundle identifier.', 'lpr-backorder-allocator' ),
+                                                ),
+                                        ),
+                                        400
+                                );
+                        }
+
+                        $user_id = get_current_user_id();
+                        $bundles = self::get_draft_bundles( $user_id );
+                        $found   = false;
+                        $updated = array();
+                        $result  = array();
+                        $active_bundle = array();
+
+                        foreach ( $bundles as $bundle ) {
+                                if ( ( $bundle['id'] ?? '' ) !== $bundle_id ) {
+                                        $updated[] = $bundle;
+                                        continue;
+                                }
+
+                                $found        = true;
+                                $active_bundle = $bundle;
+                                $active_bundle['status']     = 'approved';
+                                $active_bundle['updated_at'] = wp_date( 'c' );
+                                $result                      = self::execute_draft_bundle( $active_bundle );
+                                $active_bundle['result']     = $result;
+                                $active_bundle['status']     = (int) ( $result['error_count'] ?? 0 ) > 0 ? 'failed' : 'applied';
+                                $active_bundle['updated_at'] = wp_date( 'c' );
+                                $active_bundle['audit']      = array(
+                                        'completed_at' => wp_date( 'c' ),
+                                        'completed_by' => $user_id,
+                                        'final_status' => $active_bundle['status'],
+                                        'safety_mode'  => sanitize_key( (string) ( $active_bundle['safety_behavior'] ?? 'stop_on_error' ) ),
+                                );
+                                self::archive_draft_bundle( $user_id, $active_bundle );
+                        }
+
+                        if ( ! $found ) {
+                                wp_send_json_error(
+                                        array(
+                                                'error' => array(
+                                                        'code'    => 'unknown',
+                                                        'message' => __( 'Draft bundle was not found or has already been archived.', 'lpr-backorder-allocator' ),
+                                                ),
+                                        ),
+                                        404
+                                );
+                        }
+
+                        self::persist_draft_bundles( $user_id, $updated );
+                        update_user_meta( $user_id, self::apply_result_meta_key(), $active_bundle );
+
+                        wp_send_json_success(
+                                array(
+                                        'result'        => $result,
+                                        'bundle'        => $active_bundle,
+                                        'draft_bundles' => $updated,
+                                )
+                        );
+                }
+
                 public static function render(): void {
                         if ( ! current_user_can( 'manage_woocommerce' ) ) {
                                 return;
@@ -18738,6 +19134,11 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         $user_id     = get_current_user_id();
                         $history_key = self::history_meta_key();
                         $history     = self::normalize_history( get_user_meta( $user_id, $history_key, true ) );
+                        $draft_bundles = self::get_draft_bundles( $user_id );
+                        $last_apply_bundle = get_user_meta( $user_id, self::apply_result_meta_key(), true );
+                        if ( ! is_array( $last_apply_bundle ) ) {
+                                $last_apply_bundle = array();
+                        }
                         $error       = '';
                         $notice      = '';
                         $draft       = '';
@@ -18820,6 +19221,74 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
 
                                 <div class="postbox" style="max-width:1080px;">
                                         <div class="inside">
+                                                <h2 style="margin-top:0;"><?php echo esc_html__( 'Draft Overview', 'lpr-backorder-allocator' ); ?></h2>
+                                                <p class="description"><?php echo esc_html__( 'Pending proposed changes are stored as drafts and never auto-applied. Review before confirming.', 'lpr-backorder-allocator' ); ?></p>
+                                                <div id="lpr-ai-apply-result">
+                                                        <?php if ( ! empty( $last_apply_bundle['result'] ) && is_array( $last_apply_bundle['result'] ) ) : ?>
+                                                                <div class="notice notice-info inline"><p>
+                                                                        <?php
+                                                                        echo esc_html(
+                                                                                sprintf(
+                                                                                        /* translators: 1: applied count, 2: skipped count, 3: error count */
+                                                                                        __( 'Last apply result: %1$d applied, %2$d skipped, %3$d errors.', 'lpr-backorder-allocator' ),
+                                                                                        (int) ( $last_apply_bundle['result']['applied_count'] ?? 0 ),
+                                                                                        (int) ( $last_apply_bundle['result']['skipped_count'] ?? 0 ),
+                                                                                        (int) ( $last_apply_bundle['result']['error_count'] ?? 0 )
+                                                                                )
+                                                                        );
+                                                                        ?>
+                                                                </p></div>
+                                                        <?php endif; ?>
+                                                </div>
+                                                <div id="lpr-ai-draft-overview">
+                                                        <?php if ( empty( $draft_bundles ) ) : ?>
+                                                                <p class="description" style="margin:0;"><?php echo esc_html__( 'No pending draft bundles.', 'lpr-backorder-allocator' ); ?></p>
+                                                        <?php else : ?>
+                                                                <?php
+                                                                $grouped_bundles = array();
+                                                                foreach ( $draft_bundles as $bundle ) {
+                                                                        $grouped_bundles[ $bundle['action_type'] ?? 'unknown' ][] = $bundle;
+                                                                }
+                                                                ?>
+                                                                <?php foreach ( $grouped_bundles as $action_type => $bundles ) : ?>
+                                                                        <h3 style="margin:16px 0 8px;"><?php echo esc_html( strtoupper( str_replace( '_', ' ', (string) $action_type ) ) ); ?></h3>
+                                                                        <?php foreach ( $bundles as $bundle ) : ?>
+                                                                                <div style="border:1px solid #dcdcde; border-radius:4px; padding:10px; margin:0 0 10px;">
+                                                                                        <p style="margin:0 0 8px;">
+                                                                                                <strong><?php echo esc_html__( 'Bundle', 'lpr-backorder-allocator' ); ?>:</strong> <code><?php echo esc_html( (string) ( $bundle['id'] ?? '' ) ); ?></code>
+                                                                                                <span class="description"><?php echo esc_html( (string) ( $bundle['created_at'] ?? '' ) ); ?></span>
+                                                                                        </p>
+                                                                                        <table class="widefat striped" style="margin:0 0 8px;">
+                                                                                                <thead>
+                                                                                                        <tr>
+                                                                                                                <th><?php echo esc_html__( 'Line', 'lpr-backorder-allocator' ); ?></th>
+                                                                                                                <th><?php echo esc_html__( 'Before', 'lpr-backorder-allocator' ); ?></th>
+                                                                                                                <th><?php echo esc_html__( 'After', 'lpr-backorder-allocator' ); ?></th>
+                                                                                                        </tr>
+                                                                                                </thead>
+                                                                                                <tbody>
+                                                                                                        <?php foreach ( (array) ( $bundle['before_after'] ?? array() ) as $change_row ) : ?>
+                                                                                                                <tr>
+                                                                                                                        <td><code><?php echo esc_html( (string) ( $change_row['line_identifier'] ?? '' ) ); ?></code></td>
+                                                                                                                        <td><?php echo esc_html( (string) ( $change_row['before'] ?? '' ) ); ?></td>
+                                                                                                                        <td><?php echo esc_html( (string) ( $change_row['after'] ?? '' ) ); ?></td>
+                                                                                                                </tr>
+                                                                                                        <?php endforeach; ?>
+                                                                                                </tbody>
+                                                                                        </table>
+                                                                                        <p style="margin:0;">
+                                                                                                <button type="button" class="button button-primary lpr-ai-confirm-draft" data-bundle-id="<?php echo esc_attr( (string) ( $bundle['id'] ?? '' ) ); ?>"><?php echo esc_html__( 'Confirm and apply', 'lpr-backorder-allocator' ); ?></button>
+                                                                                        </p>
+                                                                                </div>
+                                                                        <?php endforeach; ?>
+                                                                <?php endforeach; ?>
+                                                        <?php endif; ?>
+                                                </div>
+                                        </div>
+                                </div>
+
+                                <div class="postbox" style="max-width:1080px;">
+                                        <div class="inside">
                                                 <h2 style="margin-top:0;"><?php echo esc_html__( 'Conversation', 'lpr-backorder-allocator' ); ?></h2>
                                                 <div id="lpr-ai-history" style="border:1px solid #dcdcde; border-radius:4px; background:#fff; min-height:220px; max-height:420px; overflow:auto; padding:12px;">
                                                         <?php if ( empty( $history ) ) : ?>
@@ -18880,6 +19349,8 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         }
 
                                         var historyRoot = document.getElementById('lpr-ai-history');
+                                        var draftRoot = document.getElementById('lpr-ai-draft-overview');
+                                        var applyResultRoot = document.getElementById('lpr-ai-apply-result');
                                         var messageInput = document.getElementById('lpr-ai-message');
                                         var sendButton = document.getElementById('lpr-ai-send');
                                         var loading = document.getElementById('lpr-ai-loading');
@@ -18887,6 +19358,32 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         var nonceField = form.querySelector('input[name="_wpnonce"]');
                                         var clearButton = document.getElementById('lpr-ai-clear');
                                         var ajaxUrl = window.ajaxurl || '<?php echo esc_js( admin_url( 'admin-ajax.php' ) ); ?>';
+
+                                        function renderApplySummary(result) {
+                                                if (!applyResultRoot) {
+                                                        return;
+                                                }
+                                                applyResultRoot.innerHTML = '';
+                                                if (!result) {
+                                                        return;
+                                                }
+                                                var wrap = document.createElement('div');
+                                                wrap.className = 'notice notice-info inline';
+                                                var p = document.createElement('p');
+                                                p.textContent = 'Applied: ' + (result.applied_count || 0) + ' | Skipped: ' + (result.skipped_count || 0) + ' | Errors: ' + (result.error_count || 0);
+                                                wrap.appendChild(p);
+                                                if (result.errors && result.errors.length) {
+                                                        var ul = document.createElement('ul');
+                                                        ul.style.margin = '0 0 8px 16px';
+                                                        result.errors.forEach(function(err) {
+                                                                var li = document.createElement('li');
+                                                                li.textContent = err;
+                                                                ul.appendChild(li);
+                                                        });
+                                                        wrap.appendChild(ul);
+                                                }
+                                                applyResultRoot.appendChild(wrap);
+                                        }
 
                                         function setLoading(active) {
                                                 if (sendButton) {
@@ -18975,6 +19472,71 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                 historyRoot.scrollTop = historyRoot.scrollHeight;
                                         }
 
+                                        function renderDraftOverview(draftBundles) {
+                                                if (!draftRoot) {
+                                                        return;
+                                                }
+                                                draftRoot.innerHTML = '';
+                                                if (!draftBundles || !draftBundles.length) {
+                                                        var empty = document.createElement('p');
+                                                        empty.className = 'description';
+                                                        empty.style.margin = '0';
+                                                        empty.textContent = '<?php echo esc_js( __( 'No pending draft bundles.', 'lpr-backorder-allocator' ) ); ?>';
+                                                        draftRoot.appendChild(empty);
+                                                        return;
+                                                }
+
+                                                var grouped = {};
+                                                draftBundles.forEach(function(bundle) {
+                                                        var key = bundle.action_type || 'unknown';
+                                                        if (!grouped[key]) {
+                                                                grouped[key] = [];
+                                                        }
+                                                        grouped[key].push(bundle);
+                                                });
+
+                                                Object.keys(grouped).forEach(function(actionType) {
+                                                        var heading = document.createElement('h3');
+                                                        heading.style.margin = '16px 0 8px';
+                                                        heading.textContent = actionType.replace(/_/g, ' ').toUpperCase();
+                                                        draftRoot.appendChild(heading);
+
+                                                        grouped[actionType].forEach(function(bundle) {
+                                                                var card = document.createElement('div');
+                                                                card.style.border = '1px solid #dcdcde';
+                                                                card.style.borderRadius = '4px';
+                                                                card.style.padding = '10px';
+                                                                card.style.margin = '0 0 10px';
+
+                                                                var meta = document.createElement('p');
+                                                                meta.style.margin = '0 0 8px';
+                                                                meta.innerHTML = '<strong><?php echo esc_js( __( 'Bundle', 'lpr-backorder-allocator' ) ); ?>:</strong> <code>' + (bundle.id || '') + '</code>';
+                                                                card.appendChild(meta);
+
+                                                                var table = document.createElement('table');
+                                                                table.className = 'widefat striped';
+                                                                table.style.margin = '0 0 8px';
+                                                                var tbody = document.createElement('tbody');
+                                                                (bundle.before_after || []).forEach(function(change) {
+                                                                        var tr = document.createElement('tr');
+                                                                        tr.innerHTML = '<td><code>' + (change.line_identifier || '') + '</code></td><td>' + (change.before || '') + '</td><td>' + (change.after || '') + '</td>';
+                                                                        tbody.appendChild(tr);
+                                                                });
+                                                                table.appendChild(tbody);
+                                                                card.appendChild(table);
+
+                                                                var confirmButton = document.createElement('button');
+                                                                confirmButton.type = 'button';
+                                                                confirmButton.className = 'button button-primary lpr-ai-confirm-draft';
+                                                                confirmButton.textContent = '<?php echo esc_js( __( 'Confirm and apply', 'lpr-backorder-allocator' ) ); ?>';
+                                                                confirmButton.setAttribute('data-bundle-id', bundle.id || '');
+                                                                card.appendChild(confirmButton);
+
+                                                                draftRoot.appendChild(card);
+                                                        });
+                                                });
+                                        }
+
                                         if (clearButton) {
                                                 clearButton.addEventListener('click', function(event) {
                                                         event.preventDefault();
@@ -19018,6 +19580,51 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                 });
                                         }
 
+                                        if (draftRoot) {
+                                                draftRoot.addEventListener('click', function(event) {
+                                                        var target = event.target;
+                                                        if (!target || !target.classList || !target.classList.contains('lpr-ai-confirm-draft')) {
+                                                                return;
+                                                        }
+                                                        event.preventDefault();
+                                                        var bundleId = target.getAttribute('data-bundle-id') || '';
+                                                        if (!bundleId) {
+                                                                return;
+                                                        }
+                                                        if (!window.confirm('<?php echo esc_js( __( 'Apply this draft bundle now?', 'lpr-backorder-allocator' ) ); ?>')) {
+                                                                return;
+                                                        }
+
+                                                        var payload = new window.FormData();
+                                                        payload.append('action', 'lpr_ai_assistant_confirm_draft');
+                                                        payload.append('_wpnonce', nonceField ? nonceField.value : '');
+                                                        payload.append('bundle_id', bundleId);
+
+                                                        setLoading(true);
+                                                        window.fetch(ajaxUrl, {
+                                                                method: 'POST',
+                                                                credentials: 'same-origin',
+                                                                body: payload
+                                                        }).then(function(response) {
+                                                                return response.json().catch(function() {
+                                                                        return {};
+                                                                });
+                                                        }).then(function(result) {
+                                                                if (!result || !result.success) {
+                                                                        var errorData = result && result.data && result.data.error ? result.data.error : null;
+                                                                        window.alert(errorData && errorData.message ? errorData.message : '<?php echo esc_js( __( 'Unable to confirm this draft bundle.', 'lpr-backorder-allocator' ) ); ?>');
+                                                                        return;
+                                                                }
+                                                                renderApplySummary(result.data && result.data.result ? result.data.result : null);
+                                                                renderDraftOverview(result.data && result.data.draft_bundles ? result.data.draft_bundles : []);
+                                                        }).catch(function() {
+                                                                window.alert('<?php echo esc_js( __( 'Unable to confirm this draft bundle.', 'lpr-backorder-allocator' ) ); ?>');
+                                                        }).finally(function() {
+                                                                setLoading(false);
+                                                        });
+                                                });
+                                        }
+
                                         form.addEventListener('submit', function(event) {
                                                 event.preventDefault();
                                                 setLoading(true);
@@ -19051,12 +19658,17 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                         if (result.data && result.data.history) {
                                                                 renderHistory(result.data.history);
                                                         }
+                                                        if (result.data && result.data.draft_bundles) {
+                                                                renderDraftOverview(result.data.draft_bundles);
+                                                        }
                                                 }).catch(function() {
                                                         window.alert('<?php echo esc_js( __( 'Assistant request failed. Please try again.', 'lpr-backorder-allocator' ) ); ?>');
                                                 }).finally(function() {
                                                         setLoading(false);
                                                 });
                                         });
+
+                                        renderDraftOverview(<?php echo wp_json_encode( array_values( $draft_bundles ) ); ?>);
                                 })();
                                 </script>
                         </div>
