@@ -168,7 +168,7 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_generate_ai_assistant_re
          * @return string
          */
         function lpr_allocator_ai_assistant_system_instruction(): string {
-                return 'You are an internal assistant for PO allocator admins. Propose draft actions only and do not claim to make live updates. For actionable requests, respond with valid JSON only using this shape: {"conversational_text":"string","action":{"action_type":"create_po_draft|update_eta_draft|update_delivery_date_draft","target_entity":"string","identifiers":{"key":"value"},"line_changes":[{"line_identifier":"string","quantity":1,"eta_date":"YYYY-MM-DD","delivery_date":"YYYY-MM-DD","notes":"string"}],"confidence":0.0,"notes":"string"}}. For non-actionable requests, return {"conversational_text":"string","action":null}.';
+                return 'You are an internal assistant for PO allocator admins. Propose draft actions only and do not claim to make live updates. For informational inventory/open-PO questions, answer only from provided plugin context and never invent PO numbers, ETA dates, quantities, suppliers, or availability. If product matching is ambiguous, ask a clarifying question. For actionable requests, respond with valid JSON only using this shape: {"conversational_text":"string","action":{"action_type":"create_po_draft|update_eta_draft|update_delivery_date_draft","target_entity":"string","identifiers":{"key":"value"},"line_changes":[{"line_identifier":"string","quantity":1,"eta_date":"YYYY-MM-DD","delivery_date":"YYYY-MM-DD","notes":"string"}],"confidence":0.0,"notes":"string"}}. For informational/non-actionable requests, return {"conversational_text":"string","action":null}.';
         }
 
         /**
@@ -18590,6 +18590,419 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         return (bool) apply_filters( 'lpr_ai_assistant_can_apply', $allowed );
                 }
 
+                /**
+                 * Detect informational inventory/open-PO intent (non-actionable).
+                 */
+                protected static function is_inventory_information_query( string $message ): bool {
+                        $text = function_exists( 'mb_strtolower' ) ? mb_strtolower( trim( $message ) ) : strtolower( trim( $message ) );
+                        if ( '' === $text ) {
+                                return false;
+                        }
+
+                        $actionable_keywords = array(
+                                'create draft', 'opprett draft', 'lag draft', 'draft',
+                                'update eta', 'oppdater eta', 'endre eta',
+                                'update delivery', 'oppdater leveringsdato', 'apply', 'bekreft',
+                        );
+                        foreach ( $actionable_keywords as $needle ) {
+                                if ( false !== strpos( $text, $needle ) ) {
+                                        return false;
+                                }
+                        }
+
+                        $inventory_markers = array(
+                                'incoming', 'open po', 'open purchase', 'purchase order', 'innkjøpsordre', 'åpne po',
+                                'påfyll', 'neste eta', 'eta', 'ledig', 'fri qty', 'free qty', 'qty free',
+                                'total incoming', 'hvilke po', 'har vi', 'kommer først',
+                        );
+                        foreach ( $inventory_markers as $needle ) {
+                                if ( false !== strpos( $text, $needle ) ) {
+                                        return true;
+                                }
+                        }
+
+                        return false;
+                }
+
+                /**
+                 * Resolve product reference in assistant text with conservative ambiguity handling.
+                 *
+                 * @return array{status:string,product_id:int,variation_id:int,target_id:int,matches:array<int,array{id:int,label:string,sku:string}>}
+                 */
+                protected static function resolve_assistant_product_reference( string $message ): array {
+                        $result = array(
+                                'status'       => 'not_found',
+                                'product_id'   => 0,
+                                'variation_id' => 0,
+                                'target_id'    => 0,
+                                'matches'      => array(),
+                        );
+
+                        if ( ! function_exists( 'wc_get_product' ) || ! function_exists( 'wc_get_products' ) ) {
+                                return $result;
+                        }
+
+                        $candidates = array();
+                        $seen       = array();
+                        $text       = trim( $message );
+                        $text_lc    = function_exists( 'mb_strtolower' ) ? mb_strtolower( $text ) : strtolower( $text );
+
+                        $add_candidate = static function ( int $id, int $score, string $reason ) use ( &$candidates, &$seen ): void {
+                                if ( $id <= 0 ) {
+                                        return;
+                                }
+                                if ( ! isset( $seen[ $id ] ) ) {
+                                        $seen[ $id ] = array(
+                                                'id'      => $id,
+                                                'score'   => $score,
+                                                'reasons' => array( $reason ),
+                                        );
+                                } else {
+                                        $seen[ $id ]['score']   = max( (int) $seen[ $id ]['score'], $score );
+                                        $seen[ $id ]['reasons'][] = $reason;
+                                }
+                                $candidates = array_values( $seen );
+                        };
+
+                        if ( preg_match( '/(?:produkt(?:\s*id)?|product(?:\s*id)?)\s*[:#-]?\s*(\d{1,9})\b/i', $text, $id_match ) ) {
+                                $id = absint( $id_match[1] );
+                                if ( $id > 0 && wc_get_product( $id ) instanceof \WC_Product ) {
+                                        $add_candidate( $id, 100, 'exact_id' );
+                                }
+                        }
+
+                        if ( preg_match( '/\bsku\s*[:#-]?\s*([a-z0-9._-]{2,})\b/i', $text, $sku_match ) ) {
+                                $sku = trim( (string) $sku_match[1] );
+                                if ( '' !== $sku ) {
+                                        $ids = wc_get_products(
+                                                array(
+                                                        'sku'    => $sku,
+                                                        'limit'  => 8,
+                                                        'status' => array( 'publish', 'private' ),
+                                                        'return' => 'ids',
+                                                )
+                                        );
+                                        foreach ( (array) $ids as $id ) {
+                                                $add_candidate( (int) $id, 98, 'exact_sku' );
+                                        }
+                                }
+                        }
+
+                        $title_exact_ids = get_posts(
+                                array(
+                                        'post_type'      => array( 'product', 'product_variation' ),
+                                        'post_status'    => array( 'publish', 'private' ),
+                                        'posts_per_page' => 8,
+                                        'fields'         => 'ids',
+                                        'title'          => $text,
+                                )
+                        );
+                        foreach ( (array) $title_exact_ids as $id ) {
+                                $add_candidate( (int) $id, 94, 'exact_title' );
+                        }
+
+                        $search_ids = get_posts(
+                                array(
+                                        'post_type'      => array( 'product', 'product_variation' ),
+                                        'post_status'    => array( 'publish', 'private' ),
+                                        'posts_per_page' => 12,
+                                        'fields'         => 'ids',
+                                        's'              => $text,
+                                )
+                        );
+                        foreach ( (array) $search_ids as $id ) {
+                                $add_candidate( (int) $id, 78, 'search_match' );
+                        }
+
+                        // Conservative fuzzy fallback only for short candidate sets and clear winner.
+                        if ( count( $candidates ) <= 1 && strlen( $text_lc ) >= 4 ) {
+                                $fuzzy_ids = get_posts(
+                                        array(
+                                                'post_type'      => array( 'product', 'product_variation' ),
+                                                'post_status'    => array( 'publish', 'private' ),
+                                                'posts_per_page' => 15,
+                                                'fields'         => 'ids',
+                                                's'              => preg_replace( '/\b(?:neste|incoming|open|po|produkt|product|sku|påfyll|eta|ledig|fri|qty|for|av|har|vi|hva|hvilke|kommer)\b/ui', ' ', $text ),
+                                        )
+                                );
+                                $best_id       = 0;
+                                $best_distance = 999;
+                                $second_best   = 999;
+                                foreach ( (array) $fuzzy_ids as $id ) {
+                                        $label = function_exists( __NAMESPACE__ . '\lpr_allocator_product_option_label' ) ? lpr_allocator_product_option_label( (int) $id ) : get_the_title( (int) $id );
+                                        $name  = function_exists( 'mb_strtolower' ) ? mb_strtolower( wp_strip_all_tags( (string) $label ) ) : strtolower( wp_strip_all_tags( (string) $label ) );
+                                        $dist  = levenshtein( $text_lc, $name );
+                                        if ( $dist < $best_distance ) {
+                                                $second_best   = $best_distance;
+                                                $best_distance = $dist;
+                                                $best_id       = (int) $id;
+                                        } elseif ( $dist < $second_best ) {
+                                                $second_best = $dist;
+                                        }
+                                }
+                                if ( $best_id > 0 && $best_distance <= 6 && ( $second_best - $best_distance ) >= 2 ) {
+                                        $add_candidate( $best_id, 70, 'fuzzy_high_confidence' );
+                                }
+                        }
+
+                        if ( empty( $candidates ) ) {
+                                return $result;
+                        }
+
+                        usort(
+                                $candidates,
+                                static function ( $a, $b ) {
+                                        $score_cmp = (int) ( $b['score'] ?? 0 ) <=> (int) ( $a['score'] ?? 0 );
+                                        if ( 0 !== $score_cmp ) {
+                                                return $score_cmp;
+                                        }
+                                        return (int) ( $a['id'] ?? 0 ) <=> (int) ( $b['id'] ?? 0 );
+                                }
+                        );
+
+                        $top_score = (int) ( $candidates[0]['score'] ?? 0 );
+                        $top_ids   = array();
+                        foreach ( $candidates as $candidate ) {
+                                if ( (int) ( $candidate['score'] ?? 0 ) !== $top_score ) {
+                                        break;
+                                }
+                                $top_ids[] = (int) ( $candidate['id'] ?? 0 );
+                        }
+
+                        foreach ( $top_ids as $id ) {
+                                $product = wc_get_product( $id );
+                                if ( ! $product instanceof \WC_Product ) {
+                                        continue;
+                                }
+                                $result['matches'][] = array(
+                                        'id'    => $id,
+                                        'label' => function_exists( __NAMESPACE__ . '\lpr_allocator_product_option_label' ) ? lpr_allocator_product_option_label( $id ) : wp_strip_all_tags( $product->get_formatted_name() ),
+                                        'sku'   => (string) $product->get_sku(),
+                                );
+                        }
+
+                        if ( count( $result['matches'] ) > 1 ) {
+                                $result['status'] = 'ambiguous';
+                                return $result;
+                        }
+
+                        $chosen_id = isset( $result['matches'][0]['id'] ) ? (int) $result['matches'][0]['id'] : 0;
+                        $chosen    = $chosen_id > 0 ? wc_get_product( $chosen_id ) : null;
+                        if ( ! $chosen instanceof \WC_Product ) {
+                                return $result;
+                        }
+
+                        $result['status'] = 'resolved';
+                        if ( $chosen->is_type( 'variation' ) ) {
+                                $result['variation_id'] = $chosen_id;
+                                $result['product_id']   = (int) $chosen->get_parent_id();
+                                $result['target_id']    = $chosen_id;
+                        } else {
+                                $result['product_id']   = $chosen_id;
+                                $result['variation_id'] = 0;
+                                $result['target_id']    = $chosen_id;
+                        }
+
+                        return $result;
+                }
+
+                /**
+                 * Build normalized incoming/open-PO context from existing product meta.
+                 */
+                protected static function build_assistant_inventory_context( int $product_id, int $variation_id = 0 ): array {
+                        $target_id = $variation_id > 0 ? $variation_id : $product_id;
+                        $product   = function_exists( 'wc_get_product' ) ? wc_get_product( $target_id ) : null;
+                        if ( ! $product instanceof \WC_Product ) {
+                                return array();
+                        }
+
+                        $fallback_id     = $variation_id > 0 ? $product_id : 0;
+                        $next_extra_qty  = (int) get_post_meta( $target_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_QTY' ) ? PRODUCT_META_NEXT_EXTRA_QTY : '_lpr_next_extra_qty', true );
+                        $next_extra_eta  = lpr_allocator_sanitize_ymd( (string) get_post_meta( $target_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_ETA' ) ? PRODUCT_META_NEXT_EXTRA_ETA : '_lpr_next_extra_eta', true ) );
+                        $incoming_total  = (int) get_post_meta( $target_id, defined( __NAMESPACE__ . '\PRODUCT_META_INCOMING_TOTAL' ) ? PRODUCT_META_INCOMING_TOTAL : '_lpr_incoming_po_total', true );
+                        $raw_details     = get_post_meta( $target_id, defined( __NAMESPACE__ . '\PRODUCT_META_INCOMING_DETAILS' ) ? PRODUCT_META_INCOMING_DETAILS : '_lpr_incoming_po_details', true );
+
+                        if ( $fallback_id > 0 ) {
+                                if ( $next_extra_qty <= 0 ) {
+                                        $next_extra_qty = (int) get_post_meta( $fallback_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_QTY' ) ? PRODUCT_META_NEXT_EXTRA_QTY : '_lpr_next_extra_qty', true );
+                                }
+                                if ( '' === $next_extra_eta ) {
+                                        $next_extra_eta = lpr_allocator_sanitize_ymd( (string) get_post_meta( $fallback_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_ETA' ) ? PRODUCT_META_NEXT_EXTRA_ETA : '_lpr_next_extra_eta', true ) );
+                                }
+                                if ( $incoming_total <= 0 ) {
+                                        $incoming_total = (int) get_post_meta( $fallback_id, defined( __NAMESPACE__ . '\PRODUCT_META_INCOMING_TOTAL' ) ? PRODUCT_META_INCOMING_TOTAL : '_lpr_incoming_po_total', true );
+                                }
+                                if ( ! is_array( $raw_details ) || empty( $raw_details ) ) {
+                                        $raw_details = get_post_meta( $fallback_id, defined( __NAMESPACE__ . '\PRODUCT_META_INCOMING_DETAILS' ) ? PRODUCT_META_INCOMING_DETAILS : '_lpr_incoming_po_details', true );
+                                }
+                        }
+
+                        $details = array();
+                        if ( is_array( $raw_details ) ) {
+                                foreach ( $raw_details as $entry ) {
+                                        if ( ! is_array( $entry ) ) {
+                                                continue;
+                                        }
+                                        $details[] = array(
+                                                'po_id'       => isset( $entry['po_id'] ) ? (int) $entry['po_id'] : 0,
+                                                'po_number'   => sanitize_text_field( (string) ( $entry['po_number'] ?? '' ) ),
+                                                'eta'         => lpr_allocator_sanitize_ymd( (string) ( $entry['eta'] ?? '' ) ),
+                                                'qty_ordered' => max( 0, (int) ( $entry['qty_ordered'] ?? 0 ) ),
+                                                'qty_free'    => max( 0, (int) ( $entry['qty_free'] ?? 0 ) ),
+                                        );
+                                }
+                        }
+
+                        usort(
+                                $details,
+                                static function ( $a, $b ) {
+                                        $a_eta = (string) ( $a['eta'] ?? '' );
+                                        $b_eta = (string) ( $b['eta'] ?? '' );
+                                        if ( '' === $a_eta && '' === $b_eta ) {
+                                                return (int) ( $a['po_id'] ?? 0 ) <=> (int) ( $b['po_id'] ?? 0 );
+                                        }
+                                        if ( '' === $a_eta ) {
+                                                return 1;
+                                        }
+                                        if ( '' === $b_eta ) {
+                                                return -1;
+                                        }
+                                        return lpr_allocator_compare_dates( $a_eta, $b_eta );
+                                }
+                        );
+
+                        if ( $incoming_total <= 0 ) {
+                                foreach ( $details as $detail ) {
+                                        $incoming_total += max( 0, (int) ( $detail['qty_ordered'] ?? 0 ) );
+                                }
+                        }
+
+                        $has_free_qty = false;
+                        foreach ( $details as $detail ) {
+                                if ( (int) ( $detail['qty_free'] ?? 0 ) > 0 ) {
+                                        $has_free_qty = true;
+                                        break;
+                                }
+                        }
+
+                        return array(
+                                'product_id'      => $product_id,
+                                'variation_id'    => $variation_id,
+                                'product_name'    => wp_strip_all_tags( $product->get_formatted_name() ),
+                                'sku'             => (string) $product->get_sku(),
+                                'next_extra_qty'  => max( 0, $next_extra_qty ),
+                                'next_extra_eta'  => $next_extra_eta,
+                                'incoming_total'  => max( 0, $incoming_total ),
+                                'open_po_details' => $details,
+                                'has_open_pos'    => ! empty( $details ),
+                                'has_free_qty'    => $has_free_qty,
+                        );
+                }
+
+                protected static function format_assistant_po_breakdown_row( array $row ): string {
+                        $po_number   = trim( (string) ( $row['po_number'] ?? '' ) );
+                        $po_fallback = (int) ( $row['po_id'] ?? 0 );
+                        $po_label    = '' !== $po_number ? $po_number : ( $po_fallback > 0 ? (string) $po_fallback : __( 'Unknown PO', 'lpr-backorder-allocator' ) );
+                        $eta         = trim( (string) ( $row['eta'] ?? '' ) );
+
+                        return sprintf(
+                                /* translators: 1: PO label, 2: ETA, 3: ordered qty, 4: free qty */
+                                __( 'PO %1$s – ETA %2$s – Ordered %3$d, Free %4$d', 'lpr-backorder-allocator' ),
+                                $po_label,
+                                '' !== $eta ? $eta : __( 'unknown', 'lpr-backorder-allocator' ),
+                                max( 0, (int) ( $row['qty_ordered'] ?? 0 ) ),
+                                max( 0, (int) ( $row['qty_free'] ?? 0 ) )
+                        );
+                }
+
+                /**
+                 * Deterministic informational reply for incoming/open-PO questions.
+                 */
+                protected static function build_inventory_information_reply( string $message ): array {
+                        $resolved = self::resolve_assistant_product_reference( $message );
+                        if ( 'ambiguous' === ( $resolved['status'] ?? '' ) ) {
+                                $labels = array();
+                                foreach ( array_slice( (array) ( $resolved['matches'] ?? array() ), 0, 4 ) as $match ) {
+                                        $labels[] = (string) ( $match['label'] ?? ( '#' . (int) ( $match['id'] ?? 0 ) ) );
+                                }
+                                return array(
+                                        'assistant_text' => sprintf(
+                                                /* translators: %s: candidate products */
+                                                __( 'Jeg fant flere mulige produkter: %s. Hvilket produkt mener du?', 'lpr-backorder-allocator' ),
+                                                implode( '; ', array_filter( $labels ) )
+                                        ),
+                                        'action_payload' => null,
+                                        'action_status'  => 'none',
+                                        'action_notice'  => '',
+                                );
+                        }
+
+                        if ( 'resolved' !== ( $resolved['status'] ?? '' ) ) {
+                                return array(
+                                        'assistant_text' => __( 'Jeg finner ikke et entydig produkt i spørsmålet ditt. Oppgi gjerne produkt-ID, SKU eller eksakt produktnavn.', 'lpr-backorder-allocator' ),
+                                        'action_payload' => null,
+                                        'action_status'  => 'none',
+                                        'action_notice'  => '',
+                                );
+                        }
+
+                        $context = self::build_assistant_inventory_context( (int) $resolved['product_id'], (int) $resolved['variation_id'] );
+                        if ( empty( $context ) ) {
+                                return array(
+                                        'assistant_text' => __( 'Produktet ble funnet, men incoming/open-PO data er ikke tilgjengelig akkurat nå.', 'lpr-backorder-allocator' ),
+                                        'action_payload' => null,
+                                        'action_status'  => 'none',
+                                        'action_notice'  => '',
+                                );
+                        }
+
+                        $lines   = array();
+                        $sku     = trim( (string) ( $context['sku'] ?? '' ) );
+                        $header  = trim( (string) ( $context['product_name'] ?? '' ) );
+                        if ( '' !== $sku ) {
+                                $header .= ' (' . $sku . ')';
+                        }
+                        $lines[] = $header;
+
+                        $next_eta = trim( (string) ( $context['next_extra_eta'] ?? '' ) );
+                        $next_qty = max( 0, (int) ( $context['next_extra_qty'] ?? 0 ) );
+                        if ( '' !== $next_eta ) {
+                                $lines[] = sprintf( __( 'Neste ETA: %1$s (fri qty: %2$d).', 'lpr-backorder-allocator' ), $next_eta, $next_qty );
+                        } else {
+                                $lines[] = __( 'Neste ETA: ikke tilgjengelig i lagret incoming-data.', 'lpr-backorder-allocator' );
+                        }
+
+                        $lines[] = sprintf( __( 'Total incoming (åpne PO-er): %d.', 'lpr-backorder-allocator' ), max( 0, (int) ( $context['incoming_total'] ?? 0 ) ) );
+
+                        if ( empty( $context['open_po_details'] ) ) {
+                                $lines[] = __( 'Ingen åpne PO-rader funnet for dette produktet.', 'lpr-backorder-allocator' );
+                        } else {
+                                $with_free = array();
+                                foreach ( (array) $context['open_po_details'] as $row ) {
+                                        if ( (int) ( $row['qty_free'] ?? 0 ) > 0 ) {
+                                                $with_free[] = $row;
+                                        }
+                                }
+                                if ( empty( $with_free ) ) {
+                                        $lines[] = __( 'Det finnes åpne PO-er, men ingen med fri qty akkurat nå.', 'lpr-backorder-allocator' );
+                                } else {
+                                        $lines[] = sprintf( __( 'Åpne PO-er med fri qty: %d.', 'lpr-backorder-allocator' ), count( $with_free ) );
+                                }
+
+                                $lines[] = __( 'PO-detaljer:', 'lpr-backorder-allocator' );
+                                foreach ( array_slice( (array) $context['open_po_details'], 0, 6 ) as $row ) {
+                                        $lines[] = '- ' . self::format_assistant_po_breakdown_row( (array) $row );
+                                }
+                        }
+
+                        return array(
+                                'assistant_text' => implode( "\n", array_filter( $lines ) ),
+                                'action_payload' => null,
+                                'action_status'  => 'none',
+                                'action_notice'  => '',
+                        );
+                }
+
                 protected static function normalize_history( $raw_history ): array {
                         $history = array();
                         if ( ! is_array( $raw_history ) ) {
@@ -20055,7 +20468,14 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 );
                         }
 
-                        $parsed = lpr_allocator_generate_ai_assistant_reply( $latest_message, $context, $settings );
+                        if ( self::is_inventory_information_query( $latest_message ) ) {
+                                $parsed = self::build_inventory_information_reply( $latest_message );
+                                $parsed['latency_ms']   = 0.0;
+                                $parsed['error_code']   = '';
+                                $parsed['error_message'] = '';
+                        } else {
+                                $parsed = lpr_allocator_generate_ai_assistant_reply( $latest_message, $context, $settings );
+                        }
 
                         $user_turn = array(
                                 'role'    => 'user',
