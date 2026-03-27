@@ -18649,6 +18649,8 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 $before_after = isset( $bundle['before_after'] ) && is_array( $bundle['before_after'] ) ? array_values( $bundle['before_after'] ) : array();
                                 $result       = isset( $bundle['result'] ) && is_array( $bundle['result'] ) ? $bundle['result'] : array();
                                 $audit        = isset( $bundle['audit'] ) && is_array( $bundle['audit'] ) ? $bundle['audit'] : array();
+                                $requires_manual_review = ! empty( $bundle['requires_manual_review'] );
+                                $manual_review_reasons  = isset( $bundle['manual_review_reasons'] ) && is_array( $bundle['manual_review_reasons'] ) ? array_values( $bundle['manual_review_reasons'] ) : array();
 
                                 if ( '' === $id || '' === $action_type ) {
                                         continue;
@@ -18674,6 +18676,8 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         'updated_at'      => $updated_at,
                                         'result'          => $result,
                                         'audit'           => $audit,
+                                        'requires_manual_review' => $requires_manual_review,
+                                        'manual_review_reasons'  => array_map( 'sanitize_text_field', $manual_review_reasons ),
                                 );
                         }
 
@@ -18716,6 +18720,103 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 return absint( $matches[1] );
                         }
                         return 0;
+                }
+
+                protected static function line_change_allows_historical_date( array $line_change ): bool {
+                        if ( isset( $line_change['allow_historical'] ) ) {
+                                return (bool) rest_sanitize_boolean( $line_change['allow_historical'] );
+                        }
+
+                        if ( isset( $line_change['allow_past_date'] ) ) {
+                                return (bool) rest_sanitize_boolean( $line_change['allow_past_date'] );
+                        }
+
+                        return false;
+                }
+
+                protected static function validate_target_date( string $date_value, bool $allow_historical, string $context ): void {
+                        if ( ! lpr_allocator_is_valid_iso_date( $date_value ) ) {
+                                throw new \RuntimeException( sprintf( 'Invalid %s date format; expected YYYY-MM-DD.', $context ) );
+                        }
+
+                        if ( $allow_historical ) {
+                                return;
+                        }
+
+                        $today = function_exists( 'wp_date' ) ? wp_date( 'Y-m-d' ) : gmdate( 'Y-m-d' );
+                        if ( $date_value < $today ) {
+                                throw new \RuntimeException(
+                                        sprintf(
+                                                'Rejected %1$s date %2$s; historical dates require allow_historical=true.',
+                                                $context,
+                                                $date_value
+                                        )
+                                );
+                        }
+                }
+
+                protected static function execute_line_eta_update( array $line_change ): array {
+                        $line_identifier = sanitize_text_field( (string) ( $line_change['line_identifier'] ?? '' ) );
+                        $item_id         = self::parse_order_item_id( $line_identifier );
+                        if ( $item_id <= 0 ) {
+                                throw new \RuntimeException( 'Missing order item identifier.' );
+                        }
+
+                        $item = function_exists( 'wc_get_order_item' ) ? wc_get_order_item( $item_id ) : null;
+                        if ( ! ( $item instanceof \WC_Order_Item_Product ) ) {
+                                throw new \RuntimeException( sprintf( 'Order item %d was not found.', $item_id ) );
+                        }
+
+                        $eta              = sanitize_text_field( (string) ( $line_change['eta_date'] ?? '' ) );
+                        $allow_historical = self::line_change_allows_historical_date( $line_change );
+                        self::validate_target_date( $eta, $allow_historical, 'ETA' );
+
+                        $meta_key = defined( __NAMESPACE__ . '\ORDER_ITEM_META_LINE_ETA' ) ? ORDER_ITEM_META_LINE_ETA : '_lpr_line_eta';
+                        $before   = sanitize_text_field( (string) $item->get_meta( $meta_key, true ) );
+
+                        $item->update_meta_data( $meta_key, $eta );
+                        $item->save();
+
+                        return array(
+                                'line_identifier' => $line_identifier,
+                                'status'          => 'applied',
+                                'message'         => __( 'Applied successfully.', 'lpr-backorder-allocator' ),
+                                'before'          => $before,
+                                'after'           => $eta,
+                                'target_type'     => 'order_item',
+                                'target_id'       => $item_id,
+                        );
+                }
+
+                protected static function execute_requested_delivery_update( array $identifiers, array $line_change ): array {
+                        $line_identifier = sanitize_text_field( (string) ( $line_change['line_identifier'] ?? '' ) );
+                        $order_id        = self::parse_order_id( $identifiers, $line_identifier );
+                        if ( $order_id <= 0 ) {
+                                throw new \RuntimeException( 'Missing order identifier.' );
+                        }
+
+                        $order = function_exists( 'wc_get_order' ) ? wc_get_order( $order_id ) : null;
+                        if ( ! ( $order instanceof \WC_Order ) ) {
+                                throw new \RuntimeException( sprintf( 'Order %d was not found.', $order_id ) );
+                        }
+
+                        $delivery_date    = sanitize_text_field( (string) ( $line_change['delivery_date'] ?? '' ) );
+                        $allow_historical = self::line_change_allows_historical_date( $line_change );
+                        self::validate_target_date( $delivery_date, $allow_historical, 'requested delivery' );
+
+                        $meta_key = defined( __NAMESPACE__ . '\ORDER_META_REQUESTED_DELIVERY' ) ? ORDER_META_REQUESTED_DELIVERY : '_lpr_requested_delivery_date';
+                        $before   = sanitize_text_field( (string) get_post_meta( $order_id, $meta_key, true ) );
+                        update_post_meta( $order_id, $meta_key, $delivery_date );
+
+                        return array(
+                                'line_identifier' => $line_identifier,
+                                'status'          => 'applied',
+                                'message'         => __( 'Applied successfully.', 'lpr-backorder-allocator' ),
+                                'before'          => $before,
+                                'after'           => $delivery_date,
+                                'target_type'     => 'order',
+                                'target_id'       => $order_id,
+                        );
                 }
 
                 protected static function build_before_after_map( string $action_type, array $identifiers, array $line_changes ): array {
@@ -18767,6 +18868,17 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         $identifiers  = isset( $action_payload['identifiers'] ) && is_array( $action_payload['identifiers'] ) ? $action_payload['identifiers'] : array();
                         $line_changes = isset( $action_payload['line_changes'] ) && is_array( $action_payload['line_changes'] ) ? array_values( $action_payload['line_changes'] ) : array();
                         $now          = wp_date( 'c' );
+                        $reconciliation = get_user_meta( $user_id, self::reconciliation_meta_key(), true );
+                        $requires_manual_review = false;
+                        $manual_review_reasons  = array();
+                        if ( is_array( $reconciliation ) && (int) ( $reconciliation['ambiguous_count'] ?? 0 ) > 0 ) {
+                                $requires_manual_review = true;
+                                $manual_review_reasons[] = sprintf(
+                                        'Uploaded reconciliation has %d ambiguous row(s).',
+                                        (int) ( $reconciliation['ambiguous_count'] ?? 0 )
+                                );
+                        }
+
                         $bundle       = array(
                                 'id'              => function_exists( 'wp_generate_uuid4' ) ? wp_generate_uuid4() : uniqid( 'lpr_ai_bundle_', true ),
                                 'status'          => 'draft',
@@ -18780,6 +18892,8 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 'updated_at'      => $now,
                                 'result'          => array(),
                                 'audit'           => array(),
+                                'requires_manual_review' => $requires_manual_review,
+                                'manual_review_reasons'  => $manual_review_reasons,
                         );
 
                         $bundles   = self::get_draft_bundles( $user_id );
@@ -18815,30 +18929,9 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
 
                                 try {
                                         if ( 'update_eta_draft' === $action_type ) {
-                                                $item_id = self::parse_order_item_id( $line_identifier );
-                                                if ( $item_id <= 0 ) {
-                                                        throw new \RuntimeException( 'Missing order item identifier.' );
-                                                }
-                                                $item = function_exists( 'wc_get_order_item' ) ? wc_get_order_item( $item_id ) : null;
-                                                if ( ! ( $item instanceof \WC_Order_Item_Product ) ) {
-                                                        throw new \RuntimeException( 'Order item not found.' );
-                                                }
-                                                $eta = sanitize_text_field( (string) ( $line_change['eta_date'] ?? '' ) );
-                                                if ( ! lpr_allocator_is_valid_iso_date( $eta ) ) {
-                                                        throw new \RuntimeException( 'Invalid ETA date.' );
-                                                }
-                                                $item->update_meta_data( defined( __NAMESPACE__ . '\ORDER_ITEM_META_LINE_ETA' ) ? ORDER_ITEM_META_LINE_ETA : '_lpr_line_eta', $eta );
-                                                $item->save();
+                                                $line_result = self::execute_line_eta_update( $line_change );
                                         } elseif ( 'update_delivery_date_draft' === $action_type ) {
-                                                $order_id = self::parse_order_id( $identifiers, $line_identifier );
-                                                if ( $order_id <= 0 ) {
-                                                        throw new \RuntimeException( 'Missing order identifier.' );
-                                                }
-                                                $delivery_date = sanitize_text_field( (string) ( $line_change['delivery_date'] ?? '' ) );
-                                                if ( ! lpr_allocator_is_valid_iso_date( $delivery_date ) ) {
-                                                        throw new \RuntimeException( 'Invalid delivery date.' );
-                                                }
-                                                update_post_meta( $order_id, defined( __NAMESPACE__ . '\ORDER_META_REQUESTED_DELIVERY' ) ? ORDER_META_REQUESTED_DELIVERY : '_lpr_requested_delivery_date', $delivery_date );
+                                                $line_result = self::execute_requested_delivery_update( $identifiers, $line_change );
                                         } elseif ( 'create_po_draft' === $action_type ) {
                                                 if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_get_or_create_quick_po_for_user' ) ) {
                                                         throw new \RuntimeException( 'PO draft helper is unavailable.' );
@@ -18876,16 +18969,21 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                         );
                                                 }
                                                 update_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', $lines );
+                                                $line_result = array(
+                                                        'line_identifier' => $line_identifier,
+                                                        'status'          => 'applied',
+                                                        'message'         => __( 'Applied successfully.', 'lpr-backorder-allocator' ),
+                                                        'before'          => 'n/a',
+                                                        'after'           => sprintf( 'qty %d', $qty ),
+                                                        'target_type'     => 'po_line',
+                                                        'target_id'       => $product_id,
+                                                );
                                         } else {
                                                 throw new \RuntimeException( 'Unsupported action type.' );
                                         }
 
                                         $applied_count++;
-                                        $results[] = array(
-                                                'line_identifier' => $line_identifier,
-                                                'status'          => 'applied',
-                                                'message'         => __( 'Applied successfully.', 'lpr-backorder-allocator' ),
-                                        );
+                                        $results[] = $line_result;
                                 } catch ( \Throwable $t ) {
                                         $had_error = true;
                                         $message   = sanitize_text_field( $t->getMessage() );
@@ -18894,6 +18992,8 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                 'line_identifier' => $line_identifier,
                                                 'status'          => 'failed',
                                                 'message'         => $message ?: __( 'Unknown error.', 'lpr-backorder-allocator' ),
+                                                'before'          => '',
+                                                'after'           => '',
                                         );
                                 }
                         }
@@ -19647,11 +19747,27 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 $active_bundle['result']     = $result;
                                 $active_bundle['status']     = (int) ( $result['error_count'] ?? 0 ) > 0 ? 'failed' : 'applied';
                                 $active_bundle['updated_at'] = wp_date( 'c' );
+                                $line_audit = array();
+                                foreach ( (array) ( $result['line_results'] ?? array() ) as $line_result ) {
+                                        if ( ! is_array( $line_result ) ) {
+                                                continue;
+                                        }
+                                        $line_audit[] = array(
+                                                'line_identifier' => sanitize_text_field( (string) ( $line_result['line_identifier'] ?? '' ) ),
+                                                'target_type'     => sanitize_key( (string) ( $line_result['target_type'] ?? '' ) ),
+                                                'target_id'       => absint( $line_result['target_id'] ?? 0 ),
+                                                'status'          => sanitize_key( (string) ( $line_result['status'] ?? '' ) ),
+                                                'reason'          => sanitize_text_field( (string) ( $line_result['message'] ?? '' ) ),
+                                                'before'          => sanitize_text_field( (string) ( $line_result['before'] ?? '' ) ),
+                                                'after'           => sanitize_text_field( (string) ( $line_result['after'] ?? '' ) ),
+                                        );
+                                }
                                 $active_bundle['audit']      = array(
                                         'completed_at' => wp_date( 'c' ),
                                         'completed_by' => $user_id,
                                         'final_status' => $active_bundle['status'],
                                         'safety_mode'  => sanitize_key( (string) ( $active_bundle['safety_behavior'] ?? 'stop_on_error' ) ),
+                                        'line_audit'   => $line_audit,
                                 );
                                 self::archive_draft_bundle( $user_id, $active_bundle );
                         }
@@ -19823,6 +19939,12 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                                                                 <strong><?php echo esc_html__( 'Bundle', 'lpr-backorder-allocator' ); ?>:</strong> <code><?php echo esc_html( (string) ( $bundle['id'] ?? '' ) ); ?></code>
                                                                                                 <span class="description"><?php echo esc_html( (string) ( $bundle['created_at'] ?? '' ) ); ?></span>
                                                                                         </p>
+                                                                                        <?php if ( ! empty( $bundle['requires_manual_review'] ) ) : ?>
+                                                                                                <p class="description" style="margin:0 0 8px; color:#8a2424;">
+                                                                                                        <strong><?php echo esc_html__( 'Requires manual review.', 'lpr-backorder-allocator' ); ?></strong>
+                                                                                                        <?php echo esc_html( implode( ' ', array_map( 'sanitize_text_field', (array) ( $bundle['manual_review_reasons'] ?? array() ) ) ) ); ?>
+                                                                                                </p>
+                                                                                        <?php endif; ?>
                                                                                         <table class="widefat striped" style="margin:0 0 8px;">
                                                                                                 <thead>
                                                                                                         <tr>
@@ -20103,6 +20225,18 @@ function renderApplySummary(result) {
                                                                 meta.style.margin = '0 0 8px';
                                                                 meta.innerHTML = '<strong><?php echo esc_js( __( 'Bundle', 'lpr-backorder-allocator' ) ); ?>:</strong> <code>' + (bundle.id || '') + '</code>';
                                                                 card.appendChild(meta);
+
+                                                                if (bundle.requires_manual_review) {
+                                                                        var review = document.createElement('p');
+                                                                        review.className = 'description';
+                                                                        review.style.margin = '0 0 8px';
+                                                                        review.style.color = '#8a2424';
+                                                                        var reviewLabel = document.createElement('strong');
+                                                                        reviewLabel.textContent = '<?php echo esc_js( __( 'Requires manual review.', 'lpr-backorder-allocator' ) ); ?>';
+                                                                        review.appendChild(reviewLabel);
+                                                                        review.appendChild(document.createTextNode(' ' + ((bundle.manual_review_reasons || []).join(' '))));
+                                                                        card.appendChild(review);
+                                                                }
 
                                                                 var table = document.createElement('table');
                                                                 table.className = 'widefat striped';
