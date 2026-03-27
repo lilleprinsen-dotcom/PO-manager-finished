@@ -163,15 +163,24 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_build_ai_chat_payload' )
 
 if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_generate_ai_assistant_reply' ) ) {
         /**
+         * Build the AI assistant system instruction.
+         *
+         * @return string
+         */
+        function lpr_allocator_ai_assistant_system_instruction(): string {
+                return 'You are an internal assistant for PO allocator admins. Propose draft actions only and do not claim to make live updates. For actionable requests, respond with valid JSON only using this shape: {"conversational_text":"string","action":{"action_type":"create_po_draft|update_eta_draft|update_delivery_date_draft","target_entity":"string","identifiers":{"key":"value"},"line_changes":[{"line_identifier":"string","quantity":1,"eta_date":"YYYY-MM-DD","delivery_date":"YYYY-MM-DD","notes":"string"}],"confidence":0.0,"notes":"string"}}. For non-actionable requests, return {"conversational_text":"string","action":null}.';
+        }
+
+        /**
          * Generate an AI assistant reply from the latest user message and compact conversation context.
          *
-         * @param string $latest_user_message Latest admin/user message.
-         * @param array  $conversation_context Prior compact turns (role/message pairs).
+        * @param string $latest_user_message Latest admin/user message.
+        * @param array  $conversation_context Prior compact turns (role/message pairs).
          * @param array  $settings             Optional allocator settings.
-         * @return array{assistant_text:string,error_code:string,error_message:string,latency_ms:float}
+         * @return array{assistant_text:string,error_code:string,error_message:string,latency_ms:float,action_payload:array<string,mixed>|null,action_status:string,action_notice:string}
          */
         function lpr_allocator_generate_ai_assistant_reply( string $latest_user_message, array $conversation_context = array(), array $settings = array() ): array {
-                $system_instruction = 'You are an internal assistant for PO allocator admins. Propose draft actions only and do not claim to make live updates.';
+                $system_instruction = lpr_allocator_ai_assistant_system_instruction();
                 $model              = isset( $settings['ai_model'] ) ? sanitize_text_field( (string) $settings['ai_model'] ) : 'gpt-4o-mini';
                 $max_output_tokens  = isset( $settings['ai_max_output_tokens'] ) ? max( 64, (int) $settings['ai_max_output_tokens'] ) : 800;
 
@@ -249,11 +258,197 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_openai_chat_request' ) )
 
 if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_parse_openai_chat_response' ) ) {
         /**
+         * Return the supported machine action types for assistant payloads.
+         *
+         * @return array<int,string>
+         */
+        function lpr_allocator_supported_ai_action_types(): array {
+                return array(
+                        'create_po_draft',
+                        'update_eta_draft',
+                        'update_delivery_date_draft',
+                );
+        }
+
+        /**
+         * Determine whether a date string matches YYYY-MM-DD.
+         *
+         * @param string $value Date candidate.
+         * @return bool
+         */
+        function lpr_allocator_is_valid_iso_date( string $value ): bool {
+                $value = trim( $value );
+                if ( '' === $value ) {
+                        return false;
+                }
+
+                $date = \DateTime::createFromFormat( 'Y-m-d', $value );
+                return $date instanceof \DateTime && $date->format( 'Y-m-d' ) === $value;
+        }
+
+        /**
+         * Validate parsed action payload for strict execution safety.
+         *
+         * @param mixed $action_payload Parsed action payload.
+         * @return array{is_valid:bool,payload:array<string,mixed>|null,errors:array<int,string>}
+         */
+        function lpr_allocator_validate_ai_action_payload( $action_payload ): array {
+                $errors  = array();
+                $payload = is_array( $action_payload ) ? $action_payload : array();
+
+                if ( empty( $payload ) ) {
+                        return array(
+                                'is_valid' => false,
+                                'payload'  => null,
+                                'errors'   => array( 'Structured action payload is missing or invalid JSON.' ),
+                        );
+                }
+
+                $action_type = isset( $payload['action_type'] ) ? sanitize_key( (string) $payload['action_type'] ) : '';
+                if ( ! in_array( $action_type, lpr_allocator_supported_ai_action_types(), true ) ) {
+                        $errors[] = 'Unsupported action type.';
+                }
+
+                $target_entity = isset( $payload['target_entity'] ) ? sanitize_text_field( (string) $payload['target_entity'] ) : '';
+                if ( '' === $target_entity ) {
+                        $errors[] = 'Target entity is required.';
+                }
+
+                $identifiers = isset( $payload['identifiers'] ) && is_array( $payload['identifiers'] ) ? $payload['identifiers'] : array();
+                if ( empty( $identifiers ) ) {
+                        $errors[] = 'At least one identifier is required.';
+                } else {
+                        foreach ( $identifiers as $identifier_key => $identifier_value ) {
+                                $identifier_key   = sanitize_key( (string) $identifier_key );
+                                $identifier_value = is_scalar( $identifier_value ) ? trim( (string) $identifier_value ) : '';
+                                if ( '' === $identifier_key || '' === $identifier_value ) {
+                                        $errors[] = 'Identifiers must contain non-empty scalar values.';
+                                        break;
+                                }
+                        }
+                }
+
+                $line_changes = isset( $payload['line_changes'] ) && is_array( $payload['line_changes'] ) ? $payload['line_changes'] : array();
+                if ( ! array_key_exists( 'confidence', $payload ) || ! is_numeric( $payload['confidence'] ) ) {
+                        $errors[] = 'Confidence is required and must be numeric.';
+                } else {
+                        $confidence = (float) $payload['confidence'];
+                        if ( $confidence < 0 || $confidence > 1 ) {
+                                $errors[] = 'Confidence must be between 0.0 and 1.0.';
+                        }
+                }
+
+                if ( 'create_po_draft' === $action_type && empty( $line_changes ) ) {
+                        $errors[] = 'create_po_draft requires at least one line change.';
+                }
+
+                foreach ( $line_changes as $line_change ) {
+                        if ( ! is_array( $line_change ) ) {
+                                $errors[] = 'Each line change must be an object.';
+                                continue;
+                        }
+
+                        $line_identifier = isset( $line_change['line_identifier'] ) ? trim( (string) $line_change['line_identifier'] ) : '';
+                        if ( '' === $line_identifier ) {
+                                $errors[] = 'Each line change requires line_identifier.';
+                        }
+
+                        if ( array_key_exists( 'quantity', $line_change ) ) {
+                                $quantity = (float) $line_change['quantity'];
+                                if ( $quantity <= 0 ) {
+                                        $errors[] = 'Line change quantities must be positive.';
+                                }
+                        }
+
+                        if ( 'update_eta_draft' === $action_type ) {
+                                $eta_date = isset( $line_change['eta_date'] ) ? (string) $line_change['eta_date'] : '';
+                                if ( ! lpr_allocator_is_valid_iso_date( $eta_date ) ) {
+                                        $errors[] = 'ETA draft updates require valid eta_date values in YYYY-MM-DD format.';
+                                }
+                        }
+
+                        if ( 'update_delivery_date_draft' === $action_type ) {
+                                $delivery_date = isset( $line_change['delivery_date'] ) ? (string) $line_change['delivery_date'] : '';
+                                if ( ! lpr_allocator_is_valid_iso_date( $delivery_date ) ) {
+                                        $errors[] = 'Delivery-date draft updates require valid delivery_date values in YYYY-MM-DD format.';
+                                }
+                        }
+                }
+
+                if ( in_array( $action_type, array( 'update_eta_draft', 'update_delivery_date_draft' ), true ) ) {
+                        $po_identifier = isset( $identifiers['po_id'] ) ? trim( (string) $identifiers['po_id'] ) : '';
+                        if ( '' === $po_identifier ) {
+                                $errors[] = 'Update draft actions require identifiers.po_id.';
+                        }
+                }
+
+                return array(
+                        'is_valid' => empty( $errors ),
+                        'payload'  => $payload,
+                        'errors'   => $errors,
+                );
+        }
+
+        /**
+         * Extract conversational text and structured action payload from assistant content.
+         *
+         * @param string $assistant_text Assistant text from OpenAI.
+         * @return array{assistant_text:string,action_payload:array<string,mixed>|null,action_status:string,action_notice:string}
+         */
+        function lpr_allocator_extract_ai_action_payload( string $assistant_text ): array {
+                $text         = trim( $assistant_text );
+                $action       = null;
+                $notice       = '';
+                $action_state = 'none';
+                $decoded      = json_decode( $text, true );
+
+                if ( ! is_array( $decoded ) && preg_match( '/```json\s*(\{.*\})\s*```/is', $text, $matches ) ) {
+                        $decoded = json_decode( (string) $matches[1], true );
+                }
+
+                if ( is_array( $decoded ) ) {
+                        $assistant_candidate = isset( $decoded['conversational_text'] ) ? trim( (string) $decoded['conversational_text'] ) : '';
+                        if ( '' !== $assistant_candidate ) {
+                                $text = $assistant_candidate;
+                        }
+                        if ( array_key_exists( 'action', $decoded ) && is_array( $decoded['action'] ) ) {
+                                $action = $decoded['action'];
+                        } elseif ( array_key_exists( 'action', $decoded ) && null === $decoded['action'] ) {
+                                $action_state = 'none';
+                        } elseif ( isset( $decoded['action_type'] ) ) {
+                                $action = $decoded;
+                        }
+                } elseif ( false !== strpos( $text, '{' ) && false !== strpos( $text, '}' ) ) {
+                        $notice       = __( 'Assistant response included a structured action block that could not be safely parsed and is advisory only.', 'lpr-backorder-allocator' );
+                        $action_state = 'advisory_only';
+                }
+
+                if ( is_array( $action ) ) {
+                        $validation = lpr_allocator_validate_ai_action_payload( $action );
+                        if ( ! empty( $validation['is_valid'] ) ) {
+                                $action       = $validation['payload'];
+                                $action_state = 'executable';
+                        } else {
+                                $action       = $validation['payload'];
+                                $action_state = 'advisory_only';
+                                $notice       = __( 'Structured action was not safely executable and has been marked advisory only.', 'lpr-backorder-allocator' ) . ' ' . implode( ' ', array_map( 'sanitize_text_field', (array) $validation['errors'] ) );
+                        }
+                }
+
+                return array(
+                        'assistant_text' => $text,
+                        'action_payload' => $action,
+                        'action_status'  => $action_state,
+                        'action_notice'  => $notice,
+                );
+        }
+
+        /**
          * Parse and normalize OpenAI chat responses.
          *
          * @param mixed $response   wp_remote_post result.
          * @param float $latency_ms Measured latency in milliseconds.
-         * @return array{assistant_text:string,error_code:string,error_message:string,latency_ms:float}
+         * @return array{assistant_text:string,error_code:string,error_message:string,latency_ms:float,action_payload:array<string,mixed>|null,action_status:string,action_notice:string}
          */
         function lpr_allocator_parse_openai_chat_response( $response, float $latency_ms = 0.0 ): array {
                 $normalized = array(
@@ -261,6 +456,9 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_parse_openai_chat_respon
                         'error_code'     => '',
                         'error_message'  => '',
                         'latency_ms'     => round( $latency_ms, 2 ),
+                        'action_payload' => null,
+                        'action_status'  => 'none',
+                        'action_notice'  => '',
                 );
 
                 if ( is_wp_error( $response ) ) {
@@ -307,7 +505,14 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_parse_openai_chat_respon
                 if ( '' === $normalized['assistant_text'] ) {
                         $normalized['error_code']    = 'empty_response';
                         $normalized['error_message'] = 'OpenAI returned an empty assistant response.';
+                        return $normalized;
                 }
+
+                $action_parsed                 = lpr_allocator_extract_ai_action_payload( $normalized['assistant_text'] );
+                $normalized['assistant_text']  = (string) $action_parsed['assistant_text'];
+                $normalized['action_payload']  = $action_parsed['action_payload'];
+                $normalized['action_status']   = (string) $action_parsed['action_status'];
+                $normalized['action_notice']   = (string) $action_parsed['action_notice'];
 
                 return $normalized;
         }
@@ -18268,6 +18473,12 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 $role    = isset( $item['role'] ) ? sanitize_key( (string) $item['role'] ) : '';
                                 $message = isset( $item['message'] ) ? sanitize_textarea_field( (string) $item['message'] ) : '';
                                 $time    = isset( $item['time'] ) ? sanitize_text_field( (string) $item['time'] ) : '';
+                                $action_status = isset( $item['action_status'] ) ? sanitize_key( (string) $item['action_status'] ) : 'none';
+                                $action_notice = isset( $item['action_notice'] ) ? sanitize_text_field( (string) $item['action_notice'] ) : '';
+                                $action_payload = null;
+                                if ( isset( $item['action_payload'] ) && is_array( $item['action_payload'] ) ) {
+                                        $action_payload = $item['action_payload'];
+                                }
 
                                 if ( '' === $role || '' === $message ) {
                                         continue;
@@ -18277,6 +18488,9 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         'role'    => $role,
                                         'message' => $message,
                                         'time'    => $time,
+                                        'action_payload' => $action_payload,
+                                        'action_status'  => in_array( $action_status, array( 'none', 'executable', 'advisory_only' ), true ) ? $action_status : 'none',
+                                        'action_notice'  => $action_notice,
                                 );
                         }
 
@@ -18469,9 +18683,12 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         }
 
                         $assistant_turn = array(
-                                'role'    => 'assistant',
-                                'message' => (string) $parsed['assistant_text'],
-                                'time'    => wp_date( 'Y-m-d H:i:s' ),
+                                'role'          => 'assistant',
+                                'message'       => (string) $parsed['assistant_text'],
+                                'time'          => wp_date( 'Y-m-d H:i:s' ),
+                                'action_payload'=> is_array( $parsed['action_payload'] ?? null ) ? $parsed['action_payload'] : null,
+                                'action_status' => sanitize_key( (string) ( $parsed['action_status'] ?? 'none' ) ),
+                                'action_notice' => sanitize_text_field( (string) ( $parsed['action_notice'] ?? '' ) ),
                         );
 
                         $history[] = $assistant_turn;
@@ -18549,7 +18766,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                         'time'    => wp_date( 'Y-m-d H:i:s' ),
                                                 );
 
-                                                $system_instruction = 'You are an internal assistant for PO allocator admins. Propose draft actions only and do not claim to make live updates.';
+                                                $system_instruction = lpr_allocator_ai_assistant_system_instruction();
                                                 $payload            = lpr_allocator_build_ai_chat_payload( $draft, $system_instruction, $settings );
                                                 $result             = lpr_allocator_openai_chat_request( $payload, $settings );
                                                 $parsed             = lpr_allocator_parse_openai_chat_response( $result['response'], (float) ( $result['latency_ms'] ?? 0.0 ) );
@@ -18558,9 +18775,12 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                         $error = (string) ( $parsed['error_message'] ?: __( 'Assistant request failed. Please try again.', 'lpr-backorder-allocator' ) );
                                                 } else {
                                                         $history[] = array(
-                                                                'role'    => 'assistant',
-                                                                'message' => (string) $parsed['assistant_text'],
-                                                                'time'    => wp_date( 'Y-m-d H:i:s' ),
+                                                                'role'          => 'assistant',
+                                                                'message'       => (string) $parsed['assistant_text'],
+                                                                'time'          => wp_date( 'Y-m-d H:i:s' ),
+                                                                'action_payload'=> is_array( $parsed['action_payload'] ?? null ) ? $parsed['action_payload'] : null,
+                                                                'action_status' => sanitize_key( (string) ( $parsed['action_status'] ?? 'none' ) ),
+                                                                'action_notice' => sanitize_text_field( (string) ( $parsed['action_notice'] ?? '' ) ),
                                                         );
                                                         $notice = __( 'Assistant response received.', 'lpr-backorder-allocator' );
                                                         $draft  = '';
@@ -18619,6 +18839,12 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                                                         <?php endif; ?>
                                                                                 </div>
                                                                                 <div class="lpr-ai-message-body" style="white-space:pre-wrap;"><?php echo esc_html( $message['message'] ); ?></div>
+                                                                                <?php if ( 'assistant' === $message['role'] && 'advisory_only' === ( $message['action_status'] ?? 'none' ) ) : ?>
+                                                                                        <p class="description" style="margin:8px 0 0; color:#8a2424;"><strong><?php echo esc_html__( 'Structured action could not be safely parsed; advisory only.', 'lpr-backorder-allocator' ); ?></strong></p>
+                                                                                <?php endif; ?>
+                                                                                <?php if ( 'assistant' === $message['role'] && ! empty( $message['action_notice'] ) ) : ?>
+                                                                                        <p class="description" style="margin:4px 0 0; color:#8a2424;"><?php echo esc_html( $message['action_notice'] ); ?></p>
+                                                                                <?php endif; ?>
                                                                         </div>
                                                                 <?php endforeach; ?>
                                                         <?php endif; ?>
@@ -18706,6 +18932,24 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
 
                                                 wrapper.appendChild(head);
                                                 wrapper.appendChild(body);
+
+                                                if (turn.role === 'assistant' && turn.action_status === 'advisory_only') {
+                                                        var advisory = document.createElement('p');
+                                                        advisory.className = 'description';
+                                                        advisory.style.margin = '8px 0 0';
+                                                        advisory.style.color = '#8a2424';
+                                                        advisory.innerHTML = '<strong><?php echo esc_js( __( 'Structured action could not be safely parsed; advisory only.', 'lpr-backorder-allocator' ) ); ?></strong>';
+                                                        wrapper.appendChild(advisory);
+                                                }
+
+                                                if (turn.role === 'assistant' && turn.action_notice) {
+                                                        var advisoryReason = document.createElement('p');
+                                                        advisoryReason.className = 'description';
+                                                        advisoryReason.style.margin = '4px 0 0';
+                                                        advisoryReason.style.color = '#8a2424';
+                                                        advisoryReason.textContent = turn.action_notice;
+                                                        wrapper.appendChild(advisoryReason);
+                                                }
 
                                                 return wrapper;
                                         }
