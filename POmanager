@@ -4017,6 +4017,63 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_date_to_timestamp' ) ) {
         }
 }
 
+if ( ! function_exists( __NAMESPACE__ . '\parse_admin_dt' ) ) {
+        /**
+         * Parse admin datetime-local values using the WordPress site timezone.
+         * Supports existing saved values that may use either "T" or a space separator.
+         *
+         * @param string $value
+         * @return int Unix timestamp, or 0 when parsing fails.
+         */
+        function parse_admin_dt( string $value ): int {
+                $value = trim( $value );
+                if ( '' === $value ) {
+                        return 0;
+                }
+
+                $tz      = function_exists( 'wp_timezone' ) ? wp_timezone() : new \DateTimeZone( 'UTC' );
+                $formats = array(
+                        'Y-m-d\TH:i:s',
+                        'Y-m-d\TH:i',
+                        'Y-m-d H:i:s',
+                        'Y-m-d H:i',
+                );
+
+                foreach ( $formats as $format ) {
+                        $dt = \DateTimeImmutable::createFromFormat( $format, $value, $tz );
+                        if ( $dt && $dt->format( $format ) === $value ) {
+                                return (int) $dt->getTimestamp();
+                        }
+                }
+
+                return 0;
+        }
+}
+
+if ( ! function_exists( __NAMESPACE__ . '\campaign_active_now' ) ) {
+        /**
+         * Check whether a campaign is active right now using site-timezone parsing.
+         *
+         * @param string $start_raw
+         * @param string $end_raw
+         * @return bool
+         */
+        function campaign_active_now( string $start_raw, string $end_raw ): bool {
+                $now_ts   = current_time( 'timestamp' );
+                $start_ts = parse_admin_dt( $start_raw );
+                $end_ts   = parse_admin_dt( $end_raw );
+
+                if ( $start_ts > 0 && $now_ts < $start_ts ) {
+                        return false;
+                }
+                if ( $end_ts > 0 && $now_ts > $end_ts ) {
+                        return false;
+                }
+
+                return true;
+        }
+}
+
 if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_compare_dates' ) ) {
         /**
          * Compare two date strings chronologically.
