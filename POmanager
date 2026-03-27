@@ -18490,6 +18490,18 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         return 'lpr_allocator_ai_assistant_last_resolved_product';
                 }
 
+                protected static function po_context_meta_key(): string {
+                        return 'lpr_allocator_ai_assistant_last_resolved_po';
+                }
+
+                protected static function order_context_meta_key(): string {
+                        return 'lpr_allocator_ai_assistant_last_resolved_order';
+                }
+
+                protected static function global_context_meta_key(): string {
+                        return 'lpr_allocator_ai_assistant_last_resolved_global';
+                }
+
                 protected static function request_meta_key(): string {
                         return 'lpr_allocator_ai_assistant_request_meta';
                 }
@@ -18620,6 +18632,8 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 'neste eta', 'første eta', 'hvilken po kommer først', 'kommer først',
                                 'ledig', 'fri qty', 'free qty', 'qty free', 'allokert', 'allocated',
                                 'total incoming', 'hvilke po', 'hvilke åpne', 'har vi incoming', 'incoming på',
+                                'backorder', 'restordre', 'global', 'totalt', 'summary', 'oppsummering',
+                                'ordre', 'order', 'po ', 'po#', 'allocated to po', 'hvilke ordre',
                         );
                         foreach ( $inventory_markers as $needle ) {
                                 if ( false !== strpos( $text, $needle ) ) {
@@ -18639,20 +18653,39 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         if ( preg_match( '/\b(denne|this|samme|same|den)\b/ui', $text ) && preg_match( '/\b(eta|incoming|p[åa]fyll|ledig|fri|po)\b/ui', $text ) ) {
                                 return true;
                         }
+                        if ( preg_match( '/\b(order|ordre)\b/ui', $text ) && preg_match( '/\b(po|alloc|allok)\b/ui', $text ) ) {
+                                return true;
+                        }
 
                         return false;
                 }
 
                 protected static function inventory_query_intent( string $message ): array {
                         $text = function_exists( 'mb_strtolower' ) ? mb_strtolower( trim( $message ) ) : strtolower( trim( $message ) );
+                        $asks_po_scope = (bool) preg_match( '/\b(po|purchase order|innkj[øo]psordre)\b/ui', $text );
+                        $asks_order_scope = (bool) preg_match( '/\b(order|ordre)\b/ui', $text );
+                        $asks_global_scope = (bool) preg_match( '/\b(global|totalt|summary|oppsummering|alle)\b/ui', $text ) || (bool) preg_match( '/\btotal\b/ui', $text );
+                        $scope = 'product';
+                        if ( $asks_global_scope && ! $asks_po_scope && ! $asks_order_scope && ! preg_match( '/\b(produkt|product|sku|variant)\b/ui', $text ) ) {
+                                $scope = 'global';
+                        } elseif ( $asks_order_scope && ! preg_match( '/\b(produkt|product|sku|variant)\b/ui', $text ) ) {
+                                $scope = 'order';
+                        } elseif ( $asks_po_scope && ! preg_match( '/\b(produkt|product|sku|variant)\b/ui', $text ) ) {
+                                $scope = 'po';
+                        }
                         return array(
+                                'scope'             => $scope,
                                 'asks_eta'          => (bool) preg_match( '/\b(n[åa]r|when|neste|first|f[øo]rste)\b/ui', $text ) || false !== strpos( $text, 'eta' ) || false !== strpos( $text, 'levering' ) || false !== strpos( $text, 'påfyll' ),
-                                'asks_free_qty'     => (bool) preg_match( '/\b(fri|ledig|free|available|allokert|allocated)\b/ui', $text ),
+                                'asks_free_qty'     => (bool) preg_match( '/\b(fri|ledig|free|available)\b/ui', $text ),
+                                'asks_allocated_qty'=> (bool) preg_match( '/\b(allokert|allocated)\b/ui', $text ),
                                 'asks_incoming'     => false !== strpos( $text, 'incoming' ) || false !== strpos( $text, 'innkjøpsordre' ) || false !== strpos( $text, 'purchase order' ) || false !== strpos( $text, 'open po' ) || false !== strpos( $text, 'åpne po' ),
                                 'asks_po_list'      => (bool) preg_match( '/\b(hvilke|which|list|detalj|breakdown)\b/ui', $text ) || false !== strpos( $text, 'åpne po' ),
                                 'asks_first_po'     => (bool) preg_match( '/\b(f[øo]rste|kommer f[øo]rst|first po|which po)\b/ui', $text ),
                                 'asks_total_qty'    => (bool) preg_match( '/\b(total|sum)\b/ui', $text ),
                                 'asks_yes_no'       => (bool) preg_match( '/\b(har vi|do we have|is there|er det)\b/ui', $text ),
+                                'asks_received_qty' => (bool) preg_match( '/\b(mottatt|received)\b/ui', $text ),
+                                'asks_ordered_qty'  => (bool) preg_match( '/\b(bestilt|ordered)\b/ui', $text ),
+                                'asks_orders'       => (bool) preg_match( '/\b(hvilke ordre|which orders|ordrer|orders)\b/ui', $text ),
                         );
                 }
 
@@ -19045,149 +19078,381 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                  * Deterministic informational reply for incoming/open-PO questions.
                  */
                 protected static function build_inventory_information_reply( string $message ): array {
-                        $intent   = self::inventory_query_intent( $message );
-                        $remembered = self::get_remembered_product_context( get_current_user_id() );
-                        $resolved = self::resolve_assistant_product_reference( $message, $remembered );
+                        return self::build_allocator_information_reply( $message, self::inventory_query_intent( $message ) );
+                }
+
+                protected static function build_allocator_information_reply( string $message, array $intent ): array {
+                        $user_id = get_current_user_id();
+                        $scope   = sanitize_key( (string) ( $intent['scope'] ?? 'product' ) );
+
+                        if ( 'global' === $scope ) {
+                                $ctx = self::build_global_allocator_context();
+                                self::remember_global_context( $user_id, $ctx );
+                                return self::format_information_response( self::format_global_allocator_reply( $ctx, $intent ) );
+                        }
+
+                        if ( 'po' === $scope ) {
+                                $po = self::resolve_assistant_po_reference( $message, self::get_remembered_po_context( $user_id ) );
+                                if ( 'context_missing' === ( $po['status'] ?? '' ) ) {
+                                        return self::format_information_response( __( 'Jeg mangler PO-kontekst for «denne/samme». Oppgi PO-nummer eller PO-ID.', 'lpr-backorder-allocator' ) );
+                                }
+                                if ( 'not_found' === ( $po['status'] ?? '' ) ) {
+                                        return self::format_information_response( __( 'Fant ingen PO som matcher spørsmålet.', 'lpr-backorder-allocator' ) );
+                                }
+                                $ctx = self::build_po_allocator_context( (int) ( $po['po_id'] ?? 0 ) );
+                                self::remember_po_context( $user_id, $ctx );
+                                return self::format_information_response( self::format_po_allocator_reply( $ctx, $intent ) );
+                        }
+
+                        if ( 'order' === $scope ) {
+                                $order = self::resolve_assistant_order_reference( $message, self::get_remembered_order_context( $user_id ) );
+                                if ( 'context_missing' === ( $order['status'] ?? '' ) ) {
+                                        return self::format_information_response( __( 'Jeg mangler ordrekontekst for «denne/samme». Oppgi ordrenummer eller ordre-ID.', 'lpr-backorder-allocator' ) );
+                                }
+                                if ( 'not_found' === ( $order['status'] ?? '' ) ) {
+                                        return self::format_information_response( __( 'Fant ingen ordre som matcher spørsmålet.', 'lpr-backorder-allocator' ) );
+                                }
+                                $ctx = self::build_order_allocator_context( (int) ( $order['order_id'] ?? 0 ) );
+                                self::remember_order_context( $user_id, $ctx );
+                                return self::format_information_response( self::format_order_allocator_reply( $ctx, $intent ) );
+                        }
+
+                        $resolved = self::resolve_assistant_product_reference( $message, self::get_remembered_product_context( $user_id ) );
                         if ( 'ambiguous' === ( $resolved['status'] ?? '' ) ) {
                                 $labels = array();
                                 foreach ( array_slice( (array) ( $resolved['matches'] ?? array() ), 0, 4 ) as $match ) {
                                         $labels[] = (string) ( $match['label'] ?? ( '#' . (int) ( $match['id'] ?? 0 ) ) );
                                 }
-                                return array(
-                                        'assistant_text' => sprintf(
-                                                /* translators: %s: candidate products */
-                                                __( 'Jeg fant flere mulige produkter: %s. Hvilket produkt mener du?', 'lpr-backorder-allocator' ),
-                                                implode( '; ', array_filter( $labels ) )
-                                        ),
-                                        'action_payload' => null,
-                                        'action_status'  => 'none',
-                                        'action_notice'  => '',
-                                );
+                                return self::format_information_response( sprintf( __( 'Jeg fant flere produkter: %s. Hvilket mener du?', 'lpr-backorder-allocator' ), implode( '; ', $labels ) ) );
                         }
-
                         if ( 'context_missing' === ( $resolved['status'] ?? '' ) ) {
-                                return array(
-                                        'assistant_text' => __( 'Jeg mangler produktkontekst for «denne/samme». Oppgi produktnavn, SKU eller produkt-ID først.', 'lpr-backorder-allocator' ),
-                                        'action_payload' => null,
-                                        'action_status'  => 'none',
-                                        'action_notice'  => '',
-                                );
+                                return self::format_information_response( __( 'Jeg mangler produktkontekst for «denne/samme». Oppgi produktnavn, SKU eller ID først.', 'lpr-backorder-allocator' ) );
                         }
-
                         if ( 'resolved' !== ( $resolved['status'] ?? '' ) ) {
-                                return array(
-                                        'assistant_text' => __( 'Jeg fant ikke produktreferansen i spørsmålet. Oppgi gjerne produkt-ID, SKU eller eksakt produktnavn.', 'lpr-backorder-allocator' ),
-                                        'action_payload' => null,
-                                        'action_status'  => 'none',
-                                        'action_notice'  => '',
-                                );
+                                return self::format_information_response( __( 'Fant ikke produktreferansen. Oppgi produktnavn, SKU eller ID.', 'lpr-backorder-allocator' ) );
                         }
-
-                        $context = self::build_assistant_inventory_context( (int) $resolved['product_id'], (int) $resolved['variation_id'] );
-                        if ( empty( $context ) ) {
-                                return array(
-                                        'assistant_text' => __( 'Produktet ble funnet, men incoming/open-PO data er ikke tilgjengelig akkurat nå.', 'lpr-backorder-allocator' ),
-                                        'action_payload' => null,
-                                        'action_status'  => 'none',
-                                        'action_notice'  => '',
-                                );
-                        }
-
-                        $lines   = array();
-                        $sku     = trim( (string) ( $context['sku'] ?? '' ) );
-                        $header  = trim( (string) ( $context['product_name'] ?? '' ) );
-                        if ( '' !== $sku ) {
-                                $header .= ' (' . $sku . ')';
-                        }
-                        $lines[] = $header;
-
-                        $incoming_total = max( 0, (int) ( $context['incoming_total'] ?? 0 ) );
-                        $free_total     = max( 0, (int) ( $context['total_free_qty_across_open_pos'] ?? 0 ) );
-                        $earliest_eta   = trim( (string) ( $context['earliest_eta'] ?? '' ) );
-                        $earliest_eta_free = trim( (string) ( $context['earliest_eta_with_free_qty'] ?? '' ) );
-                        $po_count       = max( 0, (int) ( $context['po_count'] ?? 0 ) );
-                        $po_free_count  = max( 0, (int) ( $context['po_count_with_free_qty'] ?? 0 ) );
-
-                        if ( ! empty( $intent['asks_yes_no'] ) ) {
-                                if ( $incoming_total > 0 || $po_count > 0 ) {
-                                        $lines[] = __( 'Ja, produktet har incoming på åpne PO-er.', 'lpr-backorder-allocator' );
-                                } else {
-                                        $lines[] = __( 'Nei, jeg ser ingen incoming/open-PO-data for produktet.', 'lpr-backorder-allocator' );
-                                }
-                        }
-
-                        if ( ! empty( $intent['asks_free_qty'] ) ) {
-                                $lines[] = sprintf( __( 'Total fri qty på åpne PO-er: %d.', 'lpr-backorder-allocator' ), $free_total );
-                                if ( '' !== $earliest_eta_free ) {
-                                        $lines[] = sprintf( __( 'Tidligste ETA med fri qty: %s.', 'lpr-backorder-allocator' ), $earliest_eta_free );
-                                } elseif ( $po_count > 0 ) {
-                                        $lines[] = __( 'Åpne PO-er finnes, men ingen har fri qty akkurat nå.', 'lpr-backorder-allocator' );
-                                }
-                        } elseif ( ! empty( $intent['asks_eta'] ) || ! empty( $intent['asks_first_po'] ) ) {
-                                if ( '' !== $earliest_eta_free ) {
-                                        $lines[] = sprintf( __( 'Neste ETA med fri qty: %s.', 'lpr-backorder-allocator' ), $earliest_eta_free );
-                                } elseif ( '' !== $earliest_eta ) {
-                                        $lines[] = sprintf( __( 'Tidligste registrerte ETA: %s.', 'lpr-backorder-allocator' ), $earliest_eta );
-                                } else {
-                                        $lines[] = __( 'Ingen ETA er registrert på åpne PO-rader.', 'lpr-backorder-allocator' );
-                                }
-                        } elseif ( ! empty( $intent['asks_total_qty'] ) || ! empty( $intent['asks_incoming'] ) ) {
-                                $lines[] = sprintf( __( 'Total incoming ordered qty (åpne PO-er): %d.', 'lpr-backorder-allocator' ), $incoming_total );
-                                $lines[] = sprintf( __( 'Total fri qty på åpne PO-er: %d.', 'lpr-backorder-allocator' ), $free_total );
-                        } else {
-                                $lines[] = sprintf( __( 'Total incoming ordered qty (åpne PO-er): %d.', 'lpr-backorder-allocator' ), $incoming_total );
-                                $lines[] = sprintf( __( 'Total fri qty på åpne PO-er: %d.', 'lpr-backorder-allocator' ), $free_total );
-                        }
-
-                        if ( empty( $context['open_po_details'] ) ) {
-                                $lines[] = __( 'Ingen åpne PO-rader funnet for dette produktet.', 'lpr-backorder-allocator' );
-                        } else {
-                                if ( 0 === $po_free_count ) {
-                                        $lines[] = __( 'Det finnes åpne PO-er, men fri qty er 0 på alle nå.', 'lpr-backorder-allocator' );
-                                } else {
-                                        $lines[] = sprintf( __( 'Åpne PO-er: %1$d totalt, %2$d med fri qty.', 'lpr-backorder-allocator' ), $po_count, $po_free_count );
-                                }
-
-                                $details = (array) $context['open_po_details'];
-                                if ( ! empty( $intent['asks_free_qty'] ) ) {
-                                        usort(
-                                                $details,
-                                                static function ( $a, $b ) {
-                                                        $a_free = (int) ( $a['qty_free'] ?? 0 );
-                                                        $b_free = (int) ( $b['qty_free'] ?? 0 );
-                                                        if ( $a_free !== $b_free ) {
-                                                                return $b_free <=> $a_free;
-                                                        }
-                                                        return lpr_allocator_compare_dates( (string) ( $a['eta'] ?? '' ), (string) ( $b['eta'] ?? '' ) );
-                                                }
-                                        );
-                                }
-
-                                $lines[] = __( 'PO-detaljer (første 5):', 'lpr-backorder-allocator' );
-                                foreach ( array_slice( $details, 0, 5 ) as $row ) {
-                                        $lines[] = '- ' . self::format_assistant_po_breakdown_row( (array) $row );
-                                }
-                                if ( count( $details ) > 5 ) {
-                                        $lines[] = sprintf( __( 'Viser 5 av %d åpne PO-rader.', 'lpr-backorder-allocator' ), count( $details ) );
-                                }
-                        }
-
-                        if ( ! empty( $context['used_parent_fallback'] ) ) {
-                                $lines[] = __( 'Merk: incoming-data kommer fra parent-produktet (variantnivå manglet egne data).', 'lpr-backorder-allocator' );
-                        }
-
-                        return array(
-                                'assistant_text' => implode( "\n", array_filter( $lines ) ),
-                                'action_payload' => null,
-                                'action_status'  => 'none',
-                                'action_notice'  => '',
-                                'resolved_product' => array(
+                        $ctx = self::build_assistant_inventory_context( (int) ( $resolved['product_id'] ?? 0 ), (int) ( $resolved['variation_id'] ?? 0 ) );
+                        self::remember_product_context(
+                                $user_id,
+                                array(
                                         'product_id'   => (int) ( $resolved['product_id'] ?? 0 ),
                                         'variation_id' => (int) ( $resolved['variation_id'] ?? 0 ),
                                         'target_id'    => (int) ( $resolved['target_id'] ?? 0 ),
-                                        'product_name' => sanitize_text_field( (string) ( $context['product_name'] ?? '' ) ),
-                                        'sku'          => sanitize_text_field( (string) ( $context['sku'] ?? '' ) ),
-                                ),
+                                        'product_name' => sanitize_text_field( (string) ( $ctx['product_name'] ?? '' ) ),
+                                        'sku'          => sanitize_text_field( (string) ( $ctx['sku'] ?? '' ) ),
+                                )
+                        );
+                        return self::format_information_response( self::format_product_allocator_reply( $ctx, $intent ) );
+                }
+
+                protected static function format_information_response( string $text ): array {
+                        return array(
+                                'assistant_text' => trim( $text ),
+                                'action_payload' => null,
+                                'action_status'  => 'none',
+                                'action_notice'  => '',
+                        );
+                }
+
+                protected static function resolve_assistant_po_reference( string $message, array $remembered = array() ): array {
+                        $out  = array( 'status' => 'not_found', 'po_id' => 0 );
+                        $text = trim( $message );
+                        if ( preg_match( '/\bpo\s*#?\s*(\d{1,9})\b/ui', $text, $m ) || preg_match( '/\binnkj[øo]psordre\s*#?\s*(\d{1,9})\b/ui', $text, $m ) ) {
+                                $po_id = absint( $m[1] );
+                                if ( $po_id > 0 && get_post( $po_id ) instanceof \WP_Post ) {
+                                        return array( 'status' => 'resolved', 'po_id' => $po_id );
+                                }
+                        }
+                        $is_pointer = (bool) preg_match( '/\b(denne|same|samme|this|den)\b/ui', $text );
+                        if ( $is_pointer ) {
+                                $remembered_id = max( 0, (int) ( $remembered['po_id'] ?? 0 ) );
+                                if ( $remembered_id > 0 ) {
+                                        return array( 'status' => 'resolved', 'po_id' => $remembered_id );
+                                }
+                                return array( 'status' => 'context_missing', 'po_id' => 0 );
+                        }
+                        return $out;
+                }
+
+                protected static function resolve_assistant_order_reference( string $message, array $remembered = array() ): array {
+                        $out  = array( 'status' => 'not_found', 'order_id' => 0 );
+                        $text = trim( $message );
+                        if ( preg_match( '/\b(order|ordre)\s*#?\s*(\d{1,9})\b/ui', $text, $m ) || preg_match( '/\b#(\d{1,9})\b/u', $text, $m ) ) {
+                                $order_id = absint( $m[2] ?? $m[1] );
+                                if ( $order_id > 0 && function_exists( 'wc_get_order' ) && wc_get_order( $order_id ) instanceof \WC_Order ) {
+                                        return array( 'status' => 'resolved', 'order_id' => $order_id );
+                                }
+                        }
+                        $is_pointer = (bool) preg_match( '/\b(denne|same|samme|this|den)\b/ui', $text );
+                        if ( $is_pointer ) {
+                                $remembered_id = max( 0, (int) ( $remembered['order_id'] ?? 0 ) );
+                                if ( $remembered_id > 0 ) {
+                                        return array( 'status' => 'resolved', 'order_id' => $remembered_id );
+                                }
+                                return array( 'status' => 'context_missing', 'order_id' => 0 );
+                        }
+                        return $out;
+                }
+
+                protected static function build_po_allocator_context( int $po_id ): array {
+                        $post = get_post( $po_id );
+                        if ( ! ( $post instanceof \WP_Post ) ) {
+                                return array( 'po_id' => 0 );
+                        }
+                        $lines = get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', true );
+                        $lines = is_array( $lines ) ? $lines : array();
+                        $rows  = array();
+                        $totals = array( 'ordered' => 0, 'received' => 0, 'allocated' => 0, 'free' => 0 );
+                        foreach ( $lines as $line ) {
+                                if ( ! is_array( $line ) ) {
+                                        continue;
+                                }
+                                $ordered   = max( 0, (int) ( $line['qty_ordered'] ?? 0 ) );
+                                $received  = max( 0, (int) ( $line['qty_received'] ?? 0 ) );
+                                $allocated = max( 0, (int) ( $line['qty_allocated'] ?? 0 ) );
+                                $free      = max( 0, $ordered - $received - $allocated );
+                                $row = array(
+                                        'product_id'   => max( 0, (int) ( $line['product_id'] ?? 0 ) ),
+                                        'variation_id' => max( 0, (int) ( $line['variation_id'] ?? 0 ) ),
+                                        'qty_ordered'  => $ordered,
+                                        'qty_received' => $received,
+                                        'qty_allocated'=> $allocated,
+                                        'qty_free'     => $free,
+                                        'eta'          => lpr_allocator_resolve_line_eta( $po_id, $line ),
+                                );
+                                $rows[] = $row;
+                                $totals['ordered']   += $ordered;
+                                $totals['received']  += $received;
+                                $totals['allocated'] += $allocated;
+                                $totals['free']      += $free;
+                        }
+
+                        $order_allocations = array();
+                        if ( function_exists( __NAMESPACE__ . '\lpr_allocator_get_po_alloc_index' ) && function_exists( 'wc_get_order' ) ) {
+                                foreach ( (array) lpr_allocator_get_po_alloc_index( $po_id ) as $index_row ) {
+                                        $order_id = max( 0, (int) ( $index_row['order_id'] ?? 0 ) );
+                                        $item_id  = max( 0, (int) ( $index_row['item_id'] ?? 0 ) );
+                                        if ( $order_id <= 0 || $item_id <= 0 ) {
+                                                continue;
+                                        }
+                                        $order = wc_get_order( $order_id );
+                                        if ( ! $order instanceof \WC_Order ) {
+                                                continue;
+                                        }
+                                        $item = $order->get_item( $item_id );
+                                        if ( ! $item instanceof \WC_Order_Item_Product ) {
+                                                continue;
+                                        }
+                                        $allocs = $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_ALLOCATIONS' ) ? ORDER_ITEM_META_ALLOCATIONS : 'lpr_allocations', true );
+                                        if ( ! is_array( $allocs ) ) {
+                                                continue;
+                                        }
+                                        foreach ( $allocs as $alloc ) {
+                                                if ( ! is_array( $alloc ) || $po_id !== max( 0, (int) ( $alloc['po_id'] ?? 0 ) ) ) {
+                                                        continue;
+                                                }
+                                                $qty = max( 0, (int) ( $alloc['qty_allocated'] ?? 0 ) );
+                                                if ( ! isset( $order_allocations[ $order_id ] ) ) {
+                                                        $order_allocations[ $order_id ] = 0;
+                                                }
+                                                $order_allocations[ $order_id ] += $qty;
+                                        }
+                                }
+                        }
+
+                        return array(
+                                'po_id'        => $po_id,
+                                'po_number'    => sanitize_text_field( (string) get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_PO_NUMBER' ) ? PO_META_PO_NUMBER : '_lpr_po_number', true ) ),
+                                'status'       => sanitize_key( (string) $post->post_status ),
+                                'supplier'     => sanitize_text_field( (string) get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_SUPPLIER_NAME' ) ? PO_META_SUPPLIER_NAME : '_lpr_supplier_name', true ) ),
+                                'eta'          => lpr_allocator_sanitize_ymd( (string) get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_ETA_DATE' ) ? PO_META_ETA_DATE : '_lpr_eta_date', true ) ),
+                                'lines'        => $rows,
+                                'line_count'   => count( $rows ),
+                                'totals'       => $totals,
+                                'order_allocs' => $order_allocations,
+                        );
+                }
+
+                protected static function build_order_allocator_context( int $order_id ): array {
+                        $order = function_exists( 'wc_get_order' ) ? wc_get_order( $order_id ) : null;
+                        if ( ! $order instanceof \WC_Order ) {
+                                return array( 'order_id' => 0 );
+                        }
+                        $alloc_rows = array();
+                        foreach ( $order->get_items() as $item ) {
+                                if ( ! $item instanceof \WC_Order_Item_Product ) {
+                                        continue;
+                                }
+                                $allocs = $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_ALLOCATIONS' ) ? ORDER_ITEM_META_ALLOCATIONS : 'lpr_allocations', true );
+                                if ( ! is_array( $allocs ) ) {
+                                        continue;
+                                }
+                                foreach ( $allocs as $alloc ) {
+                                        if ( ! is_array( $alloc ) ) {
+                                                continue;
+                                        }
+                                        $alloc_rows[] = array(
+                                                'po_id'         => max( 0, (int) ( $alloc['po_id'] ?? 0 ) ),
+                                                'po_number'     => sanitize_text_field( (string) ( $alloc['po_number'] ?? '' ) ),
+                                                'qty_allocated' => max( 0, (int) ( $alloc['qty_allocated'] ?? 0 ) ),
+                                                'eta'           => lpr_allocator_sanitize_ymd( (string) ( $alloc['eta'] ?? '' ) ),
+                                                'status'        => sanitize_key( (string) ( $alloc['status'] ?? '' ) ),
+                                        );
+                                }
+                        }
+                        return array(
+                                'order_id'  => $order_id,
+                                'order_no'  => (string) $order->get_order_number(),
+                                'status'    => sanitize_key( (string) $order->get_status() ),
+                                'alloc_rows'=> $alloc_rows,
+                        );
+                }
+
+                protected static function build_global_allocator_context(): array {
+                        $statuses = function_exists( __NAMESPACE__ . '\lpr_allocator_live_po_statuses' ) ? lpr_allocator_live_po_statuses() : array( 'open', 'partial' );
+                        $query = new \WP_Query(
+                                array(
+                                        'post_type'      => defined( __NAMESPACE__ . '\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po',
+                                        'post_status'    => $statuses,
+                                        'posts_per_page' => 300,
+                                        'fields'         => 'ids',
+                                        'no_found_rows'  => true,
+                                )
+                        );
+                        $totals = array( 'incoming' => 0, 'ordered' => 0, 'received' => 0, 'allocated' => 0, 'free' => 0, 'open_po_count' => 0, 'products_with_incoming' => 0 );
+                        $seen_products = array();
+                        foreach ( (array) $query->posts as $po_id ) {
+                                $lines = get_post_meta( (int) $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', true );
+                                if ( ! is_array( $lines ) ) {
+                                        continue;
+                                }
+                                ++$totals['open_po_count'];
+                                foreach ( $lines as $line ) {
+                                        if ( ! is_array( $line ) ) {
+                                                continue;
+                                        }
+                                        $ordered   = max( 0, (int) ( $line['qty_ordered'] ?? 0 ) );
+                                        $received  = max( 0, (int) ( $line['qty_received'] ?? 0 ) );
+                                        $allocated = max( 0, (int) ( $line['qty_allocated'] ?? 0 ) );
+                                        $incoming  = max( 0, $ordered - $received );
+                                        $free      = max( 0, $incoming - $allocated );
+                                        $totals['ordered'] += $ordered;
+                                        $totals['received'] += $received;
+                                        $totals['allocated'] += $allocated;
+                                        $totals['incoming'] += $incoming;
+                                        $totals['free'] += $free;
+                                        $pid = max( 0, (int) ( $line['variation_id'] ?? $line['product_id'] ?? 0 ) );
+                                        if ( $incoming > 0 && $pid > 0 ) {
+                                                $seen_products[ $pid ] = true;
+                                        }
+                                }
+                        }
+                        $totals['products_with_incoming'] = count( $seen_products );
+                        return $totals;
+                }
+
+                protected static function format_product_allocator_reply( array $ctx, array $intent ): string {
+                        if ( empty( $ctx ) ) {
+                                return __( 'Produkt funnet, men ingen incoming/allokeringsdata tilgjengelig.', 'lpr-backorder-allocator' );
+                        }
+                        $lines = array();
+                        $head = trim( (string) ( $ctx['product_name'] ?? '' ) );
+                        $sku  = trim( (string) ( $ctx['sku'] ?? '' ) );
+                        if ( '' !== $sku ) {
+                                $head .= ' (' . $sku . ')';
+                        }
+                        $incoming = max( 0, (int) ( $ctx['incoming_total'] ?? 0 ) );
+                        $free     = max( 0, (int) ( $ctx['total_free_qty_across_open_pos'] ?? 0 ) );
+                        $lines[]  = $head;
+                        if ( ! empty( $intent['asks_yes_no'] ) ) {
+                                $lines[] = $incoming > 0 ? __( 'Ja, det finnes åpne innkjøp for produktet.', 'lpr-backorder-allocator' ) : __( 'Nei, ingen åpne innkjøp funnet for produktet.', 'lpr-backorder-allocator' );
+                        }
+                        if ( ! empty( $intent['asks_eta'] ) ) {
+                                $eta = trim( (string) ( $ctx['earliest_eta_with_free_qty'] ?? $ctx['earliest_eta'] ?? '' ) );
+                                $lines[] = '' !== $eta ? sprintf( __( 'Første ETA: %s.', 'lpr-backorder-allocator' ), $eta ) : __( 'ETA mangler på åpne PO-linjer.', 'lpr-backorder-allocator' );
+                        } elseif ( ! empty( $intent['asks_free_qty'] ) ) {
+                                $lines[] = sprintf( __( 'Total fri qty: %d.', 'lpr-backorder-allocator' ), $free );
+                        } else {
+                                $lines[] = sprintf( __( 'Incoming total: %d. Fri qty: %d.', 'lpr-backorder-allocator' ), $incoming, $free );
+                        }
+                        $details = (array) ( $ctx['open_po_details'] ?? array() );
+                        foreach ( array_slice( $details, 0, 5 ) as $row ) {
+                                $lines[] = '- ' . self::format_assistant_po_breakdown_row( (array) $row );
+                        }
+                        if ( count( $details ) > 5 ) {
+                                $lines[] = sprintf( __( 'Viser 5 av %d PO-rader.', 'lpr-backorder-allocator' ), count( $details ) );
+                        }
+                        if ( ! empty( $ctx['used_parent_fallback'] ) ) {
+                                $lines[] = __( 'Data er delvis hentet fra parent-produkt.', 'lpr-backorder-allocator' );
+                        }
+                        return implode( "\n", array_filter( $lines ) );
+                }
+
+                protected static function format_po_allocator_reply( array $ctx, array $intent ): string {
+                        if ( empty( $ctx['po_id'] ) ) {
+                                return __( 'PO ble ikke funnet.', 'lpr-backorder-allocator' );
+                        }
+                        $po_label = '' !== (string) ( $ctx['po_number'] ?? '' ) ? (string) $ctx['po_number'] : (string) (int) $ctx['po_id'];
+                        $totals = (array) ( $ctx['totals'] ?? array() );
+                        $lines = array(
+                                sprintf( __( 'PO %1$s (%2$s).', 'lpr-backorder-allocator' ), $po_label, (string) ( $ctx['status'] ?? '' ) ),
+                                sprintf( __( 'Bestilt %1$d, mottatt %2$d, allokert %3$d, fri %4$d.', 'lpr-backorder-allocator' ), (int) ( $totals['ordered'] ?? 0 ), (int) ( $totals['received'] ?? 0 ), (int) ( $totals['allocated'] ?? 0 ), (int) ( $totals['free'] ?? 0 ) ),
+                        );
+                        if ( ! empty( $ctx['supplier'] ) ) {
+                                $lines[] = sprintf( __( 'Leverandør: %s.', 'lpr-backorder-allocator' ), (string) $ctx['supplier'] );
+                        }
+                        if ( ! empty( $ctx['eta'] ) ) {
+                                $lines[] = sprintf( __( 'PO ETA: %s.', 'lpr-backorder-allocator' ), (string) $ctx['eta'] );
+                        }
+                        $line_rows = (array) ( $ctx['lines'] ?? array() );
+                        foreach ( array_slice( $line_rows, 0, 5 ) as $row ) {
+                                $lines[] = sprintf( '- PID %1$d/%2$d – O:%3$d R:%4$d A:%5$d F:%6$d ETA:%7$s', (int) ( $row['product_id'] ?? 0 ), (int) ( $row['variation_id'] ?? 0 ), (int) ( $row['qty_ordered'] ?? 0 ), (int) ( $row['qty_received'] ?? 0 ), (int) ( $row['qty_allocated'] ?? 0 ), (int) ( $row['qty_free'] ?? 0 ), (string) ( $row['eta'] ?? '-' ) );
+                        }
+                        if ( count( $line_rows ) > 5 ) {
+                                $lines[] = sprintf( __( 'Viser 5 av %d linjer.', 'lpr-backorder-allocator' ), count( $line_rows ) );
+                        }
+                        if ( ! empty( $intent['asks_orders'] ) ) {
+                                if ( empty( $ctx['order_allocs'] ) ) {
+                                        $lines[] = __( 'Ingen nåværende ordre-allokeringer på denne PO-en.', 'lpr-backorder-allocator' );
+                                } else {
+                                        $lines[] = __( 'Ordre allokert mot PO:', 'lpr-backorder-allocator' );
+                                        foreach ( $ctx['order_allocs'] as $order_id => $qty ) {
+                                                $lines[] = sprintf( '- Order #%1$d: %2$d', (int) $order_id, (int) $qty );
+                                        }
+                                }
+                        }
+                        return implode( "\n", array_filter( $lines ) );
+                }
+
+                protected static function format_order_allocator_reply( array $ctx, array $intent ): string {
+                        if ( empty( $ctx['order_id'] ) ) {
+                                return __( 'Ordre ble ikke funnet.', 'lpr-backorder-allocator' );
+                        }
+                        $lines = array(
+                                sprintf( __( 'Ordre #%1$s (%2$s).', 'lpr-backorder-allocator' ), (string) ( $ctx['order_no'] ?? $ctx['order_id'] ), (string) ( $ctx['status'] ?? '' ) ),
+                        );
+                        $allocs = (array) ( $ctx['alloc_rows'] ?? array() );
+                        if ( empty( $allocs ) ) {
+                                $lines[] = __( 'Ingen PO-allokeringer registrert på ordren.', 'lpr-backorder-allocator' );
+                        } else {
+                                foreach ( array_slice( $allocs, 0, 8 ) as $row ) {
+                                        $po = '' !== (string) ( $row['po_number'] ?? '' ) ? (string) $row['po_number'] : (string) (int) ( $row['po_id'] ?? 0 );
+                                        $lines[] = sprintf( '- PO %1$s: qty %2$d, ETA %3$s, status %4$s', $po, (int) ( $row['qty_allocated'] ?? 0 ), (string) ( $row['eta'] ?? '-' ), (string) ( $row['status'] ?? '-' ) );
+                                }
+                        }
+                        return implode( "\n", array_filter( $lines ) );
+                }
+
+                protected static function format_global_allocator_reply( array $ctx, array $intent ): string {
+                        return sprintf(
+                                __( 'Global allocator: åpne PO-er %1$d, incoming %2$d, fri qty %3$d, allokert %4$d, bestilt %5$d, mottatt %6$d, produkter med incoming %7$d.', 'lpr-backorder-allocator' ),
+                                (int) ( $ctx['open_po_count'] ?? 0 ),
+                                (int) ( $ctx['incoming'] ?? 0 ),
+                                (int) ( $ctx['free'] ?? 0 ),
+                                (int) ( $ctx['allocated'] ?? 0 ),
+                                (int) ( $ctx['ordered'] ?? 0 ),
+                                (int) ( $ctx['received'] ?? 0 ),
+                                (int) ( $ctx['products_with_incoming'] ?? 0 )
                         );
                 }
 
@@ -19202,6 +19467,30 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 'target_id'    => max( 0, (int) ( $raw['target_id'] ?? 0 ) ),
                                 'product_name' => sanitize_text_field( (string) ( $raw['product_name'] ?? '' ) ),
                                 'sku'          => sanitize_text_field( (string) ( $raw['sku'] ?? '' ) ),
+                                'remembered_at'=> sanitize_text_field( (string) ( $raw['remembered_at'] ?? '' ) ),
+                        );
+                }
+
+                protected static function get_remembered_po_context( int $user_id ): array {
+                        $raw = get_user_meta( $user_id, self::po_context_meta_key(), true );
+                        if ( ! is_array( $raw ) ) {
+                                return array();
+                        }
+                        return array(
+                                'po_id'       => max( 0, (int) ( $raw['po_id'] ?? 0 ) ),
+                                'po_number'   => sanitize_text_field( (string) ( $raw['po_number'] ?? '' ) ),
+                                'remembered_at'=> sanitize_text_field( (string) ( $raw['remembered_at'] ?? '' ) ),
+                        );
+                }
+
+                protected static function get_remembered_order_context( int $user_id ): array {
+                        $raw = get_user_meta( $user_id, self::order_context_meta_key(), true );
+                        if ( ! is_array( $raw ) ) {
+                                return array();
+                        }
+                        return array(
+                                'order_id'    => max( 0, (int) ( $raw['order_id'] ?? 0 ) ),
+                                'order_no'    => sanitize_text_field( (string) ( $raw['order_no'] ?? '' ) ),
                                 'remembered_at'=> sanitize_text_field( (string) ( $raw['remembered_at'] ?? '' ) ),
                         );
                 }
@@ -19221,6 +19510,49 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         'product_name'  => sanitize_text_field( (string) ( $resolved_product['product_name'] ?? '' ) ),
                                         'sku'           => sanitize_text_field( (string) ( $resolved_product['sku'] ?? '' ) ),
                                         'remembered_at' => wp_date( 'c' ),
+                                )
+                        );
+                }
+
+                protected static function remember_po_context( int $user_id, array $ctx ): void {
+                        $po_id = max( 0, (int) ( $ctx['po_id'] ?? 0 ) );
+                        if ( $po_id <= 0 ) {
+                                return;
+                        }
+                        update_user_meta(
+                                $user_id,
+                                self::po_context_meta_key(),
+                                array(
+                                        'po_id'        => $po_id,
+                                        'po_number'    => sanitize_text_field( (string) ( $ctx['po_number'] ?? '' ) ),
+                                        'remembered_at'=> wp_date( 'c' ),
+                                )
+                        );
+                }
+
+                protected static function remember_order_context( int $user_id, array $ctx ): void {
+                        $order_id = max( 0, (int) ( $ctx['order_id'] ?? 0 ) );
+                        if ( $order_id <= 0 ) {
+                                return;
+                        }
+                        update_user_meta(
+                                $user_id,
+                                self::order_context_meta_key(),
+                                array(
+                                        'order_id'     => $order_id,
+                                        'order_no'     => sanitize_text_field( (string) ( $ctx['order_no'] ?? '' ) ),
+                                        'remembered_at'=> wp_date( 'c' ),
+                                )
+                        );
+                }
+
+                protected static function remember_global_context( int $user_id, array $ctx ): void {
+                        update_user_meta(
+                                $user_id,
+                                self::global_context_meta_key(),
+                                array(
+                                        'summary'      => is_array( $ctx ) ? $ctx : array(),
+                                        'remembered_at'=> wp_date( 'c' ),
                                 )
                         );
                 }
@@ -19454,6 +19786,9 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         update_user_meta( $user_id, self::history_meta_key(), array() );
                         update_user_meta( $user_id, self::request_meta_key(), array() );
                         delete_user_meta( $user_id, self::product_context_meta_key() );
+                        delete_user_meta( $user_id, self::po_context_meta_key() );
+                        delete_user_meta( $user_id, self::order_context_meta_key() );
+                        delete_user_meta( $user_id, self::global_context_meta_key() );
                         delete_transient( self::context_transient_key( $user_id ) );
                 }
 
