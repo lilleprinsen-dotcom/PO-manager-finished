@@ -4913,6 +4913,16 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Menu' ) ) {
 
                         add_submenu_page(
                                 ADMIN_MENU_SLUG,
+                                __( 'AI Assistant', 'lpr-backorder-allocator' ),
+                                __( 'AI Assistant', 'lpr-backorder-allocator' ),
+                                'manage_woocommerce',
+                                'lpr-ai-assistant',
+                                array( __NAMESPACE__ . '\\AI_Assistant_Page', 'render' ),
+                                2
+                        );
+
+                        add_submenu_page(
+                                ADMIN_MENU_SLUG,
                                 __( 'Settings', 'lpr-backorder-allocator' ),
                                 __( 'Settings', 'lpr-backorder-allocator' ),
                                 'manage_woocommerce',
@@ -18135,6 +18145,193 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Import_Page' ) ) {
         }
     }
     PO_Import_Page::init();
+}
+
+/**
+ * Admin page: "AI Assistant" chat MVP for draft recommendations.
+ */
+if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
+        class AI_Assistant_Page {
+
+                protected static function history_meta_key(): string {
+                        return 'lpr_allocator_ai_assistant_history';
+                }
+
+                protected static function normalize_history( $raw_history ): array {
+                        $history = array();
+                        if ( ! is_array( $raw_history ) ) {
+                                return $history;
+                        }
+
+                        foreach ( $raw_history as $item ) {
+                                if ( ! is_array( $item ) ) {
+                                        continue;
+                                }
+
+                                $role    = isset( $item['role'] ) ? sanitize_key( (string) $item['role'] ) : '';
+                                $message = isset( $item['message'] ) ? sanitize_textarea_field( (string) $item['message'] ) : '';
+                                $time    = isset( $item['time'] ) ? sanitize_text_field( (string) $item['time'] ) : '';
+
+                                if ( '' === $role || '' === $message ) {
+                                        continue;
+                                }
+
+                                $history[] = array(
+                                        'role'    => $role,
+                                        'message' => $message,
+                                        'time'    => $time,
+                                );
+                        }
+
+                        return $history;
+                }
+
+                public static function render(): void {
+                        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                                return;
+                        }
+
+                        $user_id     = get_current_user_id();
+                        $history_key = self::history_meta_key();
+                        $history     = self::normalize_history( get_user_meta( $user_id, $history_key, true ) );
+                        $error       = '';
+                        $notice      = '';
+                        $draft       = '';
+
+                        if ( 'POST' === strtoupper( (string) $_SERVER['REQUEST_METHOD'] ) ) {
+                                check_admin_referer( 'lpr_ai_assistant_chat', 'lpr_ai_nonce' );
+
+                                $action = isset( $_POST['lpr_ai_action'] ) ? sanitize_key( wp_unslash( $_POST['lpr_ai_action'] ) ) : 'send';
+
+                                if ( 'clear' === $action ) {
+                                        $history = array();
+                                        update_user_meta( $user_id, $history_key, $history );
+                                        $notice = __( 'Chat history cleared.', 'lpr-backorder-allocator' );
+                                } else {
+                                        $draft = isset( $_POST['lpr_ai_message'] ) ? sanitize_textarea_field( wp_unslash( $_POST['lpr_ai_message'] ) ) : '';
+                                        $draft = trim( $draft );
+
+                                        $settings = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array();
+                                        $guard    = lpr_allocator_validate_ai_guardrails( $draft, $settings );
+
+                                        if ( ! empty( $guard['ok'] ) ) {
+                                                $history[] = array(
+                                                        'role'    => 'user',
+                                                        'message' => $draft,
+                                                        'time'    => wp_date( 'Y-m-d H:i:s' ),
+                                                );
+
+                                                $system_instruction = 'You are an internal assistant for PO allocator admins. Propose draft actions only and do not claim to make live updates.';
+                                                $payload            = lpr_allocator_build_ai_chat_payload( $draft, $system_instruction, $settings );
+                                                $result             = lpr_allocator_openai_chat_request( $payload, $settings );
+                                                $parsed             = lpr_allocator_parse_openai_chat_response( $result['response'], (float) ( $result['latency_ms'] ?? 0.0 ) );
+
+                                                if ( ! empty( $parsed['error_code'] ) ) {
+                                                        $error = (string) ( $parsed['error_message'] ?: __( 'Assistant request failed. Please try again.', 'lpr-backorder-allocator' ) );
+                                                } else {
+                                                        $history[] = array(
+                                                                'role'    => 'assistant',
+                                                                'message' => (string) $parsed['assistant_text'],
+                                                                'time'    => wp_date( 'Y-m-d H:i:s' ),
+                                                        );
+                                                        $notice = __( 'Assistant response received.', 'lpr-backorder-allocator' );
+                                                        $draft  = '';
+                                                }
+
+                                                update_user_meta( $user_id, $history_key, array_slice( $history, -20 ) );
+                                                $history = self::normalize_history( $history );
+                                        } else {
+                                                $error = (string) ( $guard['error_message'] ?? __( 'Unable to send prompt.', 'lpr-backorder-allocator' ) );
+                                        }
+                                }
+                        }
+                        ?>
+                        <div class="wrap">
+                                <h1><?php echo esc_html__( 'AI Assistant', 'lpr-backorder-allocator' ); ?></h1>
+                                <p class="description"><strong><?php echo esc_html__( 'Assistant proposes drafts; no automatic live updates in this phase.', 'lpr-backorder-allocator' ); ?></strong></p>
+
+                                <?php if ( '' !== $notice ) : ?>
+                                        <div class="notice notice-success is-dismissible"><p><?php echo esc_html( $notice ); ?></p></div>
+                                <?php endif; ?>
+
+                                <?php if ( '' !== $error ) : ?>
+                                        <div class="notice notice-error"><p><?php echo esc_html( $error ); ?></p></div>
+                                <?php endif; ?>
+
+                                <div class="postbox" style="max-width:1080px;">
+                                        <div class="inside">
+                                                <h2 style="margin-top:0;"><?php echo esc_html__( 'Conversation', 'lpr-backorder-allocator' ); ?></h2>
+                                                <div id="lpr-ai-history" style="border:1px solid #dcdcde; border-radius:4px; background:#fff; min-height:220px; max-height:420px; overflow:auto; padding:12px;">
+                                                        <?php if ( empty( $history ) ) : ?>
+                                                                <p class="description" style="margin:0;"><?php echo esc_html__( 'No messages yet. Ask the assistant for a draft recommendation.', 'lpr-backorder-allocator' ); ?></p>
+                                                        <?php else : ?>
+                                                                <?php foreach ( $history as $message ) : ?>
+                                                                        <?php
+                                                                        $role_label = 'assistant' === $message['role']
+                                                                                ? __( 'Assistant', 'lpr-backorder-allocator' )
+                                                                                : __( 'You', 'lpr-backorder-allocator' );
+                                                                        ?>
+                                                                        <div style="margin:0 0 12px; padding:10px; border:1px solid #e2e4e7; border-radius:4px; background:<?php echo esc_attr( 'assistant' === $message['role'] ? '#f6f7f7' : '#fbfdff' ); ?>;">
+                                                                                <div style="display:flex; justify-content:space-between; gap:12px; margin-bottom:6px;">
+                                                                                        <strong><?php echo esc_html( $role_label ); ?></strong>
+                                                                                        <?php if ( '' !== $message['time'] ) : ?>
+                                                                                                <span class="description"><?php echo esc_html( $message['time'] ); ?></span>
+                                                                                        <?php endif; ?>
+                                                                                </div>
+                                                                                <div style="white-space:pre-wrap;"><?php echo esc_html( $message['message'] ); ?></div>
+                                                                        </div>
+                                                                <?php endforeach; ?>
+                                                        <?php endif; ?>
+                                                </div>
+
+                                                <form id="lpr-ai-chat-form" method="post" action="">
+                                                        <?php wp_nonce_field( 'lpr_ai_assistant_chat', 'lpr_ai_nonce' ); ?>
+                                                        <input type="hidden" name="lpr_ai_action" value="send" />
+                                                        <p>
+                                                                <label for="lpr-ai-message"><strong><?php echo esc_html__( 'Message', 'lpr-backorder-allocator' ); ?></strong></label><br />
+                                                                <textarea id="lpr-ai-message" name="lpr_ai_message" rows="5" class="large-text" placeholder="<?php echo esc_attr__( 'Describe what draft guidance you need…', 'lpr-backorder-allocator' ); ?>" required><?php echo esc_textarea( $draft ); ?></textarea>
+                                                        </p>
+                                                        <p style="display:flex; gap:8px; align-items:center;">
+                                                                <button type="submit" class="button button-primary" id="lpr-ai-send"><?php echo esc_html__( 'Send', 'lpr-backorder-allocator' ); ?></button>
+                                                                <span id="lpr-ai-loading" class="spinner" style="float:none; margin:0;"></span>
+                                                                <span id="lpr-ai-loading-text" class="description" style="display:none;"><?php echo esc_html__( 'Generating response…', 'lpr-backorder-allocator' ); ?></span>
+                                                        </p>
+                                                </form>
+
+                                                <form method="post" action="" style="margin-top:10px;">
+                                                        <?php wp_nonce_field( 'lpr_ai_assistant_chat', 'lpr_ai_nonce' ); ?>
+                                                        <input type="hidden" name="lpr_ai_action" value="clear" />
+                                                        <button type="submit" class="button button-secondary"><?php echo esc_html__( 'Clear', 'lpr-backorder-allocator' ); ?></button>
+                                                </form>
+                                        </div>
+                                </div>
+
+                                <script>
+                                (function() {
+                                        var form = document.getElementById('lpr-ai-chat-form');
+                                        if (!form) {
+                                                return;
+                                        }
+                                        var sendButton = document.getElementById('lpr-ai-send');
+                                        var loading = document.getElementById('lpr-ai-loading');
+                                        var loadingText = document.getElementById('lpr-ai-loading-text');
+                                        form.addEventListener('submit', function() {
+                                                if (sendButton) {
+                                                        sendButton.disabled = true;
+                                                }
+                                                if (loading) {
+                                                        loading.classList.add('is-active');
+                                                }
+                                                if (loadingText) {
+                                                        loadingText.style.display = 'inline';
+                                                }
+                                        });
+                                })();
+                                </script>
+                        </div>
+                        <?php
+                }
+        }
 }
 
 /**
