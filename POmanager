@@ -18426,6 +18426,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         add_action( 'wp_ajax_lpr_ai_assistant_submit', array( __CLASS__, 'ajax_submit' ) );
                         add_action( 'wp_ajax_lpr_ai_assistant_clear', array( __CLASS__, 'ajax_clear' ) );
                         add_action( 'wp_ajax_lpr_ai_assistant_confirm_draft', array( __CLASS__, 'ajax_confirm_draft' ) );
+                        add_action( 'wp_ajax_lpr_ai_assistant_retry_failed', array( __CLASS__, 'ajax_retry_failed' ) );
                 }
 
                 protected static function history_meta_key(): string {
@@ -18450,6 +18451,18 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
 
                 protected static function apply_result_meta_key(): string {
                         return 'lpr_allocator_ai_assistant_last_apply_result';
+                }
+
+                protected static function operational_status_meta_key(): string {
+                        return 'lpr_allocator_ai_assistant_operational_status';
+                }
+
+                protected static function immutable_audit_log_meta_key(): string {
+                        return 'lpr_allocator_ai_assistant_immutable_audit_log';
+                }
+
+                protected static function idempotency_meta_key(): string {
+                        return 'lpr_allocator_ai_assistant_idempotency_keys';
                 }
 
 
@@ -18499,6 +18512,25 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
 
                 protected static function draft_archive_limit(): int {
                         return 75;
+                }
+
+                protected static function ambiguity_safety_threshold(): int {
+                        return 3;
+                }
+
+                protected static function can_use_assistant(): bool {
+                        $allowed = current_user_can( 'manage_woocommerce' );
+                        return (bool) apply_filters( 'lpr_ai_assistant_can_use', $allowed );
+                }
+
+                protected static function can_upload_assistant_file(): bool {
+                        $allowed = current_user_can( 'manage_woocommerce' ) && current_user_can( 'upload_files' );
+                        return (bool) apply_filters( 'lpr_ai_assistant_can_upload_file', $allowed );
+                }
+
+                protected static function can_apply_draft_actions(): bool {
+                        $allowed = current_user_can( 'manage_woocommerce' ) && current_user_can( 'edit_shop_orders' );
+                        return (bool) apply_filters( 'lpr_ai_assistant_can_apply', $allowed );
                 }
 
                 protected static function normalize_history( $raw_history ): array {
@@ -18621,6 +18653,111 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         return $request_log;
                 }
 
+                protected static function normalized_idempotency_log( $raw ): array {
+                        $items = array();
+                        if ( ! is_array( $raw ) ) {
+                                return $items;
+                        }
+
+                        foreach ( $raw as $entry ) {
+                                if ( ! is_array( $entry ) ) {
+                                        continue;
+                                }
+                                $key = sanitize_text_field( (string) ( $entry['key'] ?? '' ) );
+                                if ( '' === $key ) {
+                                        continue;
+                                }
+                                $items[] = array(
+                                        'key'       => $key,
+                                        'bundle_id' => sanitize_text_field( (string) ( $entry['bundle_id'] ?? '' ) ),
+                                        'timestamp' => sanitize_text_field( (string) ( $entry['timestamp'] ?? '' ) ),
+                                        'result'    => isset( $entry['result'] ) && is_array( $entry['result'] ) ? $entry['result'] : array(),
+                                );
+                        }
+
+                        return $items;
+                }
+
+                protected static function get_idempotency_match( int $user_id, string $key, string $bundle_id ): array {
+                        if ( '' === $key ) {
+                                return array();
+                        }
+                        $log = self::normalized_idempotency_log( get_user_meta( $user_id, self::idempotency_meta_key(), true ) );
+                        foreach ( $log as $entry ) {
+                                if ( $key !== (string) ( $entry['key'] ?? '' ) ) {
+                                        continue;
+                                }
+                                if ( '' !== $bundle_id && $bundle_id !== (string) ( $entry['bundle_id'] ?? '' ) ) {
+                                        continue;
+                                }
+                                return $entry;
+                        }
+                        return array();
+                }
+
+                protected static function store_idempotency_result( int $user_id, string $key, string $bundle_id, array $result ): void {
+                        if ( '' === $key ) {
+                                return;
+                        }
+                        $log = self::normalized_idempotency_log( get_user_meta( $user_id, self::idempotency_meta_key(), true ) );
+                        $log[] = array(
+                                'key'       => $key,
+                                'bundle_id' => $bundle_id,
+                                'timestamp' => wp_date( 'c' ),
+                                'result'    => $result,
+                        );
+                        $log = array_slice( $log, -60 );
+                        update_user_meta( $user_id, self::idempotency_meta_key(), $log );
+                }
+
+                protected static function append_immutable_audit_record( int $user_id, array $record ): void {
+                        $log = get_option( self::immutable_audit_log_meta_key(), array() );
+                        if ( ! is_array( $log ) ) {
+                                $log = array();
+                        }
+                        $prev_hash = '';
+                        if ( ! empty( $log ) && is_array( end( $log ) ) ) {
+                                $last      = end( $log );
+                                $prev_hash = sanitize_text_field( (string) ( $last['hash'] ?? '' ) );
+                        }
+                        $record['recorded_at'] = wp_date( 'c' );
+                        $record['user_id']     = max( 0, $user_id );
+                        $record['prev_hash']   = $prev_hash;
+                        $record                = lpr_allocator_redact_sensitive_log_fields( $record );
+                        $payload               = wp_json_encode( $record );
+                        $record['hash']        = hash( 'sha256', (string) $payload . '|' . $prev_hash );
+                        $log[]                 = $record;
+                        $log                   = array_slice( $log, -300 );
+                        update_option( self::immutable_audit_log_meta_key(), $log, false );
+                }
+
+                protected static function update_operational_status( int $user_id, array $bundle, array $result, string $outcome ): void {
+                        $failed_rows = array();
+                        foreach ( (array) ( $result['line_results'] ?? array() ) as $line_result ) {
+                                if ( ! is_array( $line_result ) || 'failed' !== (string) ( $line_result['status'] ?? '' ) ) {
+                                        continue;
+                                }
+                                $failed_rows[] = array(
+                                        'line_identifier' => sanitize_text_field( (string) ( $line_result['line_identifier'] ?? '' ) ),
+                                        'message'         => sanitize_text_field( (string) ( $line_result['message'] ?? '' ) ),
+                                );
+                        }
+
+                        $status = array(
+                                'last_updated_at' => wp_date( 'c' ),
+                                'last_updated_by' => $user_id,
+                                'bundle_id'       => sanitize_text_field( (string) ( $bundle['id'] ?? '' ) ),
+                                'action_type'     => sanitize_key( (string) ( $bundle['action_type'] ?? '' ) ),
+                                'outcome'         => sanitize_key( $outcome ),
+                                'applied_count'   => max( 0, (int) ( $result['applied_count'] ?? 0 ) ),
+                                'skipped_count'   => max( 0, (int) ( $result['skipped_count'] ?? 0 ) ),
+                                'error_count'     => max( 0, (int) ( $result['error_count'] ?? 0 ) ),
+                                'failed_rows'     => $failed_rows,
+                                'retry_available' => ! empty( $failed_rows ),
+                        );
+                        update_user_meta( $user_id, self::operational_status_meta_key(), $status );
+                }
+
                 protected static function clear_conversation_state( int $user_id ): void {
                         update_user_meta( $user_id, self::history_meta_key(), array() );
                         update_user_meta( $user_id, self::request_meta_key(), array() );
@@ -18649,6 +18786,10 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 $before_after = isset( $bundle['before_after'] ) && is_array( $bundle['before_after'] ) ? array_values( $bundle['before_after'] ) : array();
                                 $result       = isset( $bundle['result'] ) && is_array( $bundle['result'] ) ? $bundle['result'] : array();
                                 $audit        = isset( $bundle['audit'] ) && is_array( $bundle['audit'] ) ? $bundle['audit'] : array();
+                                $source       = sanitize_key( (string) ( $bundle['source'] ?? 'chat' ) );
+                                $requested_by = max( 0, (int) ( $bundle['requested_by'] ?? 0 ) );
+                                $request_note = sanitize_text_field( (string) ( $bundle['request_note'] ?? '' ) );
+                                $reconciliation_ambiguous_count = max( 0, (int) ( $bundle['reconciliation_ambiguous_count'] ?? 0 ) );
                                 $requires_manual_review = ! empty( $bundle['requires_manual_review'] );
                                 $manual_review_reasons  = isset( $bundle['manual_review_reasons'] ) && is_array( $bundle['manual_review_reasons'] ) ? array_values( $bundle['manual_review_reasons'] ) : array();
 
@@ -18661,6 +18802,9 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 }
                                 if ( ! in_array( $safety, array( 'stop_on_error', 'continue_on_error' ), true ) ) {
                                         $safety = 'stop_on_error';
+                                }
+                                if ( ! in_array( $source, array( 'chat', 'file', 'chat+file' ), true ) ) {
+                                        $source = 'chat';
                                 }
 
                                 $bundles[] = array(
@@ -18676,6 +18820,10 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         'updated_at'      => $updated_at,
                                         'result'          => $result,
                                         'audit'           => $audit,
+                                        'source'          => $source,
+                                        'requested_by'    => $requested_by,
+                                        'request_note'    => $request_note,
+                                        'reconciliation_ambiguous_count' => $reconciliation_ambiguous_count,
                                         'requires_manual_review' => $requires_manual_review,
                                         'manual_review_reasons'  => array_map( 'sanitize_text_field', $manual_review_reasons ),
                                 );
@@ -18862,20 +19010,28 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         return $rows;
                 }
 
-                protected static function enqueue_draft_bundle( int $user_id, array $action_payload ): array {
+                protected static function enqueue_draft_bundle( int $user_id, array $action_payload, string $source = 'chat', array $reconciliation = array() ): array {
                         $action_type  = sanitize_key( (string) ( $action_payload['action_type'] ?? '' ) );
                         $target       = sanitize_text_field( (string) ( $action_payload['target_entity'] ?? '' ) );
                         $identifiers  = isset( $action_payload['identifiers'] ) && is_array( $action_payload['identifiers'] ) ? $action_payload['identifiers'] : array();
                         $line_changes = isset( $action_payload['line_changes'] ) && is_array( $action_payload['line_changes'] ) ? array_values( $action_payload['line_changes'] ) : array();
                         $now          = wp_date( 'c' );
-                        $reconciliation = get_user_meta( $user_id, self::reconciliation_meta_key(), true );
                         $requires_manual_review = false;
                         $manual_review_reasons  = array();
-                        if ( is_array( $reconciliation ) && (int) ( $reconciliation['ambiguous_count'] ?? 0 ) > 0 ) {
+                        $ambiguous_count = is_array( $reconciliation ) ? max( 0, (int) ( $reconciliation['ambiguous_count'] ?? 0 ) ) : 0;
+                        if ( $ambiguous_count > 0 ) {
                                 $requires_manual_review = true;
                                 $manual_review_reasons[] = sprintf(
                                         'Uploaded reconciliation has %d ambiguous row(s).',
-                                        (int) ( $reconciliation['ambiguous_count'] ?? 0 )
+                                        $ambiguous_count
+                                );
+                        }
+                        if ( $ambiguous_count > self::ambiguity_safety_threshold() ) {
+                                $requires_manual_review = true;
+                                $manual_review_reasons[] = sprintf(
+                                        'Safety stop active: ambiguous matches (%1$d) exceed threshold (%2$d).',
+                                        $ambiguous_count,
+                                        self::ambiguity_safety_threshold()
                                 );
                         }
 
@@ -18892,6 +19048,10 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 'updated_at'      => $now,
                                 'result'          => array(),
                                 'audit'           => array(),
+                                'source'          => in_array( $source, array( 'chat', 'file', 'chat+file' ), true ) ? $source : 'chat',
+                                'requested_by'    => $user_id,
+                                'request_note'    => sanitize_text_field( (string) ( $action_payload['notes'] ?? '' ) ),
+                                'reconciliation_ambiguous_count' => $ambiguous_count,
                                 'requires_manual_review' => $requires_manual_review,
                                 'manual_review_reasons'  => $manual_review_reasons,
                         );
@@ -18986,7 +19146,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         $results[] = $line_result;
                                 } catch ( \Throwable $t ) {
                                         $had_error = true;
-                                        $message   = sanitize_text_field( $t->getMessage() );
+                                        $message   = sanitize_text_field( (string) lpr_allocator_redact_sensitive_log_fields( (string) $t->getMessage() ) );
                                         $errors[]  = sprintf( 'Line %1$d (%2$s): %3$s', $index + 1, $line_identifier ?: 'n/a', $message ?: 'Unknown error' );
                                         $results[] = array(
                                                 'line_identifier' => $line_identifier,
@@ -19030,6 +19190,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         'timestamp' => sanitize_text_field( (string) ( $entry['timestamp'] ?? '' ) ),
                                         'filename'  => sanitize_file_name( (string) ( $entry['filename'] ?? '' ) ),
                                         'user_id'   => max( 0, (int) ( $entry['user_id'] ?? 0 ) ),
+                                        'source'    => sanitize_key( (string) ( $entry['source'] ?? 'file' ) ),
                                         'rows'      => max( 0, (int) ( $entry['rows'] ?? 0 ) ),
                                         'matched'   => max( 0, (int) ( $entry['matched'] ?? 0 ) ),
                                         'ambiguous' => max( 0, (int) ( $entry['ambiguous'] ?? 0 ) ),
@@ -19047,6 +19208,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 'timestamp' => wp_date( 'c' ),
                                 'filename'  => sanitize_file_name( (string) ( $summary['filename'] ?? '' ) ),
                                 'user_id'   => $user_id,
+                                'source'    => 'file',
                                 'rows'      => max( 0, (int) ( $summary['row_count'] ?? 0 ) ),
                                 'matched'   => max( 0, (int) ( $summary['matched_count'] ?? 0 ) ),
                                 'ambiguous' => max( 0, (int) ( $summary['ambiguous_count'] ?? 0 ) ),
@@ -19070,6 +19232,19 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         )
                                 );
                         }
+                        self::append_immutable_audit_record(
+                                $user_id,
+                                array(
+                                        'event'      => 'ai_upload_processed',
+                                        'source'     => 'file',
+                                        'approved'   => array(
+                                                'filename' => sanitize_file_name( (string) ( $summary['filename'] ?? '' ) ),
+                                                'rows'     => max( 0, (int) ( $summary['row_count'] ?? 0 ) ),
+                                        ),
+                                        'live_changes' => array(),
+                                        'outcome'    => sanitize_key( $status ),
+                                )
+                        );
                 }
 
                 protected static function ai_upload_allowed_mimes(): array {
@@ -19413,6 +19588,9 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         if ( empty( $_FILES['assistant_file'] ) || ! is_array( $_FILES['assistant_file'] ) ) {
                                 return array();
                         }
+                        if ( ! self::can_upload_assistant_file() ) {
+                                return array( 'error' => __( 'You do not have permission to upload assistant files.', 'lpr-backorder-allocator' ) );
+                        }
 
                         $file = $_FILES['assistant_file'];
                         $name = sanitize_file_name( (string) ( $file['name'] ?? '' ) );
@@ -19582,6 +19760,18 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
 
                         $settings = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array();
                         $model    = isset( $settings['ai_model'] ) ? sanitize_text_field( (string) $settings['ai_model'] ) : $model;
+                        $has_upload = ! empty( $_FILES['assistant_file'] ) && is_array( $_FILES['assistant_file'] );
+                        if ( $has_upload && ! self::can_upload_assistant_file() ) {
+                                wp_send_json_error(
+                                        array(
+                                                'error' => array(
+                                                        'code'    => 'upload_forbidden',
+                                                        'message' => __( 'You do not have permission to upload files for assistant reconciliation.', 'lpr-backorder-allocator' ),
+                                                ),
+                                        ),
+                                        403
+                                );
+                        }
                         $reconciliation_summary = self::maybe_process_uploaded_file( $user_id );
                         if ( ! empty( $reconciliation_summary['error'] ) ) {
                                 self::record_upload_log(
@@ -19652,7 +19842,8 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 'action_notice' => sanitize_text_field( (string) ( $parsed['action_notice'] ?? '' ) ),
                         );
                         if ( 'executable' === ( $assistant_turn['action_status'] ?? 'none' ) && is_array( $assistant_turn['action_payload'] ) ) {
-                                $queued_bundle                    = self::enqueue_draft_bundle( $user_id, $assistant_turn['action_payload'] );
+                                $source_type = ! empty( $reconciliation_summary ) ? 'chat+file' : 'chat';
+                                $queued_bundle                    = self::enqueue_draft_bundle( $user_id, $assistant_turn['action_payload'], $source_type, is_array( $reconciliation_summary ) ? $reconciliation_summary : array() );
                                 $assistant_turn['action_notice']  = trim( (string) $assistant_turn['action_notice'] . ' ' . __( 'Draft action queued in Draft Overview. Confirm explicitly to apply.', 'lpr-backorder-allocator' ) );
                                 $assistant_turn['draft_bundle_id'] = (string) ( $queued_bundle['id'] ?? '' );
                         }
@@ -19701,12 +19892,12 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                 public static function ajax_confirm_draft(): void {
                         check_ajax_referer( 'lpr_ai_assistant_chat' );
 
-                        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                        if ( ! self::can_apply_draft_actions() ) {
                                 wp_send_json_error(
                                         array(
                                                 'error' => array(
                                                         'code'    => 'unknown',
-                                                        'message' => __( 'You do not have permission to confirm draft actions.', 'lpr-backorder-allocator' ),
+                                                        'message' => __( 'You do not have permission to confirm and apply draft actions.', 'lpr-backorder-allocator' ),
                                                 ),
                                         ),
                                         403
@@ -19725,8 +19916,44 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         400
                                 );
                         }
+                        $idempotency_key = isset( $_POST['idempotency_key'] ) ? sanitize_text_field( wp_unslash( $_POST['idempotency_key'] ) ) : '';
+                        $expected_lines  = isset( $_POST['expected_line_count'] ) ? max( 0, (int) $_POST['expected_line_count'] ) : 0;
+                        $expected_apply  = isset( $_POST['expected_apply_count'] ) ? max( 0, (int) $_POST['expected_apply_count'] ) : 0;
+                        $confirm_digest  = isset( $_POST['confirm_digest'] ) ? sanitize_text_field( wp_unslash( $_POST['confirm_digest'] ) ) : '';
 
                         $user_id = get_current_user_id();
+                        $duplicate = self::get_idempotency_match( $user_id, $idempotency_key, $bundle_id );
+                        if ( ! empty( $duplicate ) ) {
+                                wp_send_json_success(
+                                        array(
+                                                'result'        => isset( $duplicate['result'] ) && is_array( $duplicate['result'] ) ? $duplicate['result'] : array(),
+                                                'bundle'        => array(
+                                                        'id' => $bundle_id,
+                                                        'status' => 'applied',
+                                                ),
+                                                'draft_bundles' => self::get_draft_bundles( $user_id ),
+                                                'idempotent'    => true,
+                                        )
+                                );
+                        }
+
+                        $archive = self::normalize_draft_bundles( get_user_meta( $user_id, self::draft_bundle_archive_meta_key(), true ) );
+                        foreach ( $archive as $archived_bundle ) {
+                                if ( ( $archived_bundle['id'] ?? '' ) !== $bundle_id ) {
+                                        continue;
+                                }
+                                $archived_result = isset( $archived_bundle['result'] ) && is_array( $archived_bundle['result'] ) ? $archived_bundle['result'] : array();
+                                self::store_idempotency_result( $user_id, $idempotency_key, $bundle_id, $archived_result );
+                                wp_send_json_success(
+                                        array(
+                                                'result'        => $archived_result,
+                                                'bundle'        => $archived_bundle,
+                                                'draft_bundles' => self::get_draft_bundles( $user_id ),
+                                                'idempotent'    => true,
+                                        )
+                                );
+                        }
+
                         $bundles = self::get_draft_bundles( $user_id );
                         $found   = false;
                         $updated = array();
@@ -19741,6 +19968,71 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
 
                                 $found        = true;
                                 $active_bundle = $bundle;
+                                $actual_line_count   = count( (array) ( $active_bundle['line_changes'] ?? array() ) );
+                                $digest_payload      = wp_json_encode( array( $active_bundle['id'], $active_bundle['action_type'], $active_bundle['before_after'] ) );
+                                $actual_digest       = hash( 'sha256', (string) $digest_payload );
+                                $actual_client_digest = (string) sprintf( '%u', crc32( (string) $digest_payload ) );
+                                if ( $expected_lines > 0 && $expected_lines !== $actual_line_count ) {
+                                        wp_send_json_error(
+                                                array(
+                                                        'error' => array(
+                                                                'code'    => 'stale_confirmation',
+                                                                'message' => __( 'Draft changed since confirmation dialog. Re-open and confirm again.', 'lpr-backorder-allocator' ),
+                                                        ),
+                                                ),
+                                                409
+                                        );
+                                }
+                                if ( '' !== $confirm_digest && ! hash_equals( $confirm_digest, $actual_digest ) && $confirm_digest !== $actual_client_digest ) {
+                                        wp_send_json_error(
+                                                array(
+                                                        'error' => array(
+                                                                'code'    => 'stale_confirmation',
+                                                                'message' => __( 'Draft checksum mismatch. Re-open and confirm again.', 'lpr-backorder-allocator' ),
+                                                        ),
+                                                ),
+                                                409
+                                        );
+                                }
+                                if ( $expected_apply > 0 && $expected_apply !== $actual_line_count ) {
+                                        wp_send_json_error(
+                                                array(
+                                                        'error' => array(
+                                                                'code'    => 'stale_confirmation',
+                                                                'message' => __( 'Draft impact counts changed. Re-open and confirm again.', 'lpr-backorder-allocator' ),
+                                                        ),
+                                                ),
+                                                409
+                                        );
+                                }
+                                $ambiguous_count = max( 0, (int) ( $active_bundle['reconciliation_ambiguous_count'] ?? 0 ) );
+                                if ( $ambiguous_count > self::ambiguity_safety_threshold() ) {
+                                        $message = sprintf(
+                                                __( 'Safety stop: unresolved ambiguous matches (%1$d) exceed threshold (%2$d). Resolve ambiguity before apply.', 'lpr-backorder-allocator' ),
+                                                $ambiguous_count,
+                                                self::ambiguity_safety_threshold()
+                                        );
+                                        self::append_immutable_audit_record(
+                                                $user_id,
+                                                array(
+                                                        'event'    => 'ai_apply_blocked_ambiguity',
+                                                        'bundle_id'=> $bundle_id,
+                                                        'source'   => sanitize_key( (string) ( $active_bundle['source'] ?? 'chat' ) ),
+                                                        'approved' => $active_bundle['before_after'] ?? array(),
+                                                        'outcome'  => 'blocked',
+                                                        'message'  => $message,
+                                                )
+                                        );
+                                        wp_send_json_error(
+                                                array(
+                                                        'error' => array(
+                                                                'code'    => 'safety_stop',
+                                                                'message' => $message,
+                                                        ),
+                                                ),
+                                                409
+                                        );
+                                }
                                 $active_bundle['status']     = 'approved';
                                 $active_bundle['updated_at'] = wp_date( 'c' );
                                 $result                      = self::execute_draft_bundle( $active_bundle );
@@ -19769,6 +20061,25 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         'safety_mode'  => sanitize_key( (string) ( $active_bundle['safety_behavior'] ?? 'stop_on_error' ) ),
                                         'line_audit'   => $line_audit,
                                 );
+                                self::append_immutable_audit_record(
+                                        $user_id,
+                                        array(
+                                                'event'      => 'ai_apply_executed',
+                                                'bundle_id'  => sanitize_text_field( (string) ( $active_bundle['id'] ?? '' ) ),
+                                                'source'     => sanitize_key( (string) ( $active_bundle['source'] ?? 'chat' ) ),
+                                                'requested_by' => max( 0, (int) ( $active_bundle['requested_by'] ?? $user_id ) ),
+                                                'approved'   => $active_bundle['before_after'] ?? array(),
+                                                'live_changes' => $line_audit,
+                                                'outcome'    => sanitize_key( (string) ( $active_bundle['status'] ?? 'unknown' ) ),
+                                        )
+                                );
+                                self::update_operational_status(
+                                        $user_id,
+                                        $active_bundle,
+                                        $result,
+                                        sanitize_key( (string) ( $active_bundle['status'] ?? 'unknown' ) )
+                                );
+                                self::store_idempotency_result( $user_id, $idempotency_key, $bundle_id, $result );
                                 self::archive_draft_bundle( $user_id, $active_bundle );
                         }
 
@@ -19796,8 +20107,67 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         );
                 }
 
+                public static function ajax_retry_failed(): void {
+                        check_ajax_referer( 'lpr_ai_assistant_chat' );
+
+                        if ( ! self::can_apply_draft_actions() ) {
+                                wp_send_json_error(
+                                        array(
+                                                'error' => array(
+                                                        'code'    => 'unknown',
+                                                        'message' => __( 'You do not have permission to retry failed applies.', 'lpr-backorder-allocator' ),
+                                                ),
+                                        ),
+                                        403
+                                );
+                        }
+
+                        $user_id = get_current_user_id();
+                        $archive = self::normalize_draft_bundles( get_user_meta( $user_id, self::draft_bundle_archive_meta_key(), true ) );
+                        $failed_bundle = array();
+                        for ( $i = count( $archive ) - 1; $i >= 0; $i-- ) {
+                                if ( ! is_array( $archive[ $i ] ) ) {
+                                        continue;
+                                }
+                                if ( 'failed' !== (string) ( $archive[ $i ]['status'] ?? '' ) ) {
+                                        continue;
+                                }
+                                $failed_bundle = $archive[ $i ];
+                                break;
+                        }
+
+                        if ( empty( $failed_bundle ) ) {
+                                wp_send_json_error(
+                                        array(
+                                                'error' => array(
+                                                        'code'    => 'no_failed_bundle',
+                                                        'message' => __( 'No failed bundle is available to retry.', 'lpr-backorder-allocator' ),
+                                                ),
+                                        ),
+                                        404
+                                );
+                        }
+
+                        $failed_bundle['id']         = function_exists( 'wp_generate_uuid4' ) ? wp_generate_uuid4() : uniqid( 'lpr_ai_bundle_retry_', true );
+                        $failed_bundle['status']     = 'draft';
+                        $failed_bundle['created_at'] = wp_date( 'c' );
+                        $failed_bundle['updated_at'] = wp_date( 'c' );
+                        $failed_bundle['result']     = array();
+                        $failed_bundle['audit']      = array();
+
+                        $bundles   = self::get_draft_bundles( $user_id );
+                        $bundles[] = $failed_bundle;
+                        $bundles   = self::persist_draft_bundles( $user_id, $bundles );
+
+                        wp_send_json_success(
+                                array(
+                                        'draft_bundles' => $bundles,
+                                )
+                        );
+                }
+
                 public static function render(): void {
-                        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                        if ( ! self::can_use_assistant() ) {
                                 return;
                         }
 
@@ -19813,6 +20183,12 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         if ( ! is_array( $last_apply_bundle ) ) {
                                 $last_apply_bundle = array();
                         }
+                        $operational_status = get_user_meta( $user_id, self::operational_status_meta_key(), true );
+                        if ( ! is_array( $operational_status ) ) {
+                                $operational_status = array();
+                        }
+                        $can_upload_files = self::can_upload_assistant_file();
+                        $can_apply_live   = self::can_apply_draft_actions();
                         $error       = '';
                         $notice      = '';
                         $draft       = '';
@@ -19921,6 +20297,39 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                                 </p></div>
                                                         <?php endif; ?>
                                                 </div>
+                                                <div id="lpr-ai-operational-status" style="margin:10px 0 12px;">
+                                                        <div class="notice notice-info inline" style="margin:0;">
+                                                                <p style="margin:8px 12px;">
+                                                                        <strong><?php echo esc_html__( 'Operational status', 'lpr-backorder-allocator' ); ?>:</strong>
+                                                                        <?php
+                                                                        if ( empty( $operational_status ) ) {
+                                                                                echo esc_html__( 'No apply operations recorded yet.', 'lpr-backorder-allocator' );
+                                                                        } else {
+                                                                                echo esc_html(
+                                                                                        sprintf(
+                                                                                                __( 'Last outcome: %1$s at %2$s — applied %3$d, skipped %4$d, errors %5$d.', 'lpr-backorder-allocator' ),
+                                                                                                (string) ( $operational_status['outcome'] ?? 'unknown' ),
+                                                                                                (string) ( $operational_status['last_updated_at'] ?? '' ),
+                                                                                                (int) ( $operational_status['applied_count'] ?? 0 ),
+                                                                                                (int) ( $operational_status['skipped_count'] ?? 0 ),
+                                                                                                (int) ( $operational_status['error_count'] ?? 0 )
+                                                                                        )
+                                                                                );
+                                                                        }
+                                                                        ?>
+                                                                </p>
+                                                                <?php if ( ! empty( $operational_status['failed_rows'] ) ) : ?>
+                                                                        <ul style="margin:0 16px 10px;">
+                                                                                <?php foreach ( (array) $operational_status['failed_rows'] as $failed_row ) : ?>
+                                                                                        <li><code><?php echo esc_html( (string) ( $failed_row['line_identifier'] ?? '' ) ); ?></code>: <?php echo esc_html( (string) ( $failed_row['message'] ?? '' ) ); ?></li>
+                                                                                <?php endforeach; ?>
+                                                                        </ul>
+                                                                <?php endif; ?>
+                                                                <?php if ( $can_apply_live && ! empty( $operational_status['retry_available'] ) ) : ?>
+                                                                        <p style="margin:0 12px 10px;"><button type="button" class="button button-secondary" id="lpr-ai-retry-failed"><?php echo esc_html__( 'Retry failed rows', 'lpr-backorder-allocator' ); ?></button></p>
+                                                                <?php endif; ?>
+                                                        </div>
+                                                </div>
                                                 <div id="lpr-ai-draft-overview">
                                                         <?php if ( empty( $draft_bundles ) ) : ?>
                                                                 <p class="description" style="margin:0;"><?php echo esc_html__( 'No pending draft bundles.', 'lpr-backorder-allocator' ); ?></p>
@@ -19964,7 +20373,11 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                                                                 </tbody>
                                                                                         </table>
                                                                                         <p style="margin:0;">
-                                                                                                <button type="button" class="button button-primary lpr-ai-confirm-draft" data-bundle-id="<?php echo esc_attr( (string) ( $bundle['id'] ?? '' ) ); ?>"><?php echo esc_html__( 'Confirm and apply', 'lpr-backorder-allocator' ); ?></button>
+                                                                                                <?php if ( $can_apply_live ) : ?>
+                                                                                                        <button type="button" class="button button-primary lpr-ai-confirm-draft" data-bundle-id="<?php echo esc_attr( (string) ( $bundle['id'] ?? '' ) ); ?>" data-line-count="<?php echo esc_attr( count( (array) ( $bundle['line_changes'] ?? array() ) ) ); ?>" data-apply-count="<?php echo esc_attr( count( (array) ( $bundle['before_after'] ?? array() ) ) ); ?>" data-error-count="<?php echo esc_attr( (int) ( $bundle['result']['error_count'] ?? 0 ) ); ?>"><?php echo esc_html__( 'Confirm and apply', 'lpr-backorder-allocator' ); ?></button>
+                                                                                                <?php else : ?>
+                                                                                                        <span class="description"><?php echo esc_html__( 'Only authorized operators can apply live updates.', 'lpr-backorder-allocator' ); ?></span>
+                                                                                                <?php endif; ?>
                                                                                         </p>
                                                                                 </div>
                                                                         <?php endforeach; ?>
@@ -20013,11 +20426,15 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                                 <label for="lpr-ai-message"><strong><?php echo esc_html__( 'Message', 'lpr-backorder-allocator' ); ?></strong></label><br />
                                                                 <textarea id="lpr-ai-message" name="lpr_ai_message" rows="5" class="large-text" placeholder="<?php echo esc_attr__( 'Describe what draft guidance you need…', 'lpr-backorder-allocator' ); ?>" required><?php echo esc_textarea( $draft ); ?></textarea>
                                                         </p>
-                                                        <p>
-                                                                <label for="lpr-ai-upload"><strong><?php echo esc_html__( 'Upload updates file (optional)', 'lpr-backorder-allocator' ); ?></strong></label><br />
-                                                                <input type="file" id="lpr-ai-upload" name="assistant_file" accept=".csv,.xlsx" />
-                                                                <span class="description"><?php echo esc_html__( 'Accepted: CSV/XLSX up to 5MB. Parsed rows are normalized and reconciled before drafting actions.', 'lpr-backorder-allocator' ); ?></span>
-                                                        </p>
+                                                        <?php if ( $can_upload_files ) : ?>
+                                                                <p>
+                                                                        <label for="lpr-ai-upload"><strong><?php echo esc_html__( 'Upload updates file (optional)', 'lpr-backorder-allocator' ); ?></strong></label><br />
+                                                                        <input type="file" id="lpr-ai-upload" name="assistant_file" accept=".csv,.xlsx" />
+                                                                        <span class="description"><?php echo esc_html__( 'Accepted: CSV/XLSX up to 5MB. Parsed rows are normalized and reconciled before drafting actions.', 'lpr-backorder-allocator' ); ?></span>
+                                                                </p>
+                                                        <?php else : ?>
+                                                                <p class="description"><?php echo esc_html__( 'File upload is limited to authorized users with upload permissions.', 'lpr-backorder-allocator' ); ?></p>
+                                                        <?php endif; ?>
                                                         <p style="display:flex; gap:8px; align-items:center;">
                                                                 <button type="submit" class="button button-primary" id="lpr-ai-send"><?php echo esc_html__( 'Send', 'lpr-backorder-allocator' ); ?></button>
                                                                 <span id="lpr-ai-loading" class="spinner" style="float:none; margin:0;"></span>
@@ -20043,6 +20460,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         var historyRoot = document.getElementById('lpr-ai-history');
                                         var draftRoot = document.getElementById('lpr-ai-draft-overview');
                                         var applyResultRoot = document.getElementById('lpr-ai-apply-result');
+                                        var operationalStatusRoot = document.getElementById('lpr-ai-operational-status');
                                         var reconciliationRoot = document.getElementById('lpr-ai-reconciliation-summary');
                                         var uploadInput = document.getElementById('lpr-ai-upload');
                                         var messageInput = document.getElementById('lpr-ai-message');
@@ -20051,6 +20469,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         var loadingText = document.getElementById('lpr-ai-loading-text');
                                         var nonceField = form.querySelector('input[name="_wpnonce"]');
                                         var clearButton = document.getElementById('lpr-ai-clear');
+                                        var retryFailedButton = document.getElementById('lpr-ai-retry-failed');
                                         var ajaxUrl = window.ajaxurl || '<?php echo esc_js( admin_url( 'admin-ajax.php' ) ); ?>';
 
                                         
@@ -20096,6 +20515,23 @@ function renderApplySummary(result) {
                                                         wrap.appendChild(ul);
                                                 }
                                                 applyResultRoot.appendChild(wrap);
+                                        }
+
+                                        function buildConfirmDigest(bundle) {
+                                                var raw = JSON.stringify([
+                                                        bundle && bundle.id ? bundle.id : '',
+                                                        bundle && bundle.action_type ? bundle.action_type : '',
+                                                        bundle && bundle.before_after ? bundle.before_after : []
+                                                ]);
+                                                var crc = -1;
+                                                for (var i = 0; i < raw.length; i++) {
+                                                        crc = crc ^ raw.charCodeAt(i);
+                                                        for (var j = 0; j < 8; j++) {
+                                                                var mask = -(crc & 1);
+                                                                crc = (crc >>> 1) ^ (0xEDB88320 & mask);
+                                                        }
+                                                }
+                                                return String((crc ^ -1) >>> 0);
                                         }
 
                                         function setLoading(active) {
@@ -20251,11 +20687,22 @@ function renderApplySummary(result) {
                                                                 card.appendChild(table);
 
                                                                 var confirmButton = document.createElement('button');
-                                                                confirmButton.type = 'button';
-                                                                confirmButton.className = 'button button-primary lpr-ai-confirm-draft';
-                                                                confirmButton.textContent = '<?php echo esc_js( __( 'Confirm and apply', 'lpr-backorder-allocator' ) ); ?>';
-                                                                confirmButton.setAttribute('data-bundle-id', bundle.id || '');
-                                                                card.appendChild(confirmButton);
+                                                                if (<?php echo wp_json_encode( (bool) $can_apply_live ); ?>) {
+                                                                        confirmButton.type = 'button';
+                                                                        confirmButton.className = 'button button-primary lpr-ai-confirm-draft';
+                                                                        confirmButton.textContent = '<?php echo esc_js( __( 'Confirm and apply', 'lpr-backorder-allocator' ) ); ?>';
+                                                                        confirmButton.setAttribute('data-bundle-id', bundle.id || '');
+                                                                        confirmButton.setAttribute('data-line-count', String((bundle.line_changes || []).length));
+                                                                        confirmButton.setAttribute('data-apply-count', String((bundle.before_after || []).length));
+                                                                        confirmButton.setAttribute('data-error-count', String((bundle.result && bundle.result.error_count) || 0));
+                                                                        confirmButton.setAttribute('data-confirm-digest', buildConfirmDigest(bundle));
+                                                                        card.appendChild(confirmButton);
+                                                                } else {
+                                                                        var restricted = document.createElement('span');
+                                                                        restricted.className = 'description';
+                                                                        restricted.textContent = '<?php echo esc_js( __( 'Only authorized operators can apply live updates.', 'lpr-backorder-allocator' ) ); ?>';
+                                                                        card.appendChild(restricted);
+                                                                }
 
                                                                 draftRoot.appendChild(card);
                                                         });
@@ -20316,14 +20763,28 @@ function renderApplySummary(result) {
                                                         if (!bundleId) {
                                                                 return;
                                                         }
-                                                        if (!window.confirm('<?php echo esc_js( __( 'Apply this draft bundle now?', 'lpr-backorder-allocator' ) ); ?>')) {
+                                                        var lineCount = parseInt(target.getAttribute('data-line-count') || '0', 10);
+                                                        var applyCount = parseInt(target.getAttribute('data-apply-count') || '0', 10);
+                                                        var errorCount = parseInt(target.getAttribute('data-error-count') || '0', 10);
+                                                        var summaryMessage = '<?php echo esc_js( __( 'Confirm apply impact summary:', 'lpr-backorder-allocator' ) ); ?>\n'
+                                                                + '- <?php echo esc_js( __( 'Rows in request', 'lpr-backorder-allocator' ) ); ?>: ' + lineCount + '\n'
+                                                                + '- <?php echo esc_js( __( 'Rows expected to change', 'lpr-backorder-allocator' ) ); ?>: ' + applyCount + '\n'
+                                                                + '- <?php echo esc_js( __( 'Known failed rows from last run', 'lpr-backorder-allocator' ) ); ?>: ' + errorCount + '\n\n'
+                                                                + '<?php echo esc_js( __( 'Proceed with live apply?', 'lpr-backorder-allocator' ) ); ?>';
+                                                        if (!window.confirm(summaryMessage)) {
                                                                 return;
                                                         }
+                                                        var idempotencyKey = 'apply-' + bundleId + '-' + Date.now();
+                                                        var confirmDigest = target.getAttribute('data-confirm-digest') || '';
 
                                                         var payload = new window.FormData();
                                                         payload.append('action', 'lpr_ai_assistant_confirm_draft');
                                                         payload.append('_wpnonce', nonceField ? nonceField.value : '');
                                                         payload.append('bundle_id', bundleId);
+                                                        payload.append('idempotency_key', idempotencyKey);
+                                                        payload.append('expected_line_count', String(lineCount));
+                                                        payload.append('expected_apply_count', String(applyCount));
+                                                        payload.append('confirm_digest', confirmDigest);
 
                                                         setLoading(true);
                                                         window.fetch(ajaxUrl, {
@@ -20344,6 +20805,37 @@ function renderApplySummary(result) {
                                                                 renderDraftOverview(result.data && result.data.draft_bundles ? result.data.draft_bundles : []);
                                                         }).catch(function() {
                                                                 window.alert('<?php echo esc_js( __( 'Unable to confirm this draft bundle.', 'lpr-backorder-allocator' ) ); ?>');
+                                                        }).finally(function() {
+                                                                setLoading(false);
+                                                        });
+                                                });
+                                        }
+
+                                        if (retryFailedButton) {
+                                                retryFailedButton.addEventListener('click', function(event) {
+                                                        event.preventDefault();
+                                                        var payload = new window.FormData();
+                                                        payload.append('action', 'lpr_ai_assistant_retry_failed');
+                                                        payload.append('_wpnonce', nonceField ? nonceField.value : '');
+
+                                                        setLoading(true);
+                                                        window.fetch(ajaxUrl, {
+                                                                method: 'POST',
+                                                                credentials: 'same-origin',
+                                                                body: payload
+                                                        }).then(function(response) {
+                                                                return response.json().catch(function() {
+                                                                        return {};
+                                                                });
+                                                        }).then(function(result) {
+                                                                if (!result || !result.success) {
+                                                                        var errorData = result && result.data && result.data.error ? result.data.error : null;
+                                                                        window.alert(errorData && errorData.message ? errorData.message : '<?php echo esc_js( __( 'Unable to retry failed rows right now.', 'lpr-backorder-allocator' ) ); ?>');
+                                                                        return;
+                                                                }
+                                                                renderDraftOverview(result.data && result.data.draft_bundles ? result.data.draft_bundles : []);
+                                                        }).catch(function() {
+                                                                window.alert('<?php echo esc_js( __( 'Unable to retry failed rows right now.', 'lpr-backorder-allocator' ) ); ?>');
                                                         }).finally(function() {
                                                                 setLoading(false);
                                                         });
