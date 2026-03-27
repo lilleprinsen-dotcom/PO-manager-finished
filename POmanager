@@ -18452,6 +18452,27 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         return 'lpr_allocator_ai_assistant_last_apply_result';
                 }
 
+
+                protected static function reconciliation_meta_key(): string {
+                        return 'lpr_allocator_ai_assistant_last_reconciliation';
+                }
+
+                protected static function upload_log_meta_key(): string {
+                        return 'lpr_allocator_ai_assistant_upload_log';
+                }
+
+                protected static function upload_row_limit(): int {
+                        return 1500;
+                }
+
+                protected static function upload_chunk_size(): int {
+                        return 200;
+                }
+
+                protected static function upload_max_file_bytes(): int {
+                        return 5 * 1024 * 1024;
+                }
+
                 protected static function history_limit(): int {
                         return 20;
                 }
@@ -18893,6 +18914,507 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         update_user_meta( $user_id, self::draft_bundle_archive_meta_key(), $archive );
                 }
 
+
+                protected static function normalize_upload_log( $raw_log ): array {
+                        $entries = array();
+                        if ( ! is_array( $raw_log ) ) {
+                                return $entries;
+                        }
+
+                        foreach ( $raw_log as $entry ) {
+                                if ( ! is_array( $entry ) ) {
+                                        continue;
+                                }
+
+                                $entries[] = array(
+                                        'timestamp' => sanitize_text_field( (string) ( $entry['timestamp'] ?? '' ) ),
+                                        'filename'  => sanitize_file_name( (string) ( $entry['filename'] ?? '' ) ),
+                                        'user_id'   => max( 0, (int) ( $entry['user_id'] ?? 0 ) ),
+                                        'rows'      => max( 0, (int) ( $entry['rows'] ?? 0 ) ),
+                                        'matched'   => max( 0, (int) ( $entry['matched'] ?? 0 ) ),
+                                        'ambiguous' => max( 0, (int) ( $entry['ambiguous'] ?? 0 ) ),
+                                        'unmatched' => max( 0, (int) ( $entry['unmatched'] ?? 0 ) ),
+                                        'status'    => sanitize_key( (string) ( $entry['status'] ?? 'unknown' ) ),
+                                );
+                        }
+
+                        return $entries;
+                }
+
+                protected static function record_upload_log( int $user_id, array $summary, string $status ): void {
+                        $log = self::normalize_upload_log( get_user_meta( $user_id, self::upload_log_meta_key(), true ) );
+                        $log[] = array(
+                                'timestamp' => wp_date( 'c' ),
+                                'filename'  => sanitize_file_name( (string) ( $summary['filename'] ?? '' ) ),
+                                'user_id'   => $user_id,
+                                'rows'      => max( 0, (int) ( $summary['row_count'] ?? 0 ) ),
+                                'matched'   => max( 0, (int) ( $summary['matched_count'] ?? 0 ) ),
+                                'ambiguous' => max( 0, (int) ( $summary['ambiguous_count'] ?? 0 ) ),
+                                'unmatched' => max( 0, (int) ( $summary['unmatched_count'] ?? 0 ) ),
+                                'status'    => sanitize_key( $status ),
+                        );
+                        $log = array_slice( $log, -30 );
+                        update_user_meta( $user_id, self::upload_log_meta_key(), $log );
+
+                        if ( function_exists( __NAMESPACE__ . '\lpr_allocator_log_event' ) ) {
+                                lpr_allocator_log_event(
+                                        'ai_upload_processed',
+                                        array(
+                                                'user_id'   => $user_id,
+                                                'filename'  => sanitize_file_name( (string) ( $summary['filename'] ?? '' ) ),
+                                                'rows'      => max( 0, (int) ( $summary['row_count'] ?? 0 ) ),
+                                                'matched'   => max( 0, (int) ( $summary['matched_count'] ?? 0 ) ),
+                                                'ambiguous' => max( 0, (int) ( $summary['ambiguous_count'] ?? 0 ) ),
+                                                'unmatched' => max( 0, (int) ( $summary['unmatched_count'] ?? 0 ) ),
+                                                'status'    => sanitize_key( $status ),
+                                        )
+                                );
+                        }
+                }
+
+                protected static function ai_upload_allowed_mimes(): array {
+                        return array(
+                                'csv'  => array( 'text/csv', 'text/plain', 'application/csv', 'application/vnd.ms-excel' ),
+                                'xlsx' => array( 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'application/zip' ),
+                        );
+                }
+
+                protected static function ai_upload_header_map( array $headers ): array {
+                        $map      = array();
+                        $synonyms = array(
+                                'po_reference' => array( 'po_reference', 'po_ref', 'po', 'po_number', 'purchase_order', 'purchase_order_number' ),
+                                'sku'          => array( 'sku', 'product_identifier', 'product_id', 'product', 'item_sku' ),
+                                'quantity'     => array( 'quantity', 'qty', 'ordered_qty', 'qty_ordered' ),
+                                'date'         => array( 'date', 'eta', 'eta_date', 'delivery_date', 'update_date' ),
+                                'notes'        => array( 'update_notes', 'notes', 'note', 'comments' ),
+                        );
+
+                        foreach ( $headers as $index => $header ) {
+                                $normalized = sanitize_key( preg_replace( '/[^a-z0-9]+/i', '_', strtolower( trim( (string) $header ) ) ) );
+                                if ( '' === $normalized ) {
+                                        continue;
+                                }
+                                foreach ( $synonyms as $target => $options ) {
+                                        if ( in_array( $normalized, $options, true ) ) {
+                                                $map[ $index ] = $target;
+                                                break;
+                                        }
+                                }
+                        }
+
+                        return $map;
+                }
+
+                protected static function ai_upload_csv_rows( string $path ): array {
+                        $rows   = array();
+                        $handle = fopen( $path, 'r' );
+                        if ( false === $handle ) {
+                                return $rows;
+                        }
+                        while ( ( $data = fgetcsv( $handle ) ) !== false ) {
+                                if ( ! empty( $data[0] ) ) {
+                                        $data[0] = preg_replace( '/^\xEF\xBB\xBF/', '', (string) $data[0] );
+                                }
+                                $rows[] = $data;
+                        }
+                        fclose( $handle );
+
+                        return $rows;
+                }
+
+                protected static function ai_upload_column_to_index( string $column ): int {
+                        $column = strtoupper( $column );
+                        $length = strlen( $column );
+                        $index  = 0;
+                        for ( $i = 0; $i < $length; $i++ ) {
+                                $index = $index * 26 + ( ord( $column[ $i ] ) - 64 );
+                        }
+                        return $index - 1;
+                }
+
+                protected static function ai_upload_xlsx_rows( string $path ): array {
+                        if ( ! class_exists( 'ZipArchive' ) ) {
+                                return array();
+                        }
+
+                        $zip = new \ZipArchive();
+                        if ( true !== $zip->open( $path ) ) {
+                                return array();
+                        }
+
+                        $shared_strings = array();
+                        $shared_xml     = $zip->getFromName( 'xl/sharedStrings.xml' );
+                        if ( false !== $shared_xml ) {
+                                $shared_doc = simplexml_load_string( $shared_xml );
+                                if ( $shared_doc && isset( $shared_doc->si ) ) {
+                                        foreach ( $shared_doc->si as $item ) {
+                                                $value = '';
+                                                if ( isset( $item->t ) ) {
+                                                        $value = (string) $item->t;
+                                                } elseif ( isset( $item->r ) ) {
+                                                        foreach ( $item->r as $run ) {
+                                                                $value .= (string) $run->t;
+                                                        }
+                                                }
+                                                $shared_strings[] = $value;
+                                        }
+                                }
+                        }
+
+                        $sheet_xml = $zip->getFromName( 'xl/worksheets/sheet1.xml' );
+                        if ( false === $sheet_xml ) {
+                                for ( $i = 0; $i < $zip->numFiles; $i++ ) {
+                                        $name = $zip->getNameIndex( $i );
+                                        if ( 0 === strpos( $name, 'xl/worksheets/' ) && '.xml' === substr( $name, -4 ) ) {
+                                                $sheet_xml = $zip->getFromName( $name );
+                                                break;
+                                        }
+                                }
+                        }
+                        $zip->close();
+
+                        if ( false === $sheet_xml ) {
+                                return array();
+                        }
+
+                        $doc = simplexml_load_string( $sheet_xml );
+                        if ( ! $doc || ! isset( $doc->sheetData ) ) {
+                                return array();
+                        }
+
+                        $rows = array();
+                        foreach ( $doc->sheetData->row as $row ) {
+                                $cells = array();
+                                foreach ( $row->c as $cell ) {
+                                        $ref = (string) $cell['r'];
+                                        if ( '' === $ref ) {
+                                                continue;
+                                        }
+                                        $column = preg_replace( '/[^A-Z]/', '', strtoupper( $ref ) );
+                                        $index  = self::ai_upload_column_to_index( $column );
+                                        $value  = '';
+                                        if ( isset( $cell->v ) ) {
+                                                $value = (string) $cell->v;
+                                                if ( isset( $cell['t'] ) && 's' === (string) $cell['t'] ) {
+                                                        $value = $shared_strings[ (int) $value ] ?? '';
+                                                }
+                                        } elseif ( isset( $cell->is ) && isset( $cell->is->t ) ) {
+                                                $value = (string) $cell->is->t;
+                                        }
+                                        $cells[ $index ] = $value;
+                                }
+                                if ( ! empty( $cells ) ) {
+                                        ksort( $cells );
+                                        $max       = max( array_keys( $cells ) );
+                                        $row_value = array();
+                                        for ( $i = 0; $i <= $max; $i++ ) {
+                                                $row_value[ $i ] = isset( $cells[ $i ] ) ? (string) $cells[ $i ] : '';
+                                        }
+                                        $rows[] = $row_value;
+                                }
+                        }
+
+                        return $rows;
+                }
+
+                protected static function normalize_upload_rows( array $rows ): array {
+                        if ( empty( $rows ) ) {
+                                return array();
+                        }
+
+                        $headers = array_shift( $rows );
+                        $map     = self::ai_upload_header_map( is_array( $headers ) ? $headers : array() );
+                        if ( empty( $map ) ) {
+                                return array();
+                        }
+
+                        $normalized = array();
+                        $row_number = 1;
+
+                        foreach ( $rows as $row ) {
+                                $row_number++;
+                                if ( ! is_array( $row ) ) {
+                                        continue;
+                                }
+                                $is_empty = true;
+                                foreach ( $row as $value ) {
+                                        if ( '' !== trim( (string) $value ) ) {
+                                                $is_empty = false;
+                                                break;
+                                        }
+                                }
+                                if ( $is_empty ) {
+                                        continue;
+                                }
+
+                                $current = array(
+                                        'source_row'    => $row_number,
+                                        'po_reference'  => '',
+                                        'sku'           => '',
+                                        'quantity'      => 0,
+                                        'date'          => '',
+                                        'update_notes'  => '',
+                                );
+
+                                foreach ( $map as $index => $field ) {
+                                        $value = isset( $row[ $index ] ) ? trim( (string) $row[ $index ] ) : '';
+                                        if ( 'quantity' === $field ) {
+                                                $current['quantity'] = (int) max( 0, round( (float) $value ) );
+                                        } elseif ( 'date' === $field ) {
+                                                $current['date'] = lpr_allocator_sanitize_ymd( $value );
+                                        } elseif ( 'notes' === $field ) {
+                                                $current['update_notes'] = sanitize_textarea_field( $value );
+                                        } elseif ( 'po_reference' === $field ) {
+                                                $current['po_reference'] = sanitize_text_field( $value );
+                                        } elseif ( 'sku' === $field ) {
+                                                $current['sku'] = sanitize_text_field( $value );
+                                        }
+                                }
+
+                                if ( '' === $current['po_reference'] && '' === $current['sku'] ) {
+                                        continue;
+                                }
+
+                                $normalized[] = $current;
+                                if ( count( $normalized ) >= self::upload_row_limit() ) {
+                                        break;
+                                }
+                        }
+
+                        return $normalized;
+                }
+
+                protected static function reconcile_uploaded_rows( array $rows ): array {
+                        $reconciled = array();
+
+                        foreach ( array_chunk( $rows, self::upload_chunk_size() ) as $chunk ) {
+                                foreach ( $chunk as $row ) {
+                                        $po_reference = sanitize_text_field( (string) ( $row['po_reference'] ?? '' ) );
+                                        $sku          = sanitize_text_field( (string) ( $row['sku'] ?? '' ) );
+                                        $po_candidates = array();
+                                        $line_matches  = array();
+
+                                        if ( '' !== $po_reference ) {
+                                                $po_query = new \WP_Query(
+                                                        array(
+                                                                'post_type'      => defined( __NAMESPACE__ . '\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po',
+                                                                'post_status'    => 'any',
+                                                                'posts_per_page' => 5,
+                                                                'fields'         => 'ids',
+                                                                'meta_query'     => array(
+                                                                        array(
+                                                                                'key'   => defined( __NAMESPACE__ . '\PO_META_PO_NUMBER' ) ? PO_META_PO_NUMBER : '_lpr_po_number',
+                                                                                'value' => $po_reference,
+                                                                        ),
+                                                                ),
+                                                        )
+                                                );
+                                                if ( ! empty( $po_query->posts ) ) {
+                                                        $po_candidates = array_map( 'absint', $po_query->posts );
+                                                } elseif ( preg_match( '/^\d+$/', $po_reference ) ) {
+                                                        $maybe_po = absint( $po_reference );
+                                                        if ( $maybe_po > 0 && get_post_type( $maybe_po ) === ( defined( __NAMESPACE__ . '\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po' ) ) {
+                                                                $po_candidates[] = $maybe_po;
+                                                        }
+                                                }
+                                                wp_reset_postdata();
+                                        }
+
+                                        $target_ids = array();
+                                        if ( '' !== $sku && function_exists( 'wc_get_product_id_by_sku' ) ) {
+                                                $target = absint( wc_get_product_id_by_sku( $sku ) );
+                                                if ( $target > 0 ) {
+                                                        $target_ids[] = $target;
+                                                }
+                                        }
+
+                                        foreach ( $po_candidates as $po_id ) {
+                                                $lines = get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', true );
+                                                if ( ! is_array( $lines ) ) {
+                                                        continue;
+                                                }
+                                                foreach ( $lines as $idx => $line ) {
+                                                        if ( ! is_array( $line ) ) {
+                                                                continue;
+                                                        }
+                                                        $target_id = isset( $line['variation_id'] ) ? absint( $line['variation_id'] ) : 0;
+                                                        if ( $target_id <= 0 ) {
+                                                                $target_id = isset( $line['product_id'] ) ? absint( $line['product_id'] ) : 0;
+                                                        }
+                                                        if ( ! empty( $target_ids ) && $target_id > 0 && in_array( $target_id, $target_ids, true ) ) {
+                                                                $line_matches[] = array(
+                                                                        'po_id'      => $po_id,
+                                                                        'line_index' => $idx,
+                                                                        'target_id'  => $target_id,
+                                                                );
+                                                        }
+                                                }
+                                        }
+
+                                        $classification = 'unmatched';
+                                        if ( count( $line_matches ) === 1 ) {
+                                                $classification = 'matched';
+                                        } elseif ( count( $line_matches ) > 1 || count( $po_candidates ) > 1 ) {
+                                                $classification = 'ambiguous';
+                                        }
+
+                                        $reconciled[] = array(
+                                                'source_row'      => max( 0, (int) ( $row['source_row'] ?? 0 ) ),
+                                                'po_reference'    => $po_reference,
+                                                'sku'             => $sku,
+                                                'quantity'        => max( 0, (int) ( $row['quantity'] ?? 0 ) ),
+                                                'date'            => sanitize_text_field( (string) ( $row['date'] ?? '' ) ),
+                                                'update_notes'    => sanitize_textarea_field( (string) ( $row['update_notes'] ?? '' ) ),
+                                                'classification'  => $classification,
+                                                'po_candidates'   => array_values( array_unique( array_map( 'absint', $po_candidates ) ) ),
+                                                'line_matches'    => $line_matches,
+                                        );
+                                }
+                        }
+
+                        return $reconciled;
+                }
+
+                protected static function build_reconciliation_summary( string $filename, array $rows ): array {
+                        $summary = array(
+                                'filename'        => sanitize_file_name( $filename ),
+                                'row_count'       => count( $rows ),
+                                'matched_count'   => 0,
+                                'ambiguous_count' => 0,
+                                'unmatched_count' => 0,
+                                'matched_rows'    => array(),
+                                'ambiguous_rows'  => array(),
+                                'unmatched_rows'  => array(),
+                                'status'          => 'processed',
+                        );
+
+                        foreach ( $rows as $row ) {
+                                $bucket = sanitize_key( (string) ( $row['classification'] ?? 'unmatched' ) );
+                                if ( 'matched' === $bucket ) {
+                                        $summary['matched_count']++;
+                                        $summary['matched_rows'][] = $row;
+                                } elseif ( 'ambiguous' === $bucket ) {
+                                        $summary['ambiguous_count']++;
+                                        $summary['ambiguous_rows'][] = $row;
+                                } else {
+                                        $summary['unmatched_count']++;
+                                        $summary['unmatched_rows'][] = $row;
+                                }
+                        }
+
+                        $summary['matched_rows']   = array_slice( $summary['matched_rows'], 0, 80 );
+                        $summary['ambiguous_rows'] = array_slice( $summary['ambiguous_rows'], 0, 80 );
+                        $summary['unmatched_rows'] = array_slice( $summary['unmatched_rows'], 0, 80 );
+
+                        return $summary;
+                }
+
+                protected static function maybe_process_uploaded_file( int $user_id ): array {
+                        if ( empty( $_FILES['assistant_file'] ) || ! is_array( $_FILES['assistant_file'] ) ) {
+                                return array();
+                        }
+
+                        $file = $_FILES['assistant_file'];
+                        $name = sanitize_file_name( (string) ( $file['name'] ?? '' ) );
+
+                        if ( UPLOAD_ERR_NO_FILE === (int) ( $file['error'] ?? UPLOAD_ERR_NO_FILE ) ) {
+                                return array();
+                        }
+                        if ( UPLOAD_ERR_OK !== (int) ( $file['error'] ?? UPLOAD_ERR_NO_FILE ) ) {
+                                return array( 'error' => __( 'Upload failed. Please try again.', 'lpr-backorder-allocator' ) );
+                        }
+
+                        $size = isset( $file['size'] ) ? (int) $file['size'] : 0;
+                        if ( $size <= 0 || $size > self::upload_max_file_bytes() ) {
+                                return array( 'error' => __( 'File is empty or exceeds the upload size limit (5MB).', 'lpr-backorder-allocator' ) );
+                        }
+
+                        $ext  = strtolower( pathinfo( $name, PATHINFO_EXTENSION ) );
+                        $mimes = self::ai_upload_allowed_mimes();
+                        if ( ! isset( $mimes[ $ext ] ) ) {
+                                return array( 'error' => __( 'Unsupported file type. Please upload a CSV or XLSX file.', 'lpr-backorder-allocator' ) );
+                        }
+
+                        $tmp_name = isset( $file['tmp_name'] ) ? (string) $file['tmp_name'] : '';
+                        if ( '' === $tmp_name || ! is_uploaded_file( $tmp_name ) ) {
+                                return array( 'error' => __( 'Unable to verify uploaded file source.', 'lpr-backorder-allocator' ) );
+                        }
+
+                        $check = wp_check_filetype_and_ext( $tmp_name, $name );
+                        $detected_ext  = isset( $check['ext'] ) ? strtolower( (string) $check['ext'] ) : '';
+                        $detected_type = isset( $check['type'] ) ? strtolower( (string) $check['type'] ) : '';
+                        if ( '' !== $detected_ext && $detected_ext !== $ext ) {
+                                return array( 'error' => __( 'File extension/type mismatch. Please re-export and upload again.', 'lpr-backorder-allocator' ) );
+                        }
+                        if ( '' !== $detected_type && ! in_array( $detected_type, $mimes[ $ext ], true ) ) {
+                                return array( 'error' => __( 'Unsupported file MIME type.', 'lpr-backorder-allocator' ) );
+                        }
+
+                        $temp_copy = wp_tempnam( 'lpr-ai-upload-' . $ext );
+                        if ( ! $temp_copy ) {
+                                return array( 'error' => __( 'Unable to create temporary upload storage.', 'lpr-backorder-allocator' ) );
+                        }
+
+                        $rows = array();
+                        try {
+                                if ( ! @move_uploaded_file( $tmp_name, $temp_copy ) ) {
+                                        if ( ! @copy( $tmp_name, $temp_copy ) ) {
+                                                return array( 'error' => __( 'Unable to store uploaded file securely.', 'lpr-backorder-allocator' ) );
+                                        }
+                                }
+
+                                if ( 'csv' === $ext ) {
+                                        $rows = self::ai_upload_csv_rows( $temp_copy );
+                                } elseif ( 'xlsx' === $ext ) {
+                                        $rows = self::ai_upload_xlsx_rows( $temp_copy );
+                                }
+                        } finally {
+                                if ( file_exists( $temp_copy ) ) {
+                                        wp_delete_file( $temp_copy );
+                                }
+                        }
+
+                        $normalized_rows = self::normalize_upload_rows( $rows );
+                        $reconciled      = self::reconcile_uploaded_rows( $normalized_rows );
+                        $summary         = self::build_reconciliation_summary( $name, $reconciled );
+                        update_user_meta( $user_id, self::reconciliation_meta_key(), $summary );
+                        self::record_upload_log( $user_id, $summary, 'processed' );
+
+                        return $summary;
+                }
+
+                protected static function build_upload_context_line( array $summary ): string {
+                        if ( empty( $summary ) ) {
+                                return '';
+                        }
+
+                        $parts = array();
+                        $parts[] = 'Uploaded file: ' . sanitize_file_name( (string) ( $summary['filename'] ?? '' ) );
+                        $parts[] = 'Rows=' . (int) ( $summary['row_count'] ?? 0 );
+                        $parts[] = 'Matched=' . (int) ( $summary['matched_count'] ?? 0 );
+                        $parts[] = 'Ambiguous=' . (int) ( $summary['ambiguous_count'] ?? 0 );
+                        $parts[] = 'Unmatched=' . (int) ( $summary['unmatched_count'] ?? 0 );
+
+                        $examples = array();
+                        foreach ( array_slice( (array) ( $summary['matched_rows'] ?? array() ), 0, 10 ) as $row ) {
+                                if ( ! is_array( $row ) ) {
+                                        continue;
+                                }
+                                $po  = sanitize_text_field( (string) ( $row['po_reference'] ?? '' ) );
+                                $sku = sanitize_text_field( (string) ( $row['sku'] ?? '' ) );
+                                $qty = max( 0, (int) ( $row['quantity'] ?? 0 ) );
+                                $date = sanitize_text_field( (string) ( $row['date'] ?? '' ) );
+                                $notes = sanitize_textarea_field( (string) ( $row['update_notes'] ?? '' ) );
+                                $examples[] = sprintf( 'PO=%s SKU=%s Qty=%d Date=%s Notes=%s', $po, $sku, $qty, $date, $notes );
+                        }
+
+                        if ( ! empty( $examples ) ) {
+                                $parts[] = 'Matched rows: ' . implode( ' || ', $examples );
+                        }
+
+                        return implode( '. ', $parts );
+                }
+
                 protected static function normalize_ui_error( string $error_code, string $error_message ): array {
                         $code = 'unknown';
 
@@ -18960,6 +19482,29 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
 
                         $settings = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array();
                         $model    = isset( $settings['ai_model'] ) ? sanitize_text_field( (string) $settings['ai_model'] ) : $model;
+                        $reconciliation_summary = self::maybe_process_uploaded_file( $user_id );
+                        if ( ! empty( $reconciliation_summary['error'] ) ) {
+                                self::record_upload_log(
+                                        $user_id,
+                                        array(
+                                                'filename'        => sanitize_file_name( (string) ( $_FILES['assistant_file']['name'] ?? '' ) ),
+                                                'row_count'       => 0,
+                                                'matched_count'   => 0,
+                                                'ambiguous_count' => 0,
+                                                'unmatched_count' => 0,
+                                        ),
+                                        'failed'
+                                );
+                                wp_send_json_error(
+                                        array(
+                                                'error' => array(
+                                                        'code'    => 'upload_failed',
+                                                        'message' => sanitize_text_field( (string) $reconciliation_summary['error'] ),
+                                                ),
+                                        ),
+                                        400
+                                );
+                        }
                         $guard    = lpr_allocator_validate_ai_guardrails( $latest_message, $settings );
                         if ( empty( $guard['ok'] ) ) {
                                 self::record_request_meta( $user_id, $model, 0.0, 'blocked' );
@@ -18973,6 +19518,14 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 $context = array_slice( $history, -$context_limit );
                         }
                         $context = self::normalize_history( $context );
+
+                        if ( ! empty( $reconciliation_summary ) ) {
+                                $context[] = array(
+                                        'role'    => 'user',
+                                        'message' => self::build_upload_context_line( $reconciliation_summary ),
+                                        'time'    => wp_date( 'Y-m-d H:i:s' ),
+                                );
+                        }
 
                         $parsed = lpr_allocator_generate_ai_assistant_reply( $latest_message, $context, $settings );
 
@@ -19011,9 +19564,10 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
 
                         wp_send_json_success(
                                 array(
-                                        'assistant'     => $assistant_turn,
-                                        'history'       => $history,
-                                        'draft_bundles' => self::get_draft_bundles( $user_id ),
+                                        'assistant'              => $assistant_turn,
+                                        'history'                => $history,
+                                        'draft_bundles'          => self::get_draft_bundles( $user_id ),
+                                        'reconciliation_summary' => $reconciliation_summary,
                                 )
                         );
                 }
@@ -19135,6 +19689,10 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         $history_key = self::history_meta_key();
                         $history     = self::normalize_history( get_user_meta( $user_id, $history_key, true ) );
                         $draft_bundles = self::get_draft_bundles( $user_id );
+                        $reconciliation_summary = get_user_meta( $user_id, self::reconciliation_meta_key(), true );
+                        if ( ! is_array( $reconciliation_summary ) ) {
+                                $reconciliation_summary = array();
+                        }
                         $last_apply_bundle = get_user_meta( $user_id, self::apply_result_meta_key(), true );
                         if ( ! is_array( $last_apply_bundle ) ) {
                                 $last_apply_bundle = array();
@@ -19223,6 +19781,13 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         <div class="inside">
                                                 <h2 style="margin-top:0;"><?php echo esc_html__( 'Draft Overview', 'lpr-backorder-allocator' ); ?></h2>
                                                 <p class="description"><?php echo esc_html__( 'Pending proposed changes are stored as drafts and never auto-applied. Review before confirming.', 'lpr-backorder-allocator' ); ?></p>
+                                                <div id="lpr-ai-reconciliation-summary" style="margin:8px 0 12px;">
+                                                        <?php if ( ! empty( $reconciliation_summary ) ) : ?>
+                                                                <div class="notice notice-info inline" style="margin:0;">
+                                                                        <p style="margin:8px 12px;"><strong><?php echo esc_html__( 'Uploaded reconciliation', 'lpr-backorder-allocator' ); ?>:</strong> <?php echo esc_html( (string) ( $reconciliation_summary['filename'] ?? '' ) ); ?> — <?php echo esc_html( sprintf( __( '%1$d rows, %2$d matched, %3$d ambiguous, %4$d unmatched', 'lpr-backorder-allocator' ), (int) ( $reconciliation_summary['row_count'] ?? 0 ), (int) ( $reconciliation_summary['matched_count'] ?? 0 ), (int) ( $reconciliation_summary['ambiguous_count'] ?? 0 ), (int) ( $reconciliation_summary['unmatched_count'] ?? 0 ) ) ); ?></p>
+                                                                </div>
+                                                        <?php endif; ?>
+                                                </div>
                                                 <div id="lpr-ai-apply-result">
                                                         <?php if ( ! empty( $last_apply_bundle['result'] ) && is_array( $last_apply_bundle['result'] ) ) : ?>
                                                                 <div class="notice notice-info inline"><p>
@@ -19319,12 +19884,17 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                         <?php endif; ?>
                                                 </div>
 
-                                                <form id="lpr-ai-chat-form" method="post" action="">
+                                                <form id="lpr-ai-chat-form" method="post" action="" enctype="multipart/form-data">
                                                         <?php wp_nonce_field( 'lpr_ai_assistant_chat', 'lpr_ai_nonce' ); ?>
                                                         <input type="hidden" name="lpr_ai_action" value="send" />
                                                         <p>
                                                                 <label for="lpr-ai-message"><strong><?php echo esc_html__( 'Message', 'lpr-backorder-allocator' ); ?></strong></label><br />
                                                                 <textarea id="lpr-ai-message" name="lpr_ai_message" rows="5" class="large-text" placeholder="<?php echo esc_attr__( 'Describe what draft guidance you need…', 'lpr-backorder-allocator' ); ?>" required><?php echo esc_textarea( $draft ); ?></textarea>
+                                                        </p>
+                                                        <p>
+                                                                <label for="lpr-ai-upload"><strong><?php echo esc_html__( 'Upload updates file (optional)', 'lpr-backorder-allocator' ); ?></strong></label><br />
+                                                                <input type="file" id="lpr-ai-upload" name="assistant_file" accept=".csv,.xlsx" />
+                                                                <span class="description"><?php echo esc_html__( 'Accepted: CSV/XLSX up to 5MB. Parsed rows are normalized and reconciled before drafting actions.', 'lpr-backorder-allocator' ); ?></span>
                                                         </p>
                                                         <p style="display:flex; gap:8px; align-items:center;">
                                                                 <button type="submit" class="button button-primary" id="lpr-ai-send"><?php echo esc_html__( 'Send', 'lpr-backorder-allocator' ); ?></button>
@@ -19351,6 +19921,8 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         var historyRoot = document.getElementById('lpr-ai-history');
                                         var draftRoot = document.getElementById('lpr-ai-draft-overview');
                                         var applyResultRoot = document.getElementById('lpr-ai-apply-result');
+                                        var reconciliationRoot = document.getElementById('lpr-ai-reconciliation-summary');
+                                        var uploadInput = document.getElementById('lpr-ai-upload');
                                         var messageInput = document.getElementById('lpr-ai-message');
                                         var sendButton = document.getElementById('lpr-ai-send');
                                         var loading = document.getElementById('lpr-ai-loading');
@@ -19359,7 +19931,26 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         var clearButton = document.getElementById('lpr-ai-clear');
                                         var ajaxUrl = window.ajaxurl || '<?php echo esc_js( admin_url( 'admin-ajax.php' ) ); ?>';
 
-                                        function renderApplySummary(result) {
+                                        
+                                        function renderReconciliationSummary(summary) {
+                                                if (!reconciliationRoot) {
+                                                        return;
+                                                }
+                                                reconciliationRoot.innerHTML = '';
+                                                if (!summary || !summary.row_count) {
+                                                        return;
+                                                }
+                                                var wrap = document.createElement('div');
+                                                wrap.className = 'notice notice-info inline';
+                                                wrap.style.margin = '0';
+                                                var p = document.createElement('p');
+                                                p.style.margin = '8px 12px';
+                                                p.textContent = 'Uploaded reconciliation: ' + (summary.filename || '') + ' — ' + (summary.row_count || 0) + ' rows, ' + (summary.matched_count || 0) + ' matched, ' + (summary.ambiguous_count || 0) + ' ambiguous, ' + (summary.unmatched_count || 0) + ' unmatched';
+                                                wrap.appendChild(p);
+                                                reconciliationRoot.appendChild(wrap);
+                                        }
+
+function renderApplySummary(result) {
                                                 if (!applyResultRoot) {
                                                         return;
                                                 }
@@ -19633,6 +20224,9 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                 payload.append('action', 'lpr_ai_assistant_submit');
                                                 payload.append('_wpnonce', nonceField ? nonceField.value : '');
                                                 payload.append('message', messageInput ? messageInput.value : '');
+                                                if (uploadInput && uploadInput.files && uploadInput.files.length) {
+                                                        payload.append('assistant_file', uploadInput.files[0]);
+                                                }
 
                                                 window.fetch(ajaxUrl, {
                                                         method: 'POST',
@@ -19655,12 +20249,16 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                         if (messageInput) {
                                                                 messageInput.value = '';
                                                         }
+                                                        if (uploadInput) {
+                                                                uploadInput.value = '';
+                                                        }
                                                         if (result.data && result.data.history) {
                                                                 renderHistory(result.data.history);
                                                         }
                                                         if (result.data && result.data.draft_bundles) {
                                                                 renderDraftOverview(result.data.draft_bundles);
                                                         }
+                                                        renderReconciliationSummary(result.data && result.data.reconciliation_summary ? result.data.reconciliation_summary : null);
                                                 }).catch(function() {
                                                         window.alert('<?php echo esc_js( __( 'Assistant request failed. Please try again.', 'lpr-backorder-allocator' ) ); ?>');
                                                 }).finally(function() {
@@ -19669,6 +20267,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         });
 
                                         renderDraftOverview(<?php echo wp_json_encode( array_values( $draft_bundles ) ); ?>);
+                                        renderReconciliationSummary(<?php echo wp_json_encode( $reconciliation_summary ); ?>);
                                 })();
                                 </script>
                         </div>
