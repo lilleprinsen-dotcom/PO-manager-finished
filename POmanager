@@ -18933,6 +18933,12 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 'after'           => $eta,
                                 'target_type'     => 'order_item',
                                 'target_id'       => $item_id,
+                                '_rollback'       => array(
+                                        'type'     => 'order_item_meta',
+                                        'item_id'  => $item_id,
+                                        'meta_key' => $meta_key,
+                                        'before'   => $before,
+                                ),
                         );
                 }
 
@@ -18964,7 +18970,57 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 'after'           => $delivery_date,
                                 'target_type'     => 'order',
                                 'target_id'       => $order_id,
+                                '_rollback'       => array(
+                                        'type'     => 'post_meta',
+                                        'post_id'  => $order_id,
+                                        'meta_key' => $meta_key,
+                                        'before'   => $before,
+                                ),
                         );
+                }
+
+                protected static function rollback_line_result( array $line_result ): bool {
+                        $rollback = isset( $line_result['_rollback'] ) && is_array( $line_result['_rollback'] ) ? $line_result['_rollback'] : array();
+                        $type     = sanitize_key( (string) ( $rollback['type'] ?? '' ) );
+
+                        if ( 'order_item_meta' === $type ) {
+                                $item_id  = absint( $rollback['item_id'] ?? 0 );
+                                $meta_key = sanitize_text_field( (string) ( $rollback['meta_key'] ?? '' ) );
+                                $before   = sanitize_text_field( (string) ( $rollback['before'] ?? '' ) );
+                                if ( $item_id <= 0 || '' === $meta_key ) {
+                                        return false;
+                                }
+                                $item = function_exists( 'wc_get_order_item' ) ? wc_get_order_item( $item_id ) : null;
+                                if ( ! ( $item instanceof \WC_Order_Item_Product ) ) {
+                                        return false;
+                                }
+                                $item->update_meta_data( $meta_key, $before );
+                                $item->save();
+                                return true;
+                        }
+
+                        if ( 'post_meta' === $type ) {
+                                $post_id  = absint( $rollback['post_id'] ?? 0 );
+                                $meta_key = sanitize_text_field( (string) ( $rollback['meta_key'] ?? '' ) );
+                                $before   = sanitize_text_field( (string) ( $rollback['before'] ?? '' ) );
+                                if ( $post_id <= 0 || '' === $meta_key ) {
+                                        return false;
+                                }
+                                update_post_meta( $post_id, $meta_key, $before );
+                                return true;
+                        }
+
+                        if ( 'po_lines' === $type ) {
+                                $po_id  = absint( $rollback['po_id'] ?? 0 );
+                                $lines  = isset( $rollback['lines'] ) && is_array( $rollback['lines'] ) ? $rollback['lines'] : null;
+                                if ( $po_id <= 0 || null === $lines ) {
+                                        return false;
+                                }
+                                update_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', $lines );
+                                return true;
+                        }
+
+                        return false;
                 }
 
                 protected static function build_before_after_map( string $action_type, array $identifiers, array $line_changes ): array {
@@ -19074,6 +19130,9 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         $applied_count  = 0;
                         $skipped_count  = 0;
                         $had_error      = false;
+                        $applied_line_indexes = array();
+                        $rolled_back_count    = 0;
+                        $rollback_errors      = array();
 
                         foreach ( $line_changes as $index => $line_change ) {
                                 $line_identifier = sanitize_text_field( (string) ( $line_change['line_identifier'] ?? '' ) );
@@ -19104,6 +19163,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                 if ( ! is_array( $lines ) ) {
                                                         $lines = array();
                                                 }
+                                                $before_lines = $lines;
                                                 $qty = isset( $line_change['quantity'] ) ? max( 0, (int) round( (float) $line_change['quantity'] ) ) : 0;
                                                 if ( $qty <= 0 ) {
                                                         throw new \RuntimeException( 'Line quantity must be positive.' );
@@ -19137,6 +19197,11 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                         'after'           => sprintf( 'qty %d', $qty ),
                                                         'target_type'     => 'po_line',
                                                         'target_id'       => $product_id,
+                                                        '_rollback'       => array(
+                                                                'type'  => 'po_lines',
+                                                                'po_id' => $po_id,
+                                                                'lines' => $before_lines,
+                                                        ),
                                                 );
                                         } else {
                                                 throw new \RuntimeException( 'Unsupported action type.' );
@@ -19144,6 +19209,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
 
                                         $applied_count++;
                                         $results[] = $line_result;
+                                        $applied_line_indexes[] = array_key_last( $results );
                                 } catch ( \Throwable $t ) {
                                         $had_error = true;
                                         $message   = sanitize_text_field( (string) lpr_allocator_redact_sensitive_log_fields( (string) $t->getMessage() ) );
@@ -19158,12 +19224,49 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 }
                         }
 
+                        if ( $had_error && $applied_count > 0 ) {
+                                for ( $i = count( $applied_line_indexes ) - 1; $i >= 0; $i-- ) {
+                                        $result_index = $applied_line_indexes[ $i ];
+                                        if ( ! isset( $results[ $result_index ] ) || ! is_array( $results[ $result_index ] ) ) {
+                                                continue;
+                                        }
+                                        if ( self::rollback_line_result( $results[ $result_index ] ) ) {
+                                                $rolled_back_count++;
+                                                $results[ $result_index ]['status']  = 'rolled_back';
+                                                $results[ $result_index ]['message'] = __( 'Rolled back due to failure in this bundle.', 'lpr-backorder-allocator' );
+                                        } else {
+                                                $rollback_errors[] = sprintf(
+                                                        'Rollback failed for line %s.',
+                                                        sanitize_text_field( (string) ( $results[ $result_index ]['line_identifier'] ?? 'n/a' ) )
+                                                );
+                                        }
+                                }
+                                $applied_count = max( 0, $applied_count - $rolled_back_count );
+                                if ( $rolled_back_count > 0 ) {
+                                        $errors[] = sprintf(
+                                                __( 'Apply aborted and %d previously applied row(s) were rolled back.', 'lpr-backorder-allocator' ),
+                                                $rolled_back_count
+                                        );
+                                }
+                                if ( ! empty( $rollback_errors ) ) {
+                                        $errors = array_merge( $errors, $rollback_errors );
+                                }
+                        }
+
+                        foreach ( $results as &$result_row ) {
+                                if ( is_array( $result_row ) ) {
+                                        unset( $result_row['_rollback'] );
+                                }
+                        }
+                        unset( $result_row );
+
                         return array(
                                 'applied_count' => $applied_count,
                                 'skipped_count' => $skipped_count,
                                 'error_count'   => count( $errors ),
                                 'errors'        => $errors,
                                 'line_results'  => $results,
+                                'rolled_back_count' => $rolled_back_count,
                         );
                 }
 
@@ -19393,18 +19496,25 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                 }
 
                 protected static function normalize_upload_rows( array $rows ): array {
+                        $result = array(
+                                'rows'  => array(),
+                                'error' => '',
+                        );
                         if ( empty( $rows ) ) {
-                                return array();
+                                $result['error'] = __( 'Uploaded file appears to be empty.', 'lpr-backorder-allocator' );
+                                return $result;
                         }
 
                         $headers = array_shift( $rows );
                         $map     = self::ai_upload_header_map( is_array( $headers ) ? $headers : array() );
                         if ( empty( $map ) ) {
-                                return array();
+                                $result['error'] = __( 'Unable to map upload headers. Include recognizable columns like PO reference, SKU, quantity, date, or notes.', 'lpr-backorder-allocator' );
+                                return $result;
                         }
 
                         $normalized = array();
                         $row_number = 1;
+                        $raw_data_rows = 0;
 
                         foreach ( $rows as $row ) {
                                 $row_number++;
@@ -19421,6 +19531,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 if ( $is_empty ) {
                                         continue;
                                 }
+                                $raw_data_rows++;
 
                                 $current = array(
                                         'source_row'    => $row_number,
@@ -19456,7 +19567,13 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 }
                         }
 
-                        return $normalized;
+                        if ( $raw_data_rows > 0 && empty( $normalized ) ) {
+                                $result['error'] = __( 'Upload rows could not be normalized. Verify required identifiers (PO reference or SKU) and row formatting.', 'lpr-backorder-allocator' );
+                                return $result;
+                        }
+
+                        $result['rows'] = $normalized;
+                        return $result;
                 }
 
                 protected static function reconcile_uploaded_rows( array $rows ): array {
@@ -19634,6 +19751,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         }
 
                         $rows = array();
+                        $parse_error = '';
                         try {
                                 if ( ! @move_uploaded_file( $tmp_name, $temp_copy ) ) {
                                         if ( ! @copy( $tmp_name, $temp_copy ) ) {
@@ -19652,7 +19770,20 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 }
                         }
 
-                        $normalized_rows = self::normalize_upload_rows( $rows );
+                        if ( empty( $rows ) ) {
+                                $parse_error = 'xlsx' === $ext
+                                        ? __( 'Unable to parse XLSX rows from uploaded file.', 'lpr-backorder-allocator' )
+                                        : __( 'Unable to parse CSV rows from uploaded file.', 'lpr-backorder-allocator' );
+                        }
+                        if ( '' !== $parse_error ) {
+                                return array( 'error' => $parse_error );
+                        }
+
+                        $normalized_result = self::normalize_upload_rows( $rows );
+                        if ( ! empty( $normalized_result['error'] ) ) {
+                                return array( 'error' => sanitize_text_field( (string) $normalized_result['error'] ) );
+                        }
+                        $normalized_rows = isset( $normalized_result['rows'] ) && is_array( $normalized_result['rows'] ) ? $normalized_result['rows'] : array();
                         $reconciled      = self::reconcile_uploaded_rows( $normalized_rows );
                         $summary         = self::build_reconciliation_summary( $name, $reconciled );
                         update_user_meta( $user_id, self::reconciliation_meta_key(), $summary );
@@ -19969,6 +20100,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 $found        = true;
                                 $active_bundle = $bundle;
                                 $actual_line_count   = count( (array) ( $active_bundle['line_changes'] ?? array() ) );
+                                $actual_apply_count  = count( (array) ( $active_bundle['before_after'] ?? array() ) );
                                 $digest_payload      = wp_json_encode( array( $active_bundle['id'], $active_bundle['action_type'], $active_bundle['before_after'] ) );
                                 $actual_digest       = hash( 'sha256', (string) $digest_payload );
                                 $actual_client_digest = (string) sprintf( '%u', crc32( (string) $digest_payload ) );
@@ -19994,7 +20126,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                 409
                                         );
                                 }
-                                if ( $expected_apply > 0 && $expected_apply !== $actual_line_count ) {
+                                if ( $expected_apply > 0 && $expected_apply !== $actual_apply_count ) {
                                         wp_send_json_error(
                                                 array(
                                                         'error' => array(
