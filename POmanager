@@ -18490,6 +18490,14 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         return 'lpr_allocator_ai_assistant_request_meta';
                 }
 
+                protected static function nonce_action(): string {
+                        return 'lpr_ai_assistant_chat';
+                }
+
+                protected static function nonce_field_name(): string {
+                        return '_wpnonce';
+                }
+
                 protected static function draft_bundle_meta_key(): string {
                         return 'lpr_allocator_ai_assistant_draft_bundles';
                 }
@@ -19936,7 +19944,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                 public static function ajax_submit(): void {
                         ob_start();
                         try {
-                                $nonce_valid = check_ajax_referer( 'lpr_ai_assistant_chat', '_wpnonce', false );
+                                $nonce_valid = check_ajax_referer( self::nonce_action(), self::nonce_field_name(), false );
                                 if ( false === $nonce_valid ) {
                                         throw new \RuntimeException( 'nonce check failed' );
                                 }
@@ -20133,7 +20141,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                 }
 
                 public static function ajax_clear(): void {
-                        check_ajax_referer( 'lpr_ai_assistant_chat' );
+                        check_ajax_referer( self::nonce_action(), self::nonce_field_name() );
 
                         if ( ! current_user_can( 'manage_woocommerce' ) ) {
                                 wp_send_json_error(
@@ -20159,7 +20167,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                 }
 
                 public static function ajax_confirm_draft(): void {
-                        check_ajax_referer( 'lpr_ai_assistant_chat' );
+                        check_ajax_referer( self::nonce_action(), self::nonce_field_name() );
 
                         if ( ! self::can_apply_draft_actions() ) {
                                 wp_send_json_error(
@@ -20378,7 +20386,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                 }
 
                 public static function ajax_retry_failed(): void {
-                        check_ajax_referer( 'lpr_ai_assistant_chat' );
+                        check_ajax_referer( self::nonce_action(), self::nonce_field_name() );
 
                         if ( ! self::can_apply_draft_actions() ) {
                                 wp_send_json_error(
@@ -20464,7 +20472,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         $draft       = '';
 
                         if ( 'POST' === strtoupper( (string) $_SERVER['REQUEST_METHOD'] ) ) {
-                                check_admin_referer( 'lpr_ai_assistant_chat', 'lpr_ai_nonce' );
+                                check_admin_referer( self::nonce_action(), self::nonce_field_name() );
 
                                 $action = isset( $_POST['lpr_ai_action'] ) ? sanitize_key( wp_unslash( $_POST['lpr_ai_action'] ) ) : 'send';
 
@@ -20690,7 +20698,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                 </div>
 
                                                 <form id="lpr-ai-chat-form" method="post" action="" enctype="multipart/form-data">
-                                                        <?php wp_nonce_field( 'lpr_ai_assistant_chat', 'lpr_ai_nonce' ); ?>
+                                                        <?php wp_nonce_field( self::nonce_action(), self::nonce_field_name() ); ?>
                                                         <input type="hidden" name="lpr_ai_action" value="send" />
                                                         <p>
                                                                 <label for="lpr-ai-message"><strong><?php echo esc_html__( 'Message', 'lpr-backorder-allocator' ); ?></strong></label><br />
@@ -20713,7 +20721,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                 </form>
 
                                                 <form method="post" action="" style="margin-top:10px;">
-                                                        <?php wp_nonce_field( 'lpr_ai_assistant_chat', 'lpr_ai_nonce' ); ?>
+                                                        <?php wp_nonce_field( self::nonce_action(), self::nonce_field_name() ); ?>
                                                         <input type="hidden" name="lpr_ai_action" value="clear" />
                                                         <button type="submit" class="button button-secondary" id="lpr-ai-clear"><?php echo esc_html__( 'Clear conversation', 'lpr-backorder-allocator' ); ?></button>
                                                 </form>
@@ -20737,7 +20745,9 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         var sendButton = document.getElementById('lpr-ai-send');
                                         var loading = document.getElementById('lpr-ai-loading');
                                         var loadingText = document.getElementById('lpr-ai-loading-text');
-                                        var nonceField = form.querySelector('input[name="_wpnonce"]');
+                                        var nonceFieldName = <?php echo wp_json_encode( self::nonce_field_name() ); ?>;
+                                        var nonceFieldSelector = 'input[name="' + nonceFieldName.replace(/"/g, '\\"') + '"]';
+                                        var nonceField = form.querySelector(nonceFieldSelector);
                                         var clearButton = document.getElementById('lpr-ai-clear');
                                         var retryFailedButton = document.getElementById('lpr-ai-retry-failed');
                                         var ajaxUrl = window.ajaxurl || '<?php echo esc_js( admin_url( 'admin-ajax.php' ) ); ?>';
@@ -20989,7 +20999,7 @@ function renderApplySummary(result) {
 
                                                         var payload = new window.FormData();
                                                         payload.append('action', 'lpr_ai_assistant_clear');
-                                                        payload.append('_wpnonce', nonceField ? nonceField.value : '');
+                                                        payload.append(nonceFieldName, nonceField ? nonceField.value : '');
 
                                                         setLoading(true);
                                                         window.fetch(ajaxUrl, {
@@ -21049,7 +21059,7 @@ function renderApplySummary(result) {
 
                                                         var payload = new window.FormData();
                                                         payload.append('action', 'lpr_ai_assistant_confirm_draft');
-                                                        payload.append('_wpnonce', nonceField ? nonceField.value : '');
+                                                        payload.append(nonceFieldName, nonceField ? nonceField.value : '');
                                                         payload.append('bundle_id', bundleId);
                                                         payload.append('idempotency_key', idempotencyKey);
                                                         payload.append('expected_line_count', String(lineCount));
@@ -21086,7 +21096,7 @@ function renderApplySummary(result) {
                                                         event.preventDefault();
                                                         var payload = new window.FormData();
                                                         payload.append('action', 'lpr_ai_assistant_retry_failed');
-                                                        payload.append('_wpnonce', nonceField ? nonceField.value : '');
+                                                        payload.append(nonceFieldName, nonceField ? nonceField.value : '');
 
                                                         setLoading(true);
                                                         window.fetch(ajaxUrl, {
@@ -21118,7 +21128,7 @@ function renderApplySummary(result) {
 
                                                 var payload = new window.FormData();
                                                 payload.append('action', 'lpr_ai_assistant_submit');
-                                                payload.append('_wpnonce', nonceField ? nonceField.value : '');
+                                                payload.append(nonceFieldName, nonceField ? nonceField.value : '');
                                                 payload.append('message', messageInput ? messageInput.value : '');
                                                 if (uploadInput && uploadInput.files && uploadInput.files.length) {
                                                         payload.append('assistant_file', uploadInput.files[0]);
