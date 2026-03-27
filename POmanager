@@ -8,6 +8,17 @@ namespace LPR\Allocator;
  * - ETA tracking, PO allocation queues, and FIFO/VIP allocation engines.
  * - Admin UI (metaboxes, reports, quick PO drafts) and cron/Action Scheduler jobs.
  * - Helper utilities for backorder math, PO indexing, and quick-add workflows.
+ *
+ * MVP scope (internal):
+ * - In scope: admin chat field, OpenAI connection, send/receive messages, basic history.
+ * - Out of scope: automatic PO creation/live updates, spreadsheet ingestion, autonomous actions.
+ * - Constraint: all implementation remains in POmanager for this phase.
+ *
+ * MVP success checklist (implementation + QA):
+ * - Admin can enter and submit a chat prompt from the POmanager interface.
+ * - OpenAI request/response cycle works end-to-end and returns a visible reply.
+ * - Session shows a basic running history of sent/received messages.
+ * - No automatic PO mutations or background autonomous behaviors are triggered.
  */
 
 if ( ! defined( __NAMESPACE__ . '\VERSION' ) ) {
