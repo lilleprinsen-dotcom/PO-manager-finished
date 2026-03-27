@@ -112,6 +112,237 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_is_incoming_request' ) )
         }
 }
 
+
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_build_ai_chat_payload' ) ) {
+        /**
+         * Build a compact OpenAI chat payload from admin/user input plus a short system instruction.
+         *
+         * @param string $admin_message      Admin-provided user message.
+         * @param string $system_instruction Short system instruction.
+         * @param array  $settings           Optional allocator settings.
+         * @return array
+         */
+        function lpr_allocator_build_ai_chat_payload( string $admin_message, string $system_instruction, array $settings = array() ): array {
+                $model             = isset( $settings['ai_model'] ) ? sanitize_text_field( (string) $settings['ai_model'] ) : 'gpt-4o-mini';
+                $max_output_tokens = isset( $settings['ai_max_output_tokens'] ) ? max( 64, (int) $settings['ai_max_output_tokens'] ) : 800;
+
+                $system_content = trim( wp_strip_all_tags( $system_instruction ) );
+                $user_content   = trim( (string) $admin_message );
+
+                $messages = array();
+                if ( '' !== $system_content ) {
+                        $messages[] = array(
+                                'role'    => 'system',
+                                'content' => $system_content,
+                        );
+                }
+
+                $messages[] = array(
+                        'role'    => 'user',
+                        'content' => $user_content,
+                );
+
+                return array(
+                        'model'      => $model,
+                        'messages'   => $messages,
+                        'max_tokens' => $max_output_tokens,
+                );
+        }
+}
+
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_openai_chat_request' ) ) {
+        /**
+         * Send a chat request to OpenAI using WordPress HTTP API.
+         *
+         * @param array $payload  Chat-completions payload.
+         * @param array $settings Optional allocator settings.
+         * @return array{response:mixed,latency_ms:float}
+         */
+        function lpr_allocator_openai_chat_request( array $payload, array $settings = array() ): array {
+                $api_key = isset( $settings['ai_api_key'] ) ? trim( (string) $settings['ai_api_key'] ) : '';
+                $timeout = isset( $settings['ai_timeout'] ) ? max( 5, (int) $settings['ai_timeout'] ) : 20;
+
+                $started_at = microtime( true );
+                $response   = wp_remote_post(
+                        'https://api.openai.com/v1/chat/completions',
+                        array(
+                                'timeout' => $timeout,
+                                'headers' => array(
+                                        'Authorization' => 'Bearer ' . $api_key,
+                                        'Content-Type'  => 'application/json',
+                                ),
+                                'body'    => wp_json_encode( $payload ),
+                        )
+                );
+                $latency_ms = ( microtime( true ) - $started_at ) * 1000;
+
+                return array(
+                        'response'   => $response,
+                        'latency_ms' => $latency_ms,
+                );
+        }
+}
+
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_parse_openai_chat_response' ) ) {
+        /**
+         * Parse and normalize OpenAI chat responses.
+         *
+         * @param mixed $response   wp_remote_post result.
+         * @param float $latency_ms Measured latency in milliseconds.
+         * @return array{assistant_text:string,error_code:string,error_message:string,latency_ms:float}
+         */
+        function lpr_allocator_parse_openai_chat_response( $response, float $latency_ms = 0.0 ): array {
+                $normalized = array(
+                        'assistant_text' => '',
+                        'error_code'     => '',
+                        'error_message'  => '',
+                        'latency_ms'     => round( $latency_ms, 2 ),
+                );
+
+                if ( is_wp_error( $response ) ) {
+                        $normalized['error_code']    = (string) $response->get_error_code();
+                        $normalized['error_message'] = (string) $response->get_error_message();
+
+                        return $normalized;
+                }
+
+                $status_code = (int) wp_remote_retrieve_response_code( $response );
+                $body        = (string) wp_remote_retrieve_body( $response );
+                $decoded     = json_decode( $body, true );
+
+                if ( $status_code < 200 || $status_code >= 300 ) {
+                        $normalized['error_code'] = 'http_' . $status_code;
+                        if ( is_array( $decoded ) && isset( $decoded['error']['message'] ) ) {
+                                $normalized['error_message'] = sanitize_text_field( (string) $decoded['error']['message'] );
+                        } else {
+                                $normalized['error_message'] = sprintf( 'OpenAI request failed with status %d.', $status_code );
+                        }
+
+                        return $normalized;
+                }
+
+                if ( ! is_array( $decoded ) ) {
+                        $normalized['error_code']    = 'invalid_json';
+                        $normalized['error_message'] = 'OpenAI response body is not valid JSON.';
+
+                        return $normalized;
+                }
+
+                $content = $decoded['choices'][0]['message']['content'] ?? '';
+                if ( is_array( $content ) ) {
+                        $parts = array();
+                        foreach ( $content as $chunk ) {
+                                if ( is_array( $chunk ) && isset( $chunk['text'] ) ) {
+                                        $parts[] = (string) $chunk['text'];
+                                }
+                        }
+                        $content = implode( "\n", $parts );
+                }
+
+                $normalized['assistant_text'] = trim( (string) $content );
+                if ( '' === $normalized['assistant_text'] ) {
+                        $normalized['error_code']    = 'empty_response';
+                        $normalized['error_message'] = 'OpenAI returned an empty assistant response.';
+                }
+
+                return $normalized;
+        }
+}
+
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_redact_sensitive_log_fields' ) ) {
+        /**
+         * Redact sensitive request/response values before logging.
+         *
+         * @param mixed $data Any serializable data.
+         * @return mixed
+         */
+        function lpr_allocator_redact_sensitive_log_fields( $data ) {
+                $sensitive_keys = array( 'authorization', 'api_key', 'token', 'secret', 'password', 'bearer' );
+
+                if ( is_array( $data ) ) {
+                        $redacted = array();
+                        foreach ( $data as $key => $value ) {
+                                $key_text = strtolower( (string) $key );
+                                $is_sensitive_key = false;
+                                foreach ( $sensitive_keys as $sensitive_key ) {
+                                        if ( false !== strpos( $key_text, $sensitive_key ) ) {
+                                                $is_sensitive_key = true;
+                                                break;
+                                        }
+                                }
+
+                                if ( $is_sensitive_key ) {
+                                        $redacted[ $key ] = '[redacted]';
+                                } else {
+                                        $redacted[ $key ] = lpr_allocator_redact_sensitive_log_fields( $value );
+                                }
+                        }
+
+                        return $redacted;
+                }
+
+                if ( is_string( $data ) ) {
+                        $data = preg_replace( '/\bsk-[A-Za-z0-9_-]{10,}\b/', '[redacted]', $data );
+                        if ( is_string( $data ) ) {
+                                return $data;
+                        }
+
+                        return '';
+                }
+
+                return $data;
+        }
+}
+
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_validate_ai_guardrails' ) ) {
+        /**
+         * Validate guardrails before AI request execution.
+         *
+         * @param string $admin_message      Admin message.
+         * @param array  $settings           Allocator settings.
+         * @param int    $message_char_limit Maximum allowed message length.
+         * @return array{ok:bool,error_code:string,error_message:string,message_length:int}
+         */
+        function lpr_allocator_validate_ai_guardrails( string $admin_message, array $settings, int $message_char_limit = 4000 ): array {
+                $message_length = function_exists( 'mb_strlen' ) ? (int) mb_strlen( $admin_message ) : strlen( $admin_message );
+
+                if ( empty( $settings['ai_enabled'] ) ) {
+                        return array(
+                                'ok'             => false,
+                                'error_code'     => 'ai_disabled',
+                                'error_message'  => 'AI assistant is disabled in allocator settings.',
+                                'message_length' => $message_length,
+                        );
+                }
+
+                $api_key = isset( $settings['ai_api_key'] ) ? trim( (string) $settings['ai_api_key'] ) : '';
+                if ( '' === $api_key ) {
+                        return array(
+                                'ok'             => false,
+                                'error_code'     => 'missing_api_key',
+                                'error_message'  => 'Missing OpenAI API key in allocator settings.',
+                                'message_length' => $message_length,
+                        );
+                }
+
+                if ( $message_length < 1 || $message_length > $message_char_limit ) {
+                        return array(
+                                'ok'             => false,
+                                'error_code'     => 'message_length_limit',
+                                'error_message'  => sprintf( 'Message length must be between 1 and %d characters.', $message_char_limit ),
+                                'message_length' => $message_length,
+                        );
+                }
+
+                return array(
+                        'ok'             => true,
+                        'error_code'     => '',
+                        'error_message'  => '',
+                        'message_length' => $message_length,
+                );
+        }
+}
+
 if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
 	/**
 	 * Settings storage & helpers.
