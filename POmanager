@@ -165,6 +165,11 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                                 'email_table_heading_previous'     => __( 'Tidligere', 'lpr-backorder-allocator' ),
                                 'email_table_heading_new_eta'      => __( 'Ny ETA', 'lpr-backorder-allocator' ),
                                 'email_unallocated_label'          => __( 'Ikke allokert', 'lpr-backorder-allocator' ),
+                                'ai_enabled'                     => false,
+                                'ai_api_key'                     => '',
+                                'ai_model'                       => 'gpt-4o-mini',
+                                'ai_timeout'                     => 20,
+                                'ai_max_output_tokens'           => 800,
                                 'incoming_mobile_users'            => array(),
                         );
                 }
@@ -391,6 +396,30 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                                 $requested_priority_days = (int) $defaults['requested_delivery_window_priority_days'];
                         }
 
+                        $ai_enabled = isset( $raw['ai_enabled'] ) ? (bool) $raw['ai_enabled'] : (bool) $defaults['ai_enabled'];
+                        $ai_api_key = isset( $raw['ai_api_key'] ) ? sanitize_text_field( (string) $raw['ai_api_key'] ) : (string) $defaults['ai_api_key'];
+
+                        $allowed_ai_models = array(
+                                'gpt-4.1-mini',
+                                'gpt-4.1',
+                                'gpt-4o-mini',
+                                'gpt-4o',
+                        );
+                        $ai_model = isset( $raw['ai_model'] ) ? sanitize_text_field( (string) $raw['ai_model'] ) : (string) $defaults['ai_model'];
+                        if ( ! in_array( $ai_model, $allowed_ai_models, true ) ) {
+                                $ai_model = (string) $defaults['ai_model'];
+                        }
+
+                        $ai_timeout = isset( $raw['ai_timeout'] ) ? (int) $raw['ai_timeout'] : (int) $defaults['ai_timeout'];
+                        if ( $ai_timeout < 5 || $ai_timeout > 120 ) {
+                                $ai_timeout = (int) $defaults['ai_timeout'];
+                        }
+
+                        $ai_max_output_tokens = isset( $raw['ai_max_output_tokens'] ) ? (int) $raw['ai_max_output_tokens'] : (int) $defaults['ai_max_output_tokens'];
+                        if ( $ai_max_output_tokens < 64 || $ai_max_output_tokens > 8192 ) {
+                                $ai_max_output_tokens = (int) $defaults['ai_max_output_tokens'];
+                        }
+
                         return array(
                                 'order_statuses'        => $statuses,
                                 'inform_customer_eta'   => (bool) $inform,
@@ -432,6 +461,11 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                                 'email_table_heading_previous'    => '' === trim( $th_prev ) ? $defaults['email_table_heading_previous'] : $th_prev,
                                 'email_table_heading_new_eta'     => '' === trim( $th_new ) ? $defaults['email_table_heading_new_eta'] : $th_new,
                                 'email_unallocated_label'         => '' === trim( $unallocated_label ) ? $defaults['email_unallocated_label'] : $unallocated_label,
+                                'ai_enabled'                      => (bool) $ai_enabled,
+                                'ai_api_key'                      => $ai_api_key,
+                                'ai_model'                        => $ai_model,
+                                'ai_timeout'                      => (int) $ai_timeout,
+                                'ai_max_output_tokens'            => (int) $ai_max_output_tokens,
                                 'incoming_mobile_users'           => array_values( $mobile_users ),
                         );
                 }
@@ -1058,6 +1092,73 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                         'type'  => 'sectionend',
                                         'id'    => 'lpr_allocator_section_brand',
                                 ),
+
+                                array(
+                                        'title' => __( 'AI assistant', 'lpr-backorder-allocator' ),
+                                        'type'  => 'title',
+                                        'desc'  => __( 'Configure optional AI settings used by allocator assistant features.', 'lpr-backorder-allocator' ),
+                                        'id'    => 'lpr_allocator_section_ai',
+                                ),
+
+                                array(
+                                        'title'   => __( 'Enable AI features', 'lpr-backorder-allocator' ),
+                                        'id'      => 'lpr_allocator_ai_enabled',
+                                        'type'    => 'checkbox',
+                                        'default' => 'no',
+                                ),
+
+                                array(
+                                        'title'       => __( 'AI API key', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_ai_api_key',
+                                        'type'        => 'password',
+                                        'css'         => 'min-width: 400px;',
+                                        'placeholder' => __( 'Enter API key', 'lpr-backorder-allocator' ),
+                                        'default'     => '',
+                                ),
+
+                                array(
+                                        'title'   => __( 'AI model', 'lpr-backorder-allocator' ),
+                                        'id'      => 'lpr_allocator_ai_model',
+                                        'type'    => 'select',
+                                        'options' => array(
+                                                'gpt-4o-mini'  => 'gpt-4o-mini',
+                                                'gpt-4o'       => 'gpt-4o',
+                                                'gpt-4.1-mini' => 'gpt-4.1-mini',
+                                                'gpt-4.1'      => 'gpt-4.1',
+                                        ),
+                                        'default' => $defaults['ai_model'],
+                                ),
+
+                                array(
+                                        'title'       => __( 'AI timeout (seconds)', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_ai_timeout',
+                                        'type'        => 'number',
+                                        'css'         => 'width: 90px;',
+                                        'default'     => $defaults['ai_timeout'],
+                                        'custom_attributes' => array(
+                                                'min'  => '5',
+                                                'max'  => '120',
+                                                'step' => '1',
+                                        ),
+                                ),
+
+                                array(
+                                        'title'       => __( 'AI max output tokens', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_ai_max_output_tokens',
+                                        'type'        => 'number',
+                                        'css'         => 'width: 100px;',
+                                        'default'     => $defaults['ai_max_output_tokens'],
+                                        'custom_attributes' => array(
+                                                'min'  => '64',
+                                                'max'  => '8192',
+                                                'step' => '1',
+                                        ),
+                                ),
+
+                                array(
+                                        'type'  => 'sectionend',
+                                        'id'    => 'lpr_allocator_section_ai',
+                                ),
                         );
                 }
 
@@ -1107,6 +1208,11 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                 'lpr_allocator_email_table_heading_previous' => (string) $settings['email_table_heading_previous'],
                                 'lpr_allocator_email_table_heading_new_eta' => (string) $settings['email_table_heading_new_eta'],
                                 'lpr_allocator_email_unallocated_label'    => (string) $settings['email_unallocated_label'],
+                                'lpr_allocator_ai_enabled'                  => ! empty( $settings['ai_enabled'] ) ? 'yes' : 'no',
+                                'lpr_allocator_ai_api_key'                  => self::mask_api_key_for_admin( (string) ( $settings['ai_api_key'] ?? '' ) ),
+                                'lpr_allocator_ai_model'                    => (string) $settings['ai_model'],
+                                'lpr_allocator_ai_timeout'                  => (int) $settings['ai_timeout'],
+                                'lpr_allocator_ai_max_output_tokens'        => (int) $settings['ai_max_output_tokens'],
                           );
 
                         foreach ( $map as $opt => $val ) {
@@ -1135,6 +1241,22 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
 		
 		return implode( "\n", $lines );
 		}
+
+                /**
+                 * Mask sensitive API keys in admin forms while preserving ability to keep existing value.
+                 */
+                protected static function mask_api_key_for_admin( string $value ): string {
+                        $trimmed = trim( $value );
+                        if ( '' === $trimmed ) {
+                                return '';
+                        }
+
+                        if ( strlen( $trimmed ) <= 8 ) {
+                                return str_repeat( '*', strlen( $trimmed ) );
+                        }
+
+                        return substr( $trimmed, 0, 4 ) . str_repeat( '*', max( 0, strlen( $trimmed ) - 8 ) ) . substr( $trimmed, -4 );
+                }
 		
 		/**
 		 * Build HTML for the auto allocator status block.
@@ -1477,6 +1599,18 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                         $raw['brand_support_email']  = isset( $_POST['lpr_allocator_brand_support_email'] ) ? (string) wp_unslash( $_POST['lpr_allocator_brand_support_email'] ) : $settings['brand_support_email'];
                         $raw['brand_support_phone']  = isset( $_POST['lpr_allocator_brand_support_phone'] ) ? (string) wp_unslash( $_POST['lpr_allocator_brand_support_phone'] ) : $settings['brand_support_phone'];
                         $raw['email_footer_text_no'] = isset( $_POST['lpr_allocator_email_footer_text_no'] ) ? (string) wp_unslash( $_POST['lpr_allocator_email_footer_text_no'] ) : $settings['email_footer_text_no'];
+                        $raw['ai_enabled']           = ! empty( $_POST['lpr_allocator_ai_enabled'] );
+                        $raw['ai_model']             = isset( $_POST['lpr_allocator_ai_model'] ) ? (string) wp_unslash( $_POST['lpr_allocator_ai_model'] ) : $settings['ai_model'];
+                        $raw['ai_timeout']           = isset( $_POST['lpr_allocator_ai_timeout'] ) ? (int) $_POST['lpr_allocator_ai_timeout'] : $settings['ai_timeout'];
+                        $raw['ai_max_output_tokens'] = isset( $_POST['lpr_allocator_ai_max_output_tokens'] ) ? (int) $_POST['lpr_allocator_ai_max_output_tokens'] : $settings['ai_max_output_tokens'];
+
+                        $posted_ai_key  = isset( $_POST['lpr_allocator_ai_api_key'] ) ? trim( (string) wp_unslash( $_POST['lpr_allocator_ai_api_key'] ) ) : '';
+                        $masked_current = self::mask_api_key_for_admin( (string) ( $settings['ai_api_key'] ?? '' ) );
+                        if ( '' === $posted_ai_key || $posted_ai_key === $masked_current ) {
+                                $raw['ai_api_key'] = $settings['ai_api_key'];
+                        } else {
+                                $raw['ai_api_key'] = $posted_ai_key;
+                        }
 
                         return Settings::update( $raw );
                 }
