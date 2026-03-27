@@ -19,6 +19,17 @@ namespace LPR\Allocator;
  * - OpenAI request/response cycle works end-to-end and returns a visible reply.
  * - Session shows a basic running history of sent/received messages.
  * - No automatic PO mutations or background autonomous behaviors are triggered.
+ *
+ * Pre-rollout validation note (2026-03-27):
+ * - [x] AI disabled => guardrail returns "AI assistant is disabled in allocator settings."
+ * - [x] Missing API key => guardrail returns "Missing OpenAI API key in allocator settings."
+ * - [x] Valid API key => successful assistant reply path persists assistant turn into history.
+ * - [x] Invalid key / timeout => normalized UI errors map to invalid_key / timeout with safe messages.
+ * - [x] Non-admin user blocked => AJAX submit/clear enforce manage_woocommerce and return 403.
+ * - [x] Nonce failures blocked => AJAX submit/clear require lpr_ai_assistant_chat nonce.
+ * - [x] Conversation persistence + clear => history/context are persisted and cleared per user.
+ * - [x] Secrets exposure controls => API key masking + log-field redaction + escaped message rendering.
+ * - [!] Broader rollout gate: run interactive staging smoke test for actual networked OpenAI responses.
  */
 
 if ( ! defined( __NAMESPACE__ . '\VERSION' ) ) {
