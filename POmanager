@@ -531,7 +531,9 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                         add_action( 'woocommerce_settings_save_' . self::TAB_ID, array( __CLASS__, 'save_general' ) );
                         add_action( 'admin_post_lpr_allocator_force_auto_allocation', array( __CLASS__, 'handle_force_auto_allocation' ) );
                         add_action( 'woocommerce_admin_field_lpr_po_index_rebuild', array( __CLASS__, 'render_po_index_rebuild_field' ) );
+                        add_action( 'woocommerce_admin_field_lpr_ai_connection_test', array( __CLASS__, 'render_ai_connection_test_field' ) );
                         add_action( 'admin_post_lpr_allocator_force_po_index_rebuild', array( __CLASS__, 'handle_force_po_index_rebuild' ) );
+                        add_action( 'admin_post_lpr_allocator_test_ai_connection', array( __CLASS__, 'handle_test_ai_connection' ) );
                 }
 
 		/**
@@ -680,6 +682,80 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                 array(
                                         'type' => 'sectionend',
                                         'id'   => 'lpr_allocator_section_incoming_mobile',
+                                ),
+
+                                array(
+                                        'title' => __( 'AI Assistant', 'lpr-backorder-allocator' ),
+                                        'type'  => 'title',
+                                        'desc'  => __( 'Configure optional AI assistant connectivity for allocator helpers.', 'lpr-backorder-allocator' ),
+                                        'id'    => 'lpr_allocator_section_ai_assistant',
+                                ),
+
+                                array(
+                                        'title'   => __( 'Enabled', 'lpr-backorder-allocator' ),
+                                        'id'      => 'lpr_allocator_ai_enabled',
+                                        'type'    => 'checkbox',
+                                        'default' => 'no',
+                                ),
+
+                                array(
+                                        'title'       => __( 'Model', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_ai_model',
+                                        'type'        => 'select',
+                                        'options'     => array(
+                                                'gpt-4o-mini'  => 'gpt-4o-mini',
+                                                'gpt-4o'       => 'gpt-4o',
+                                                'gpt-4.1-mini' => 'gpt-4.1-mini',
+                                                'gpt-4.1'      => 'gpt-4.1',
+                                        ),
+                                        'default'     => $defaults['ai_model'],
+                                ),
+
+                                array(
+                                        'title'       => __( 'API key', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_ai_api_key',
+                                        'type'        => 'password',
+                                        'css'         => 'min-width: 400px;',
+                                        'placeholder' => __( 'Enter API key', 'lpr-backorder-allocator' ),
+                                        'default'     => '',
+                                ),
+
+                                array(
+                                        'title'       => __( 'Timeout (seconds)', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_ai_timeout',
+                                        'type'        => 'number',
+                                        'css'         => 'width: 90px;',
+                                        'default'     => $defaults['ai_timeout'],
+                                        'custom_attributes' => array(
+                                                'min'  => '5',
+                                                'max'  => '120',
+                                                'step' => '1',
+                                        ),
+                                ),
+
+                                array(
+                                        'title'       => __( 'Max tokens', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_ai_max_output_tokens',
+                                        'type'        => 'number',
+                                        'css'         => 'width: 100px;',
+                                        'default'     => $defaults['ai_max_output_tokens'],
+                                        'custom_attributes' => array(
+                                                'min'  => '64',
+                                                'max'  => '8192',
+                                                'step' => '1',
+                                        ),
+                                ),
+
+                                array(
+                                        'title' => __( 'Test connection', 'lpr-backorder-allocator' ),
+                                        'id'    => 'lpr_allocator_ai_connection_test',
+                                        'type'  => 'lpr_ai_connection_test',
+                                        'desc'  => __( 'Verifies API key authentication and timeout from this server.', 'lpr-backorder-allocator' ),
+                                ),
+
+                                array(
+                                        'type' => 'sectionend',
+                                        'id'   => 'lpr_allocator_section_ai_assistant',
                                 ),
 
                                 array(
@@ -1467,6 +1543,131 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                 }
 
                 /**
+                 * Render the AI connection test field with inline status messaging.
+                 */
+                public static function render_ai_connection_test_field( array $field ): void {
+                        $redirect   = admin_url( 'admin.php?page=wc-settings&tab=' . self::TAB_ID );
+                        $action_url = wp_nonce_url(
+                                add_query_arg(
+                                        array(
+                                                'action'   => 'lpr_allocator_test_ai_connection',
+                                                'redirect' => rawurlencode( $redirect ),
+                                        ),
+                                        admin_url( 'admin-post.php' )
+                                ),
+                                'lpr_allocator_test_ai_connection'
+                        );
+
+                        $status = isset( $_GET['lpr_ai_test_status'] ) ? sanitize_key( wp_unslash( $_GET['lpr_ai_test_status'] ) ) : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+
+                        $notice_html = '';
+                        if ( '' !== $status ) {
+                                $class   = 'notice-success';
+                                $message = '';
+
+                                if ( 'success' === $status ) {
+                                        $message = __( 'AI connection successful.', 'lpr-backorder-allocator' );
+                                } elseif ( 'auth' === $status ) {
+                                        $class   = 'notice-error';
+                                        $message = __( 'Authentication failed. Check the API key.', 'lpr-backorder-allocator' );
+                                } elseif ( 'timeout' === $status ) {
+                                        $class   = 'notice-warning';
+                                        $message = __( 'Connection timed out. Increase timeout or verify outbound network access.', 'lpr-backorder-allocator' );
+                                } else {
+                                        $class   = 'notice-error';
+                                        $message = __( 'Connection test failed. Verify the model, key, and endpoint reachability.', 'lpr-backorder-allocator' );
+                                }
+
+                                $notice_html = '<div class="notice ' . esc_attr( $class ) . ' inline" style="margin:10px 0 0;"><p>' . esc_html( $message ) . '</p></div>';
+                        }
+                        ?>
+                        <tr valign="top">
+                                <th scope="row" class="titledesc">
+                                        <label for="lpr-ai-test-btn"><?php echo esc_html( $field['title'] ); ?></label>
+                                </th>
+                                <td class="forminp">
+                                        <fieldset>
+                                                <legend class="screen-reader-text"><span><?php echo esc_html( $field['title'] ); ?></span></legend>
+                                                <button type="button" class="button" id="lpr-ai-test-btn"><?php esc_html_e( 'Test connection', 'lpr-backorder-allocator' ); ?></button>
+                                                <p class="description" style="margin-top:4px;"><?php echo esc_html( $field['desc'] ); ?></p>
+                                                <?php echo wp_kses_post( $notice_html ); ?>
+                                        </fieldset>
+                                        <script>
+                                                (function(){
+                                                        var btn = document.getElementById('lpr-ai-test-btn');
+                                                        if(!btn){ return; }
+                                                        btn.addEventListener('click', function(){
+                                                                window.location.href = '<?php echo esc_js( $action_url ); ?>';
+                                                        });
+                                                })();
+                                        </script>
+                                </td>
+                        </tr>
+                        <?php
+                }
+
+                /**
+                 * Handle AI connection test requests from settings.
+                 */
+                public static function handle_test_ai_connection(): void {
+                        if ( ! current_user_can( 'manage_woocommerce' ) ) {
+                                wp_die( esc_html__( 'Insufficient permissions.', 'lpr-backorder-allocator' ) );
+                        }
+
+                        $nonce = isset( $_REQUEST['_wpnonce'] ) ? (string) $_REQUEST['_wpnonce'] : ''; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        if ( ! wp_verify_nonce( $nonce, 'lpr_allocator_test_ai_connection' ) ) {
+                                wp_die( esc_html__( 'Invalid request.', 'lpr-backorder-allocator' ) );
+                        }
+
+                        $redirect = isset( $_REQUEST['redirect'] ) ? rawurldecode( (string) wp_unslash( $_REQUEST['redirect'] ) ) : admin_url( 'admin.php?page=wc-settings&tab=' . self::TAB_ID ); // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $redirect = wp_validate_redirect( $redirect, admin_url( 'admin.php?page=wc-settings&tab=' . self::TAB_ID ) );
+
+                        $settings = Settings::get();
+                        $api_key  = trim( (string) ( $settings['ai_api_key'] ?? '' ) );
+                        $timeout  = isset( $settings['ai_timeout'] ) ? max( 5, (int) $settings['ai_timeout'] ) : 20;
+
+                        $status = 'error';
+                        if ( '' === $api_key ) {
+                                $status = 'auth';
+                        } else {
+                                $response = wp_remote_get(
+                                        'https://api.openai.com/v1/models',
+                                        array(
+                                                'timeout' => $timeout,
+                                                'headers' => array(
+                                                        'Authorization' => 'Bearer ' . $api_key,
+                                                ),
+                                        )
+                                );
+
+                                if ( is_wp_error( $response ) ) {
+                                        $error_code = (string) $response->get_error_code();
+                                        $error_text = strtolower( (string) $response->get_error_message() );
+                                        $status     = ( false !== strpos( $error_code, 'timeout' ) || false !== strpos( $error_text, 'timed out' ) ) ? 'timeout' : 'error';
+                                } else {
+                                        $code = (int) wp_remote_retrieve_response_code( $response );
+                                        if ( $code >= 200 && $code < 300 ) {
+                                                $status = 'success';
+                                        } elseif ( 401 === $code || 403 === $code ) {
+                                                $status = 'auth';
+                                        } elseif ( 408 === $code || 504 === $code ) {
+                                                $status = 'timeout';
+                                        }
+                                }
+                        }
+
+                        $redirect = add_query_arg(
+                                array(
+                                        'lpr_ai_test_status' => $status,
+                                ),
+                                $redirect
+                        );
+
+                        wp_safe_redirect( $redirect );
+                        exit;
+                }
+
+                /**
                  * Render settings tab.
                  */
                 public static function render(): void {
@@ -1536,6 +1737,18 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                         $raw['requested_delivery_lead_days'] = isset( $_POST['lpr_allocator_requested_delivery_lead_days'] ) ? (int) $_POST['lpr_allocator_requested_delivery_lead_days'] : $settings['requested_delivery_lead_days'];
                         $raw['requested_delivery_window_priority_days'] = isset( $_POST['lpr_allocator_requested_delivery_window_priority_days'] ) ? (int) $_POST['lpr_allocator_requested_delivery_window_priority_days'] : $settings['requested_delivery_window_priority_days'];
                         $raw['incoming_mobile_users']       = isset( $_POST['lpr_allocator_incoming_mobile_users'] ) ? (string) wp_unslash( $_POST['lpr_allocator_incoming_mobile_users'] ) : $settings['incoming_mobile_users'];
+                        $raw['ai_enabled']                  = ! empty( $_POST['lpr_allocator_ai_enabled'] );
+                        $raw['ai_model']                    = isset( $_POST['lpr_allocator_ai_model'] ) ? (string) wp_unslash( $_POST['lpr_allocator_ai_model'] ) : $settings['ai_model'];
+                        $raw['ai_timeout']                  = isset( $_POST['lpr_allocator_ai_timeout'] ) ? (int) $_POST['lpr_allocator_ai_timeout'] : $settings['ai_timeout'];
+                        $raw['ai_max_output_tokens']        = isset( $_POST['lpr_allocator_ai_max_output_tokens'] ) ? (int) $_POST['lpr_allocator_ai_max_output_tokens'] : $settings['ai_max_output_tokens'];
+
+                        $posted_ai_key  = isset( $_POST['lpr_allocator_ai_api_key'] ) ? trim( (string) wp_unslash( $_POST['lpr_allocator_ai_api_key'] ) ) : '';
+                        $masked_current = self::mask_api_key_for_admin( (string) ( $settings['ai_api_key'] ?? '' ) );
+                        if ( '' === $posted_ai_key || $posted_ai_key === $masked_current ) {
+                                $raw['ai_api_key'] = $settings['ai_api_key'];
+                        } else {
+                                $raw['ai_api_key'] = $posted_ai_key;
+                        }
 
                         Settings::update( $raw );
 
