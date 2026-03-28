@@ -21644,12 +21644,26 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 $raw_data_rows++;
 
                                 $current = array(
-                                        'source_row'    => $row_number,
-                                        'po_reference'  => '',
-                                        'sku'           => '',
-                                        'quantity'      => 0,
-                                        'date'          => '',
-                                        'update_notes'  => '',
+                                        'source_row'               => $row_number,
+                                        'source_row_index'         => $row_number,
+                                        'po_reference'             => '',
+                                        'sku'                      => '',
+                                        'item_name'                => '',
+                                        'supplier_po_reference'    => '',
+                                        'customer_order_reference' => '',
+                                        'supplier_order_reference' => '',
+                                        'delivery_number'          => '',
+                                        'address_number'           => '',
+                                        'raw_comments'             => '',
+                                        'quantity'                 => 0,
+                                        'date'                     => '',
+                                        'update_notes'             => '',
+                                        'raw_row'                  => array_map(
+                                                static function ( $cell_value ): string {
+                                                        return sanitize_text_field( trim( (string) $cell_value ) );
+                                                },
+                                                $row
+                                        ),
                                 );
 
                                 foreach ( $map as $index => $field ) {
@@ -21664,7 +21678,25 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                 $current['po_reference'] = sanitize_text_field( $value );
                                         } elseif ( 'sku' === $field ) {
                                                 $current['sku'] = sanitize_text_field( $value );
+                                        } elseif ( 'item_name' === $field ) {
+                                                $current['item_name'] = sanitize_text_field( $value );
+                                        } elseif ( 'supplier_po_reference' === $field ) {
+                                                $current['supplier_po_reference'] = sanitize_text_field( $value );
+                                        } elseif ( 'customer_order_reference' === $field ) {
+                                                $current['customer_order_reference'] = sanitize_text_field( $value );
+                                        } elseif ( 'supplier_order_reference' === $field ) {
+                                                $current['supplier_order_reference'] = sanitize_text_field( $value );
+                                        } elseif ( 'delivery_number' === $field ) {
+                                                $current['delivery_number'] = sanitize_text_field( $value );
+                                        } elseif ( 'address_number' === $field ) {
+                                                $current['address_number'] = sanitize_text_field( $value );
+                                        } elseif ( 'raw_comments' === $field ) {
+                                                $current['raw_comments'] = sanitize_textarea_field( $value );
                                         }
+                                }
+
+                                if ( '' === $current['po_reference'] && '' !== $current['customer_order_reference'] ) {
+                                        $current['po_reference'] = $current['customer_order_reference'];
                                 }
 
                                 if ( '' === $current['po_reference'] && '' === $current['sku'] ) {
