@@ -168,7 +168,7 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_generate_ai_assistant_re
          * @return string
          */
         function lpr_allocator_ai_assistant_system_instruction(): string {
-                return 'You are an internal assistant for PO allocator admins. Propose draft actions only and do not claim to make live updates. For informational inventory/open-PO questions, answer only from provided plugin context and never invent PO numbers, ETA dates, quantities, suppliers, or availability. If product matching is ambiguous, ask a clarifying question. If the user asks to modify ETA or delivery date for a PO and a concrete PO is known from context, always include identifiers.po_id in the action. For actionable requests, respond with valid JSON only using this shape: {"conversational_text":"string","action":{"action_type":"create_po_draft|update_eta_draft|update_delivery_date_draft","target_entity":"string","identifiers":{"key":"value"},"line_changes":[{"line_identifier":"string","quantity":1,"eta_date":"YYYY-MM-DD","delivery_date":"YYYY-MM-DD","notes":"string"}],"confidence":0.0,"notes":"string"}}. For informational/non-actionable requests, return {"conversational_text":"string","action":null}.';
+                return 'You are an internal assistant for PO allocator admins. Use a strict two-step workflow for changes: (1) prepare a draft action and confirmation preview; (2) only after explicit user confirmation may the controller execute it. Never claim a live change is applied before confirmation. For informational inventory/open-PO questions, answer only from provided plugin context and never invent PO numbers, ETA dates, quantities, suppliers, or availability. If product matching is ambiguous, ask a clarifying question. If the user asks to modify ETA or delivery date for a PO and a concrete PO is known from context, always include identifiers.po_id in the action. Do not output diagnostic or advisory JSON to the user; keep conversational_text human-readable. For actionable requests, respond with valid JSON only using this shape: {"conversational_text":"string","action":{"action_type":"create_po_draft|update_eta_draft|update_delivery_date_draft","target_entity":"string","identifiers":{"key":"value"},"line_changes":[{"line_identifier":"string","quantity":1,"eta_date":"YYYY-MM-DD","delivery_date":"YYYY-MM-DD","notes":"string"}],"confidence":0.0,"notes":"string"}}. For informational/non-actionable requests, return {"conversational_text":"string","action":null}.';
         }
 
         /**
@@ -18555,6 +18555,10 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         return 'lpr_allocator_ai_assistant_upload_log';
                 }
 
+                protected static function pending_chat_confirmation_meta_key(): string {
+                        return 'lpr_allocator_ai_assistant_pending_chat_confirmation';
+                }
+
                 protected static function upload_row_limit(): int {
                         return 1500;
                 }
@@ -18569,6 +18573,74 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
 
                 protected static function history_limit(): int {
                         return 20;
+                }
+
+                protected static function normalize_pending_chat_confirmation( $raw ): array {
+                        if ( ! is_array( $raw ) ) {
+                                return array();
+                        }
+
+                        $bundle_id     = sanitize_text_field( (string) ( $raw['bundle_id'] ?? '' ) );
+                        $action_type   = sanitize_key( (string) ( $raw['action_type'] ?? '' ) );
+                        $target_entity = sanitize_text_field( (string) ( $raw['target_entity'] ?? '' ) );
+                        $po_id         = max( 0, (int) ( $raw['po_id'] ?? 0 ) );
+                        $po_number     = sanitize_text_field( (string) ( $raw['po_number'] ?? '' ) );
+                        $confirm_digest = sanitize_text_field( (string) ( $raw['confirm_digest'] ?? '' ) );
+                        $expected_line_count = max( 0, (int) ( $raw['expected_line_count'] ?? 0 ) );
+                        $expected_apply_count = max( 0, (int) ( $raw['expected_apply_count'] ?? 0 ) );
+                        $preview_summary = sanitize_textarea_field( (string) ( $raw['preview_summary'] ?? '' ) );
+                        $created_at     = sanitize_text_field( (string) ( $raw['created_at'] ?? '' ) );
+
+                        if ( '' === $bundle_id || '' === $action_type || '' === $confirm_digest ) {
+                                return array();
+                        }
+
+                        return array(
+                                'bundle_id'            => $bundle_id,
+                                'action_type'          => $action_type,
+                                'target_entity'        => $target_entity,
+                                'po_id'                => $po_id,
+                                'po_number'            => $po_number,
+                                'confirm_digest'       => $confirm_digest,
+                                'expected_line_count'  => $expected_line_count,
+                                'expected_apply_count' => $expected_apply_count,
+                                'preview_summary'      => $preview_summary,
+                                'created_at'           => $created_at,
+                        );
+                }
+
+                protected static function remember_pending_chat_confirmation( int $user_id, array $pending ): array {
+                        $normalized = self::normalize_pending_chat_confirmation( $pending );
+                        if ( empty( $normalized ) ) {
+                                delete_user_meta( $user_id, self::pending_chat_confirmation_meta_key() );
+                                return array();
+                        }
+                        update_user_meta( $user_id, self::pending_chat_confirmation_meta_key(), $normalized );
+                        return $normalized;
+                }
+
+                protected static function get_pending_chat_confirmation( int $user_id ): array {
+                        return self::normalize_pending_chat_confirmation( get_user_meta( $user_id, self::pending_chat_confirmation_meta_key(), true ) );
+                }
+
+                protected static function clear_pending_chat_confirmation( int $user_id ): void {
+                        delete_user_meta( $user_id, self::pending_chat_confirmation_meta_key() );
+                }
+
+                protected static function is_chat_confirmation_message( string $message ): bool {
+                        $text = function_exists( 'mb_strtolower' ) ? mb_strtolower( trim( $message ) ) : strtolower( trim( $message ) );
+                        if ( '' === $text ) {
+                                return false;
+                        }
+                        return (bool) preg_match( '/\b(bekreft|ja[, ]*bekreft|utf[øo]r|kj[øo]r|apply|confirm|ja[, ]*gj[øo]r det)\b/ui', $text );
+                }
+
+                protected static function is_chat_cancellation_message( string $message ): bool {
+                        $text = function_exists( 'mb_strtolower' ) ? mb_strtolower( trim( $message ) ) : strtolower( trim( $message ) );
+                        if ( '' === $text ) {
+                                return false;
+                        }
+                        return (bool) preg_match( '/\b(avbryt|stopp|cancel|ikke gj[øo]r det)\b/ui', $text );
                 }
 
                 protected static function context_limit(): int {
@@ -20480,6 +20552,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         delete_user_meta( $user_id, self::global_context_meta_key() );
                         delete_user_meta( $user_id, self::focus_context_meta_key() );
                         delete_user_meta( $user_id, self::ambiguity_context_meta_key() );
+                        delete_user_meta( $user_id, self::pending_chat_confirmation_meta_key() );
                         delete_transient( self::context_transient_key( $user_id ) );
                 }
 
@@ -20836,6 +20909,118 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         self::persist_draft_bundles( $user_id, $bundles );
 
                         return $bundle;
+                }
+
+                protected static function format_before_after_for_chat( string $action_type, array $before_after, array $line_change ): string {
+                        $label = 'Verdi';
+                        if ( 'update_eta_draft' === $action_type ) {
+                                $label = 'ETA';
+                        } elseif ( 'update_delivery_date_draft' === $action_type ) {
+                                $label = 'Leveringsdato';
+                        } elseif ( 'create_po_draft' === $action_type ) {
+                                $label = 'Endring';
+                        }
+                        $before = sanitize_text_field( (string) ( $before_after['before'] ?? '' ) );
+                        $after  = sanitize_text_field( (string) ( $before_after['after'] ?? '' ) );
+                        return sprintf( '%1$s: %2$s -> %3$s', $label, $before !== '' ? $before : 'n/a', $after !== '' ? $after : 'n/a' );
+                }
+
+                protected static function build_bundle_change_summary( array $bundle ): array {
+                        $rows         = array();
+                        $action_type  = sanitize_key( (string) ( $bundle['action_type'] ?? '' ) );
+                        $line_changes = isset( $bundle['line_changes'] ) && is_array( $bundle['line_changes'] ) ? array_values( $bundle['line_changes'] ) : array();
+                        $before_after = isset( $bundle['before_after'] ) && is_array( $bundle['before_after'] ) ? array_values( $bundle['before_after'] ) : array();
+
+                        foreach ( $line_changes as $idx => $line_change ) {
+                                if ( ! is_array( $line_change ) ) {
+                                        continue;
+                                }
+                                $line_identifier = sanitize_text_field( (string) ( $line_change['line_identifier'] ?? '' ) );
+                                $line_label      = $line_identifier !== '' ? $line_identifier : sprintf( 'linje_%d', $idx + 1 );
+                                $sku             = '';
+                                $qty             = max( 0, (int) ( $line_change['quantity'] ?? 0 ) );
+                                $item_id         = self::parse_order_item_id( $line_identifier );
+                                if ( $item_id > 0 ) {
+                                        $item = function_exists( 'wc_get_order_item' ) ? wc_get_order_item( $item_id ) : null;
+                                        if ( $item instanceof \WC_Order_Item_Product ) {
+                                                $line_label = sanitize_text_field( (string) $item->get_name() );
+                                                $qty        = max( 0, (int) $item->get_quantity() );
+                                                $product    = $item->get_product();
+                                                if ( $product instanceof \WC_Product ) {
+                                                        $sku = sanitize_text_field( (string) $product->get_sku() );
+                                                }
+                                        }
+                                }
+                                $ba = isset( $before_after[ $idx ] ) && is_array( $before_after[ $idx ] ) ? $before_after[ $idx ] : array();
+                                $rows[] = array(
+                                        'line_identifier' => $line_identifier,
+                                        'line_label'      => $line_label,
+                                        'sku'             => $sku,
+                                        'qty'             => $qty,
+                                        'before_after'    => self::format_before_after_for_chat( $action_type, $ba, $line_change ),
+                                );
+                        }
+
+                        return $rows;
+                }
+
+                protected static function build_chat_confirmation_preview( array $bundle ): string {
+                        $identifiers = isset( $bundle['identifiers'] ) && is_array( $bundle['identifiers'] ) ? $bundle['identifiers'] : array();
+                        $po_id       = max( 0, (int) ( $identifiers['po_id'] ?? 0 ) );
+                        $po_number   = sanitize_text_field( (string) ( $identifiers['po_number'] ?? '' ) );
+                        if ( '' === $po_number && $po_id > 0 ) {
+                                $po_number = sanitize_text_field( (string) get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_NUMBER' ) ? PO_META_NUMBER : '_lpr_po_number', true ) );
+                        }
+                        $action_type = sanitize_key( (string) ( $bundle['action_type'] ?? '' ) );
+                        $field_label = 'Felt';
+                        if ( 'update_eta_draft' === $action_type ) {
+                                $field_label = 'ETA';
+                        } elseif ( 'update_delivery_date_draft' === $action_type ) {
+                                $field_label = 'Leveringsdato';
+                        }
+                        $summary_rows = self::build_bundle_change_summary( $bundle );
+                        $lines        = array();
+                        $lines[]      = sprintf( 'Jeg har klargjort følgende endring for PO %s:', $po_number !== '' ? $po_number : ( $po_id > 0 ? '#' . $po_id : 'ukjent' ) );
+                        $lines[]      = '- PO: ' . ( $po_number !== '' ? $po_number : (string) $po_id );
+                        $lines[]      = '- Felt: ' . $field_label;
+                        $lines[]      = '- Linjer som påvirkes:';
+                        foreach ( $summary_rows as $index => $row ) {
+                                $sku_part = '' !== (string) $row['sku'] ? ' (SKU ' . $row['sku'] . ')' : '';
+                                $qty_part = (int) ( $row['qty'] ?? 0 ) > 0 ? ', qty ' . (int) $row['qty'] : '';
+                                $lines[] = sprintf( '  %1$d) %2$s%3$s%4$s', $index + 1, (string) $row['line_label'], $sku_part, $qty_part );
+                                $lines[] = '     - ' . (string) $row['before_after'];
+                        }
+                        if ( ! empty( $bundle['requires_manual_review'] ) ) {
+                                $lines[] = '- Merk: Krever manuell gjennomgang før apply.';
+                        }
+                        $lines[] = sprintf( 'Dette vil oppdatere %d linje(r).', count( $summary_rows ) );
+                        $lines[] = "Svar 'bekreft' for å utføre endringen, eller 'avbryt' for å stoppe.";
+                        return implode( "\n", $lines );
+                }
+
+                protected static function build_apply_result_message( array $bundle, array $result ): string {
+                        $identifiers = isset( $bundle['identifiers'] ) && is_array( $bundle['identifiers'] ) ? $bundle['identifiers'] : array();
+                        $po_number   = sanitize_text_field( (string) ( $identifiers['po_number'] ?? '' ) );
+                        $po_id       = max( 0, (int) ( $identifiers['po_id'] ?? 0 ) );
+                        $label       = $po_number !== '' ? $po_number : ( $po_id > 0 ? '#' . $po_id : __( 'ukjent', 'lpr-backorder-allocator' ) );
+                        $lines       = array(
+                                __( 'Endringen er utført.', 'lpr-backorder-allocator' ),
+                                'PO ' . $label . ':',
+                                '- ' . (int) ( $result['applied_count'] ?? 0 ) . ' linje(r) oppdatert',
+                                '- ' . (int) ( $result['skipped_count'] ?? 0 ) . ' hoppet over',
+                                '- ' . (int) ( $result['error_count'] ?? 0 ) . ' feil',
+                        );
+                        foreach ( (array) ( $result['line_results'] ?? array() ) as $line_result ) {
+                                if ( ! is_array( $line_result ) || 'failed' !== (string) ( $line_result['status'] ?? '' ) ) {
+                                        continue;
+                                }
+                                $lines[] = sprintf(
+                                        '- Feil på %1$s: %2$s',
+                                        sanitize_text_field( (string) ( $line_result['line_identifier'] ?? 'n/a' ) ),
+                                        sanitize_text_field( (string) ( $line_result['message'] ?? __( 'Ukjent feil.', 'lpr-backorder-allocator' ) ) )
+                                );
+                        }
+                        return implode( "\n", $lines );
                 }
 
                 protected static function execute_draft_bundle( array $bundle ): array {
@@ -21773,6 +21958,88 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 );
                         }
 
+                        $history = self::normalize_history( get_user_meta( $user_id, $history_key, true ) );
+                        $context = get_transient( $context_key );
+                        if ( ! is_array( $context ) ) {
+                                $context = array_slice( $history, -$context_limit );
+                        }
+                        $context = self::normalize_history( $context );
+
+                        $user_turn = array(
+                                'role'    => 'user',
+                                'message' => $latest_message,
+                                'time'    => wp_date( 'Y-m-d H:i:s' ),
+                        );
+                        $history[] = $user_turn;
+
+                        $pending_confirmation = self::get_pending_chat_confirmation( $user_id );
+                        if ( ! empty( $pending_confirmation ) && self::is_chat_cancellation_message( $latest_message ) ) {
+                                self::clear_pending_chat_confirmation( $user_id );
+                                $assistant_turn = array(
+                                        'role'          => 'assistant',
+                                        'message'       => __( 'Avbrutt. Ingen endringer ble utført.', 'lpr-backorder-allocator' ),
+                                        'time'          => wp_date( 'Y-m-d H:i:s' ),
+                                        'action_payload'=> null,
+                                        'action_status' => 'none',
+                                        'action_notice' => '',
+                                );
+                                $history[] = $assistant_turn;
+                                $state     = self::persist_chat_state( $user_id, $history, array_slice( $history, -$context_limit ) );
+                                self::record_request_meta( $user_id, $model, 0.0, 'success' );
+                                while ( ob_get_level() > 0 ) {
+                                        ob_end_clean();
+                                }
+                                wp_send_json_success(
+                                        array(
+                                                'assistant'              => $assistant_turn,
+                                                'history'                => $state['history'],
+                                                'draft_bundles'          => self::get_draft_bundles( $user_id ),
+                                                'reconciliation_summary' => array(),
+                                        )
+                                );
+                        }
+                        if ( ! empty( $pending_confirmation ) && self::is_chat_confirmation_message( $latest_message ) ) {
+                                $apply = self::confirm_and_apply_draft_bundle(
+                                        $user_id,
+                                        (string) $pending_confirmation['bundle_id'],
+                                        'chat-' . md5( (string) $pending_confirmation['bundle_id'] . '|' . wp_date( 'c' ) ),
+                                        (int) ( $pending_confirmation['expected_line_count'] ?? 0 ),
+                                        (int) ( $pending_confirmation['expected_apply_count'] ?? 0 ),
+                                        (string) ( $pending_confirmation['confirm_digest'] ?? '' )
+                                );
+                                self::clear_pending_chat_confirmation( $user_id );
+                                if ( ! empty( $apply['ok'] ) ) {
+                                        $assistant_message = self::build_apply_result_message(
+                                                isset( $apply['bundle'] ) && is_array( $apply['bundle'] ) ? $apply['bundle'] : array(),
+                                                isset( $apply['result'] ) && is_array( $apply['result'] ) ? $apply['result'] : array()
+                                        );
+                                } else {
+                                        $assistant_message = sanitize_text_field( (string) ( $apply['error']['message'] ?? __( 'Kunne ikke utføre endringen.', 'lpr-backorder-allocator' ) ) );
+                                }
+                                $assistant_turn = array(
+                                        'role'          => 'assistant',
+                                        'message'       => $assistant_message,
+                                        'time'          => wp_date( 'Y-m-d H:i:s' ),
+                                        'action_payload'=> null,
+                                        'action_status' => 'none',
+                                        'action_notice' => '',
+                                );
+                                $history[] = $assistant_turn;
+                                $state     = self::persist_chat_state( $user_id, $history, array_slice( $history, -$context_limit ) );
+                                self::record_request_meta( $user_id, $model, 0.0, ! empty( $apply['ok'] ) ? 'success' : 'blocked' );
+                                while ( ob_get_level() > 0 ) {
+                                        ob_end_clean();
+                                }
+                                wp_send_json_success(
+                                        array(
+                                                'assistant'              => $assistant_turn,
+                                                'history'                => $state['history'],
+                                                'draft_bundles'          => isset( $apply['draft_bundles'] ) && is_array( $apply['draft_bundles'] ) ? $apply['draft_bundles'] : self::get_draft_bundles( $user_id ),
+                                                'reconciliation_summary' => array(),
+                                        )
+                                );
+                        }
+
                         $settings = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array();
                         $model    = isset( $settings['ai_model'] ) ? sanitize_text_field( (string) $settings['ai_model'] ) : $model;
                         $has_upload = ! empty( $_FILES['assistant_file'] ) && is_array( $_FILES['assistant_file'] );
@@ -21826,13 +22093,6 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 wp_send_json_error( array( 'error' => $ui_error ), 400 );
                         }
 
-                        $history = self::normalize_history( get_user_meta( $user_id, $history_key, true ) );
-                        $context = get_transient( $context_key );
-                        if ( ! is_array( $context ) ) {
-                                $context = array_slice( $history, -$context_limit );
-                        }
-                        $context = self::normalize_history( $context );
-
                         if ( ! empty( $reconciliation_summary ) ) {
                                 $context[] = array(
                                         'role'    => 'user',
@@ -21871,13 +22131,6 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 }
                         }
 
-                        $user_turn = array(
-                                'role'    => 'user',
-                                'message' => $latest_message,
-                                'time'    => wp_date( 'Y-m-d H:i:s' ),
-                        );
-                        $history[] = $user_turn;
-
                         if ( ! empty( $parsed['error_code'] ) ) {
                                 $ui_error = self::normalize_ui_error( (string) $parsed['error_code'], (string) $parsed['error_message'] );
                                 self::persist_chat_state( $user_id, $history, array_slice( $history, -$context_limit ) );
@@ -21909,8 +22162,28 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         );
                         if ( 'executable' === ( $assistant_turn['action_status'] ?? 'none' ) && is_array( $assistant_turn['action_payload'] ) ) {
                                 $source_type = ! empty( $reconciliation_summary ) ? 'chat+file' : 'chat';
-                                $queued_bundle                    = self::enqueue_draft_bundle( $user_id, $assistant_turn['action_payload'], $source_type, is_array( $reconciliation_summary ) ? $reconciliation_summary : array() );
-                                $assistant_turn['action_notice']  = trim( (string) $assistant_turn['action_notice'] . ' ' . __( 'Draft action queued in Draft Overview. Confirm explicitly to apply.', 'lpr-backorder-allocator' ) );
+                                $queued_bundle = self::enqueue_draft_bundle( $user_id, $assistant_turn['action_payload'], $source_type, is_array( $reconciliation_summary ) ? $reconciliation_summary : array() );
+                                $digest_payload = wp_json_encode( array( $queued_bundle['id'], $queued_bundle['action_type'], $queued_bundle['before_after'] ) );
+                                $confirm_digest = hash( 'sha256', (string) $digest_payload );
+                                $preview        = self::build_chat_confirmation_preview( $queued_bundle );
+                                $identifiers    = isset( $queued_bundle['identifiers'] ) && is_array( $queued_bundle['identifiers'] ) ? $queued_bundle['identifiers'] : array();
+                                self::remember_pending_chat_confirmation(
+                                        $user_id,
+                                        array(
+                                                'bundle_id'            => (string) ( $queued_bundle['id'] ?? '' ),
+                                                'action_type'          => (string) ( $queued_bundle['action_type'] ?? '' ),
+                                                'target_entity'        => (string) ( $queued_bundle['target_entity'] ?? '' ),
+                                                'po_id'                => max( 0, (int) ( $identifiers['po_id'] ?? 0 ) ),
+                                                'po_number'            => sanitize_text_field( (string) ( $identifiers['po_number'] ?? '' ) ),
+                                                'confirm_digest'       => $confirm_digest,
+                                                'expected_line_count'  => count( (array) ( $queued_bundle['line_changes'] ?? array() ) ),
+                                                'expected_apply_count' => count( (array) ( $queued_bundle['before_after'] ?? array() ) ),
+                                                'preview_summary'      => $preview,
+                                                'created_at'           => wp_date( 'c' ),
+                                        )
+                                );
+                                $assistant_turn['message']       = $preview;
+                                $assistant_turn['action_notice'] = '';
                                 $assistant_turn['draft_bundle_id'] = (string) ( $queued_bundle['id'] ?? '' );
                         }
 
@@ -21980,51 +22253,18 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         );
                 }
 
-                public static function ajax_confirm_draft(): void {
-                        check_ajax_referer( self::nonce_action(), self::nonce_field_name() );
-
-                        if ( ! self::can_apply_draft_actions() ) {
-                                wp_send_json_error(
-                                        array(
-                                                'error' => array(
-                                                        'code'    => 'unknown',
-                                                        'message' => __( 'You do not have permission to confirm and apply draft actions.', 'lpr-backorder-allocator' ),
-                                                ),
-                                        ),
-                                        403
-                                );
-                        }
-
-                        $bundle_id = isset( $_POST['bundle_id'] ) ? sanitize_text_field( wp_unslash( $_POST['bundle_id'] ) ) : '';
-                        if ( '' === $bundle_id ) {
-                                wp_send_json_error(
-                                        array(
-                                                'error' => array(
-                                                        'code'    => 'unknown',
-                                                        'message' => __( 'Missing draft bundle identifier.', 'lpr-backorder-allocator' ),
-                                                ),
-                                        ),
-                                        400
-                                );
-                        }
-                        $idempotency_key = isset( $_POST['idempotency_key'] ) ? sanitize_text_field( wp_unslash( $_POST['idempotency_key'] ) ) : '';
-                        $expected_lines  = isset( $_POST['expected_line_count'] ) ? max( 0, (int) $_POST['expected_line_count'] ) : 0;
-                        $expected_apply  = isset( $_POST['expected_apply_count'] ) ? max( 0, (int) $_POST['expected_apply_count'] ) : 0;
-                        $confirm_digest  = isset( $_POST['confirm_digest'] ) ? sanitize_text_field( wp_unslash( $_POST['confirm_digest'] ) ) : '';
-
-                        $user_id = get_current_user_id();
+                protected static function confirm_and_apply_draft_bundle( int $user_id, string $bundle_id, string $idempotency_key = '', int $expected_lines = 0, int $expected_apply = 0, string $confirm_digest = '' ): array {
                         $duplicate = self::get_idempotency_match( $user_id, $idempotency_key, $bundle_id );
                         if ( ! empty( $duplicate ) ) {
-                                wp_send_json_success(
-                                        array(
-                                                'result'        => isset( $duplicate['result'] ) && is_array( $duplicate['result'] ) ? $duplicate['result'] : array(),
-                                                'bundle'        => array(
-                                                        'id' => $bundle_id,
-                                                        'status' => 'applied',
-                                                ),
-                                                'draft_bundles' => self::get_draft_bundles( $user_id ),
-                                                'idempotent'    => true,
-                                        )
+                                return array(
+                                        'ok'           => true,
+                                        'result'       => isset( $duplicate['result'] ) && is_array( $duplicate['result'] ) ? $duplicate['result'] : array(),
+                                        'bundle'       => array(
+                                                'id'     => $bundle_id,
+                                                'status' => 'applied',
+                                        ),
+                                        'draft_bundles' => self::get_draft_bundles( $user_id ),
+                                        'idempotent'   => true,
                                 );
                         }
 
@@ -22035,20 +22275,19 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 }
                                 $archived_result = isset( $archived_bundle['result'] ) && is_array( $archived_bundle['result'] ) ? $archived_bundle['result'] : array();
                                 self::store_idempotency_result( $user_id, $idempotency_key, $bundle_id, $archived_result );
-                                wp_send_json_success(
-                                        array(
-                                                'result'        => $archived_result,
-                                                'bundle'        => $archived_bundle,
-                                                'draft_bundles' => self::get_draft_bundles( $user_id ),
-                                                'idempotent'    => true,
-                                        )
+                                return array(
+                                        'ok'            => true,
+                                        'result'        => $archived_result,
+                                        'bundle'        => $archived_bundle,
+                                        'draft_bundles' => self::get_draft_bundles( $user_id ),
+                                        'idempotent'    => true,
                                 );
                         }
 
-                        $bundles = self::get_draft_bundles( $user_id );
-                        $found   = false;
-                        $updated = array();
-                        $result  = array();
+                        $bundles      = self::get_draft_bundles( $user_id );
+                        $found        = false;
+                        $updated      = array();
+                        $result       = array();
                         $active_bundle = array();
 
                         foreach ( $bundles as $bundle ) {
@@ -22057,44 +22296,41 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         continue;
                                 }
 
-                                $found        = true;
+                                $found         = true;
                                 $active_bundle = $bundle;
-                                $actual_line_count   = count( (array) ( $active_bundle['line_changes'] ?? array() ) );
-                                $actual_apply_count  = count( (array) ( $active_bundle['before_after'] ?? array() ) );
-                                $digest_payload      = wp_json_encode( array( $active_bundle['id'], $active_bundle['action_type'], $active_bundle['before_after'] ) );
-                                $actual_digest       = hash( 'sha256', (string) $digest_payload );
+                                $actual_line_count    = count( (array) ( $active_bundle['line_changes'] ?? array() ) );
+                                $actual_apply_count   = count( (array) ( $active_bundle['before_after'] ?? array() ) );
+                                $digest_payload       = wp_json_encode( array( $active_bundle['id'], $active_bundle['action_type'], $active_bundle['before_after'] ) );
+                                $actual_digest        = hash( 'sha256', (string) $digest_payload );
                                 $actual_client_digest = (string) sprintf( '%u', crc32( (string) $digest_payload ) );
                                 if ( $expected_lines > 0 && $expected_lines !== $actual_line_count ) {
-                                        wp_send_json_error(
-                                                array(
-                                                        'error' => array(
-                                                                'code'    => 'stale_confirmation',
-                                                                'message' => __( 'Draft changed since confirmation dialog. Re-open and confirm again.', 'lpr-backorder-allocator' ),
-                                                        ),
+                                        return array(
+                                                'ok'         => false,
+                                                'http_status'=> 409,
+                                                'error'      => array(
+                                                        'code'    => 'stale_confirmation',
+                                                        'message' => __( 'Draft changed since confirmation dialog. Re-open and confirm again.', 'lpr-backorder-allocator' ),
                                                 ),
-                                                409
                                         );
                                 }
                                 if ( '' !== $confirm_digest && ! hash_equals( $confirm_digest, $actual_digest ) && $confirm_digest !== $actual_client_digest ) {
-                                        wp_send_json_error(
-                                                array(
-                                                        'error' => array(
-                                                                'code'    => 'stale_confirmation',
-                                                                'message' => __( 'Draft checksum mismatch. Re-open and confirm again.', 'lpr-backorder-allocator' ),
-                                                        ),
+                                        return array(
+                                                'ok'         => false,
+                                                'http_status'=> 409,
+                                                'error'      => array(
+                                                        'code'    => 'stale_confirmation',
+                                                        'message' => __( 'Draft checksum mismatch. Re-open and confirm again.', 'lpr-backorder-allocator' ),
                                                 ),
-                                                409
                                         );
                                 }
                                 if ( $expected_apply > 0 && $expected_apply !== $actual_apply_count ) {
-                                        wp_send_json_error(
-                                                array(
-                                                        'error' => array(
-                                                                'code'    => 'stale_confirmation',
-                                                                'message' => __( 'Draft impact counts changed. Re-open and confirm again.', 'lpr-backorder-allocator' ),
-                                                        ),
+                                        return array(
+                                                'ok'         => false,
+                                                'http_status'=> 409,
+                                                'error'      => array(
+                                                        'code'    => 'stale_confirmation',
+                                                        'message' => __( 'Draft impact counts changed. Re-open and confirm again.', 'lpr-backorder-allocator' ),
                                                 ),
-                                                409
                                         );
                                 }
                                 $ambiguous_count = max( 0, (int) ( $active_bundle['reconciliation_ambiguous_count'] ?? 0 ) );
@@ -22115,14 +22351,13 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                         'message'  => $message,
                                                 )
                                         );
-                                        wp_send_json_error(
-                                                array(
-                                                        'error' => array(
-                                                                'code'    => 'safety_stop',
-                                                                'message' => $message,
-                                                        ),
+                                        return array(
+                                                'ok'         => false,
+                                                'http_status'=> 409,
+                                                'error'      => array(
+                                                        'code'    => 'safety_stop',
+                                                        'message' => $message,
                                                 ),
-                                                409
                                         );
                                 }
                                 $active_bundle['status']     = 'approved';
@@ -22156,13 +22391,13 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 self::append_immutable_audit_record(
                                         $user_id,
                                         array(
-                                                'event'      => 'ai_apply_executed',
-                                                'bundle_id'  => sanitize_text_field( (string) ( $active_bundle['id'] ?? '' ) ),
-                                                'source'     => sanitize_key( (string) ( $active_bundle['source'] ?? 'chat' ) ),
+                                                'event'        => 'ai_apply_executed',
+                                                'bundle_id'    => sanitize_text_field( (string) ( $active_bundle['id'] ?? '' ) ),
+                                                'source'       => sanitize_key( (string) ( $active_bundle['source'] ?? 'chat' ) ),
                                                 'requested_by' => max( 0, (int) ( $active_bundle['requested_by'] ?? $user_id ) ),
-                                                'approved'   => $active_bundle['before_after'] ?? array(),
+                                                'approved'     => $active_bundle['before_after'] ?? array(),
                                                 'live_changes' => $line_audit,
-                                                'outcome'    => sanitize_key( (string) ( $active_bundle['status'] ?? 'unknown' ) ),
+                                                'outcome'      => sanitize_key( (string) ( $active_bundle['status'] ?? 'unknown' ) ),
                                         )
                                 );
                                 self::update_operational_status(
@@ -22176,25 +22411,71 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         }
 
                         if ( ! $found ) {
-                                wp_send_json_error(
-                                        array(
-                                                'error' => array(
-                                                        'code'    => 'unknown',
-                                                        'message' => __( 'Draft bundle was not found or has already been archived.', 'lpr-backorder-allocator' ),
-                                                ),
+                                return array(
+                                        'ok'         => false,
+                                        'http_status'=> 404,
+                                        'error'      => array(
+                                                'code'    => 'unknown',
+                                                'message' => __( 'Draft bundle was not found or has already been archived.', 'lpr-backorder-allocator' ),
                                         ),
-                                        404
                                 );
                         }
 
                         self::persist_draft_bundles( $user_id, $updated );
                         update_user_meta( $user_id, self::apply_result_meta_key(), $active_bundle );
 
+                        return array(
+                                'ok'            => true,
+                                'result'        => $result,
+                                'bundle'        => $active_bundle,
+                                'draft_bundles' => $updated,
+                                'idempotent'    => false,
+                        );
+                }
+
+                public static function ajax_confirm_draft(): void {
+                        check_ajax_referer( self::nonce_action(), self::nonce_field_name() );
+
+                        if ( ! self::can_apply_draft_actions() ) {
+                                wp_send_json_error(
+                                        array(
+                                                'error' => array(
+                                                        'code'    => 'unknown',
+                                                        'message' => __( 'You do not have permission to confirm and apply draft actions.', 'lpr-backorder-allocator' ),
+                                                ),
+                                        ),
+                                        403
+                                );
+                        }
+
+                        $bundle_id = isset( $_POST['bundle_id'] ) ? sanitize_text_field( wp_unslash( $_POST['bundle_id'] ) ) : '';
+                        if ( '' === $bundle_id ) {
+                                wp_send_json_error(
+                                        array(
+                                                'error' => array(
+                                                        'code'    => 'unknown',
+                                                        'message' => __( 'Missing draft bundle identifier.', 'lpr-backorder-allocator' ),
+                                                ),
+                                        ),
+                                        400
+                                );
+                        }
+                        $idempotency_key = isset( $_POST['idempotency_key'] ) ? sanitize_text_field( wp_unslash( $_POST['idempotency_key'] ) ) : '';
+                        $expected_lines  = isset( $_POST['expected_line_count'] ) ? max( 0, (int) $_POST['expected_line_count'] ) : 0;
+                        $expected_apply  = isset( $_POST['expected_apply_count'] ) ? max( 0, (int) $_POST['expected_apply_count'] ) : 0;
+                        $confirm_digest  = isset( $_POST['confirm_digest'] ) ? sanitize_text_field( wp_unslash( $_POST['confirm_digest'] ) ) : '';
+
+                        $user_id = get_current_user_id();
+                        $confirmed = self::confirm_and_apply_draft_bundle( $user_id, $bundle_id, $idempotency_key, $expected_lines, $expected_apply, $confirm_digest );
+                        if ( empty( $confirmed['ok'] ) ) {
+                                wp_send_json_error( array( 'error' => (array) ( $confirmed['error'] ?? array() ) ), (int) ( $confirmed['http_status'] ?? 400 ) );
+                        }
                         wp_send_json_success(
                                 array(
-                                        'result'        => $result,
-                                        'bundle'        => $active_bundle,
-                                        'draft_bundles' => $updated,
+                                        'result'        => isset( $confirmed['result'] ) && is_array( $confirmed['result'] ) ? $confirmed['result'] : array(),
+                                        'bundle'        => isset( $confirmed['bundle'] ) && is_array( $confirmed['bundle'] ) ? $confirmed['bundle'] : array(),
+                                        'draft_bundles' => isset( $confirmed['draft_bundles'] ) && is_array( $confirmed['draft_bundles'] ) ? $confirmed['draft_bundles'] : array(),
+                                        'idempotent'    => ! empty( $confirmed['idempotent'] ),
                                 )
                         );
                 }
