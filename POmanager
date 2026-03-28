@@ -21428,21 +21428,61 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                 }
 
                 protected static function ai_upload_header_map( array $headers ): array {
-                        $map      = array();
+                        $map = array();
+                        $normalize_header = static function ( string $value ): string {
+                                $value = strtolower( trim( $value ) );
+                                // Fold common punctuation variants so header matching is deterministic and auditable.
+                                $value = strtr(
+                                        $value,
+                                        array(
+                                                '’' => "'",
+                                                '‘' => "'",
+                                                '“' => '"',
+                                                '”' => '"',
+                                                '–' => '-',
+                                                '—' => '-',
+                                        )
+                                );
+
+                                return sanitize_key( preg_replace( '/[^a-z0-9]+/i', '_', $value ) );
+                        };
                         $synonyms = array(
-                                'po_reference' => array( 'po_reference', 'po_ref', 'po', 'po_number', 'purchase_order', 'purchase_order_number' ),
-                                'sku'          => array( 'sku', 'product_identifier', 'product_id', 'product', 'item_sku' ),
-                                'quantity'     => array( 'quantity', 'qty', 'ordered_qty', 'qty_ordered' ),
-                                'date'         => array( 'date', 'eta', 'eta_date', 'delivery_date', 'update_date' ),
-                                'notes'        => array( 'update_notes', 'notes', 'note', 'comments' ),
+                                'po_reference'             => array( 'po_reference', 'po_ref', 'po', 'po_number', 'purchase_order', 'purchase_order_number', 'open_order', 'order_no', 'order_number', 'co', 'co_no', 'co_number', 'supplier_order', 'supplier_order_no' ),
+                                'sku'                      => array( 'sku', 'item_no', 'item', 'item_no.', 'article', 'article_no', 'product_identifier', 'product_id', 'product', 'item_sku', 'item_number' ),
+                                'quantity'                 => array( 'quantity', 'qty', 'ordered_qty', 'qty_ordered', 'order', 'units' ),
+                                'date'                     => array( 'date', 'eta', 'eta_date', 'delivery_date', 'update_date', 'delivery date estimated', 'estimated_delivery', 'estimated delivery', 'etd' ),
+                                'notes'                    => array( 'update_notes', 'notes', 'note', 'comments', 'comment', 'remarks' ),
+                                'customer_order_reference' => array( 'customer_order', 'customer_order_no', 'customer’s ord', 'customers ord', 'case', 'case_no', 'customer_ref' ),
+                                // Optional reconciliation-support fields.
+                                'item_name'                => array( 'item_name', 'item_description', 'description', 'product_name' ),
+                                'supplier_po_reference'    => array( 'supplier_po_reference', 'supplier_po', 'vendor_po_reference', 'vendor_po' ),
+                                'supplier_order_reference' => array( 'supplier_order_reference', 'supplier_order_ref', 'vendor_order_reference', 'vendor_order_ref' ),
+                                'delivery_number'          => array( 'delivery_number', 'delivery_no', 'shipment_number', 'shipment_no' ),
+                                'address_number'           => array( 'address_number', 'address_no', 'ship_to_number', 'ship_to_no' ),
+                                'raw_comments'             => array( 'raw_comments', 'raw_comment', 'original_comments', 'source_comments' ),
                         );
+                        $normalized_synonyms = array();
+                        foreach ( $synonyms as $target => $options ) {
+                                $normalized_synonyms[ $target ] = array_values(
+                                        array_filter(
+                                                array_unique(
+                                                        array_map(
+                                                                static function ( string $option ) use ( $normalize_header ): string {
+                                                                        return $normalize_header( $option );
+                                                                },
+                                                                $options
+                                                        )
+                                                )
+                                        )
+                                );
+                        }
 
                         foreach ( $headers as $index => $header ) {
-                                $normalized = sanitize_key( preg_replace( '/[^a-z0-9]+/i', '_', strtolower( trim( (string) $header ) ) ) );
+                                $normalized = $normalize_header( (string) $header );
                                 if ( '' === $normalized ) {
                                         continue;
                                 }
-                                foreach ( $synonyms as $target => $options ) {
+                                foreach ( $normalized_synonyms as $target => $options ) {
                                         if ( in_array( $normalized, $options, true ) ) {
                                                 $map[ $index ] = $target;
                                                 break;
