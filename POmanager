@@ -21718,25 +21718,162 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         return $result;
                 }
 
-                protected static function normalize_uploaded_reference( string $value ): string {
-                        $raw = trim( sanitize_text_field( $value ) );
+                protected static function normalize_supplier_reference( string $value ): string {
+                        $raw = strtoupper( trim( sanitize_text_field( $value ) ) );
                         if ( '' === $raw ) {
                                 return '';
                         }
-                        $normalized = strtolower( $raw );
-                        $normalized = preg_replace( '/\b(po|ord(?:er)?|ref(?:erence)?|case|nr|no)\b/ui', '', $normalized );
-                        $normalized = preg_replace( '/[^a-z0-9]+/ui', '', (string) $normalized );
 
-                        return (string) $normalized;
-                }
-
-                protected static function uploaded_reference_numeric_core( string $value ): string {
-                        $normalized = self::normalize_uploaded_reference( $value );
-                        if ( '' === $normalized ) {
+                        $raw    = preg_replace( '/[^A-Z0-9]+/u', ' ', $raw );
+                        $tokens = preg_split( '/\s+/u', trim( (string) $raw ) );
+                        if ( ! is_array( $tokens ) ) {
                                 return '';
                         }
 
-                        return (string) preg_replace( '/\D+/', '', $normalized );
+                        $noise_tokens = array(
+                                'PO',
+                                'PONR',
+                                'PONO',
+                                'SO',
+                                'ORD',
+                                'ORDER',
+                                'REF',
+                                'REFERENCE',
+                                'NO',
+                                'NR',
+                                'NUMBER',
+                                'SUPPLIER',
+                                'VENDOR',
+                                'WEEK',
+                        );
+
+                        $filtered = array();
+                        foreach ( $tokens as $token ) {
+                                $token = trim( (string) $token );
+                                if ( '' === $token || in_array( $token, $noise_tokens, true ) || preg_match( '/^WEEK\d*$/', $token ) ) {
+                                        continue;
+                                }
+                                $filtered[] = $token;
+                        }
+
+                        if ( count( $filtered ) > 1 ) {
+                                $last = (string) end( $filtered );
+                                if ( preg_match( '/^\d{1,2}$/', $last ) ) {
+                                        array_pop( $filtered );
+                                }
+                        }
+
+                        return implode( '', $filtered );
+                }
+
+                protected static function extract_reference_core( string $value ): array {
+                        $normalized = self::normalize_supplier_reference( $value );
+                        if ( '' === $normalized ) {
+                                return array(
+                                        'normalized'    => '',
+                                        'tokens'        => array(),
+                                        'numeric_cores' => array(),
+                                );
+                        }
+
+                        preg_match_all( '/[A-Z]+|\d+/u', $normalized, $parts );
+                        $tokens = array_values( array_filter( array_map( 'trim', (array) ( $parts[0] ?? array() ) ) ) );
+
+                        $numeric_cores = array();
+                        foreach ( $tokens as $token ) {
+                                if ( preg_match( '/^\d+$/', $token ) ) {
+                                        $numeric_cores[] = $token;
+                                }
+                        }
+
+                        return array(
+                                'normalized'    => $normalized,
+                                'tokens'        => $tokens,
+                                'numeric_cores' => array_values( array_unique( $numeric_cores ) ),
+                        );
+                }
+
+                protected static function compare_supplier_reference_similarity( string $incoming, string $candidate ): array {
+                        $incoming_core  = self::extract_reference_core( $incoming );
+                        $candidate_core = self::extract_reference_core( $candidate );
+                        $incoming_norm  = (string) ( $incoming_core['normalized'] ?? '' );
+                        $candidate_norm = (string) ( $candidate_core['normalized'] ?? '' );
+
+                        if ( '' === $incoming_norm || '' === $candidate_norm ) {
+                                return array(
+                                        'score'   => 0.0,
+                                        'metrics' => array(
+                                                'exact_normalized'       => 0.0,
+                                                'contains_normalized'    => 0.0,
+                                                'prefix_overlap_ratio'   => 0.0,
+                                                'string_similarity'      => 0.0,
+                                                'numeric_core_agreement' => 0.0,
+                                        ),
+                                        'reasons' => array(),
+                                );
+                        }
+
+                        $exact_normalized = $incoming_norm === $candidate_norm ? 1.0 : 0.0;
+                        $contains         = ( false !== strpos( $incoming_norm, $candidate_norm ) || false !== strpos( $candidate_norm, $incoming_norm ) ) ? 1.0 : 0.0;
+
+                        $max_prefix = min( strlen( $incoming_norm ), strlen( $candidate_norm ) );
+                        $prefix_len = 0;
+                        for ( $i = 0; $i < $max_prefix; $i++ ) {
+                                if ( $incoming_norm[ $i ] !== $candidate_norm[ $i ] ) {
+                                        break;
+                                }
+                                $prefix_len++;
+                        }
+                        $prefix_overlap = $max_prefix > 0 ? max( 0.0, min( 1.0, (float) $prefix_len / (float) $max_prefix ) ) : 0.0;
+
+                        similar_text( $incoming_norm, $candidate_norm, $pct );
+                        $string_similarity = max( 0.0, min( 1.0, (float) $pct / 100.0 ) );
+
+                        $incoming_numeric  = (array) ( $incoming_core['numeric_cores'] ?? array() );
+                        $candidate_numeric = (array) ( $candidate_core['numeric_cores'] ?? array() );
+                        $numeric_overlap   = array_values( array_intersect( $incoming_numeric, $candidate_numeric ) );
+                        $numeric_core_agreement = ! empty( $numeric_overlap ) ? 1.0 : 0.0;
+
+                        $score = 0.0;
+                        $score += $exact_normalized * 0.50;
+                        $score += $contains * 0.20;
+                        $score += $prefix_overlap * 0.10;
+                        $score += $string_similarity * 0.10;
+                        $score += $numeric_core_agreement * 0.10;
+                        $score = max( 0.0, min( 1.0, $score ) );
+
+                        $reasons = array();
+                        if ( $exact_normalized > 0 ) {
+                                $reasons[] = 'supplier_ref_exact_normalized';
+                        }
+                        if ( $contains > 0 ) {
+                                $reasons[] = 'supplier_ref_contains_normalized';
+                        }
+                        if ( $numeric_core_agreement > 0 ) {
+                                $reasons[] = 'supplier_ref_numeric_core_match';
+                        }
+
+                        return array(
+                                'score'   => round( $score, 4 ),
+                                'metrics' => array(
+                                        'exact_normalized'       => $exact_normalized,
+                                        'contains_normalized'    => $contains,
+                                        'prefix_overlap_ratio'   => round( $prefix_overlap, 4 ),
+                                        'string_similarity'      => round( $string_similarity, 4 ),
+                                        'numeric_core_agreement' => $numeric_core_agreement,
+                                ),
+                                'reasons' => $reasons,
+                        );
+                }
+
+                protected static function normalize_uploaded_reference( string $value ): string {
+                        return strtolower( self::normalize_supplier_reference( $value ) );
+                }
+
+                protected static function uploaded_reference_numeric_core( string $value ): string {
+                        $core = self::extract_reference_core( $value );
+                        $nums = (array) ( $core['numeric_cores'] ?? array() );
+                        return implode( '', $nums );
                 }
 
                 protected static function uploaded_row_reference_values( array $row ): array {
@@ -21760,17 +21897,8 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                 }
 
                 protected static function uploaded_reference_similarity_score( string $a, string $b ): float {
-                        $norm_a = self::normalize_uploaded_reference( $a );
-                        $norm_b = self::normalize_uploaded_reference( $b );
-                        if ( '' === $norm_a || '' === $norm_b ) {
-                                return 0.0;
-                        }
-                        if ( $norm_a === $norm_b ) {
-                                return 1.0;
-                        }
-
-                        similar_text( $norm_a, $norm_b, $pct );
-                        return max( 0.0, min( 1.0, (float) $pct / 100.0 ) );
+                        $similarity = self::compare_supplier_reference_similarity( $a, $b );
+                        return max( 0.0, min( 1.0, (float) ( $similarity['score'] ?? 0.0 ) ) );
                 }
 
                 protected static function uploaded_row_sku_target_ids( array $row ): array {
@@ -21869,20 +21997,28 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                 $add_candidate( $po_id, 'case_insensitive_po_number_match' );
                                         }
 
-                                        $normalized_reference = self::normalize_uploaded_reference( $reference );
-                                        $normalized_po_number = self::normalize_uploaded_reference( $po_number );
-                                        if ( '' !== $normalized_reference && '' !== $normalized_po_number && $normalized_reference === $normalized_po_number ) {
+                                        $comparison  = self::compare_supplier_reference_similarity( $reference, $po_number );
+                                        $metrics     = (array) ( $comparison['metrics'] ?? array() );
+                                        $cmp_reasons = (array) ( $comparison['reasons'] ?? array() );
+
+                                        if ( ! empty( $metrics['exact_normalized'] ) ) {
                                                 $add_candidate( $po_id, 'normalized_po_reference_match' );
                                         }
 
-                                        if ( '' !== $normalized_reference && '' !== $normalized_po_number && ( false !== strpos( $normalized_reference, $normalized_po_number ) || false !== strpos( $normalized_po_number, $normalized_reference ) ) ) {
+                                        if ( ! empty( $metrics['contains_normalized'] ) ) {
                                                 $add_candidate( $po_id, 'normalized_reference_containment_match' );
                                         }
 
-                                        $reference_core = self::uploaded_reference_numeric_core( $reference );
-                                        $po_core        = self::uploaded_reference_numeric_core( $po_number );
-                                        if ( '' !== $reference_core && '' !== $po_core && $reference_core === $po_core ) {
+                                        if ( ! empty( $metrics['numeric_core_agreement'] ) ) {
                                                 $add_candidate( $po_id, 'numeric_core_match' );
+                                        }
+
+                                        if ( (float) ( $comparison['score'] ?? 0.0 ) >= 0.72 ) {
+                                                $add_candidate( $po_id, 'supplier_reference_similarity_match' );
+                                        }
+
+                                        foreach ( $cmp_reasons as $cmp_reason ) {
+                                                $add_candidate( $po_id, sanitize_key( (string) $cmp_reason ) );
                                         }
 
                                         if ( false !== strpos( $haystack_lc, $reference_lc ) || false !== strpos( $reference_lc, strtolower( $po_number ) ) ) {
@@ -21967,13 +22103,27 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         $po_number = sanitize_text_field( (string) get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_PO_NUMBER' ) ? PO_META_PO_NUMBER : '_lpr_po_number', true ) );
 
                         $best_similarity = 0.0;
+                        $best_similarity_metrics = array();
+                        $best_similarity_reasons = array();
                         foreach ( $row_references as $reference ) {
-                                $best_similarity = max( $best_similarity, self::uploaded_reference_similarity_score( $reference, $po_number ) );
+                                $comparison = self::compare_supplier_reference_similarity( $reference, $po_number );
+                                $candidate_similarity = (float) ( $comparison['score'] ?? 0.0 );
+                                if ( $candidate_similarity > $best_similarity ) {
+                                        $best_similarity = $candidate_similarity;
+                                        $best_similarity_metrics = (array) ( $comparison['metrics'] ?? array() );
+                                        $best_similarity_reasons = (array) ( $comparison['reasons'] ?? array() );
+                                }
                         }
                         if ( $best_similarity > 0.0 ) {
                                 $signals['normalized_reference_similarity'] = round( $best_similarity, 4 );
                                 $score += $best_similarity * $weights['normalized_reference_similarity'];
                                 $reasons[] = sprintf( 'normalized_similarity=%.2f', $best_similarity );
+                                if ( ! empty( $best_similarity_metrics['numeric_core_agreement'] ) ) {
+                                        $signals['numeric_core_agreement'] = 1.0;
+                                }
+                                foreach ( $best_similarity_reasons as $reason_label ) {
+                                        $reasons[] = sanitize_key( (string) $reason_label );
+                                }
                         }
 
                         $row_cores = array();
