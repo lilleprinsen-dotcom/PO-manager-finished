@@ -20602,6 +20602,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 $reconciliation_ambiguous_count = max( 0, (int) ( $bundle['reconciliation_ambiguous_count'] ?? 0 ) );
                                 $requires_manual_review = ! empty( $bundle['requires_manual_review'] );
                                 $manual_review_reasons  = isset( $bundle['manual_review_reasons'] ) && is_array( $bundle['manual_review_reasons'] ) ? array_values( $bundle['manual_review_reasons'] ) : array();
+                                $uploaded_reconciliation_summary = isset( $bundle['uploaded_reconciliation_summary'] ) && is_array( $bundle['uploaded_reconciliation_summary'] ) ? $bundle['uploaded_reconciliation_summary'] : array();
 
                                 if ( '' === $id || '' === $action_type ) {
                                         continue;
@@ -20636,6 +20637,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         'reconciliation_ambiguous_count' => $reconciliation_ambiguous_count,
                                         'requires_manual_review' => $requires_manual_review,
                                         'manual_review_reasons'  => array_map( 'sanitize_text_field', $manual_review_reasons ),
+                                        'uploaded_reconciliation_summary' => $uploaded_reconciliation_summary,
                                 );
                         }
 
@@ -21026,6 +21028,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 'reconciliation_ambiguous_count' => $ambiguous_count,
                                 'requires_manual_review' => $requires_manual_review,
                                 'manual_review_reasons'  => $manual_review_reasons,
+                                'uploaded_reconciliation_summary' => is_array( $reconciliation ) ? $reconciliation : array(),
                         );
 
                         $bundles   = self::get_draft_bundles( $user_id );
@@ -22544,6 +22547,167 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         return $summary;
                 }
 
+                protected static function group_reconciled_rows_by_po( array $rows ): array {
+                        $grouped = array();
+                        foreach ( $rows as $row ) {
+                                if ( ! is_array( $row ) ) {
+                                        continue;
+                                }
+                                $po_id     = max( 0, (int) ( $row['matched_po_id'] ?? 0 ) );
+                                $po_number = sanitize_text_field( (string) ( $row['matched_po_number'] ?? '' ) );
+                                $po_key    = $po_id > 0 ? 'po_' . $po_id : ( $po_number !== '' ? 'po_' . sanitize_key( $po_number ) : 'po_unknown' );
+                                if ( ! isset( $grouped[ $po_key ] ) ) {
+                                        $grouped[ $po_key ] = array(
+                                                'po_id'     => $po_id,
+                                                'po_number' => $po_number,
+                                                'rows'      => array(),
+                                        );
+                                }
+                                $grouped[ $po_key ]['rows'][] = $row;
+                        }
+
+                        return array_values( $grouped );
+                }
+
+                protected static function summarize_reconciled_uploaded_rows( array $summary ): array {
+                        $rows = array();
+                        foreach ( array( 'matched_rows', 'changed_rows', 'unchanged_rows', 'ambiguous_rows', 'unmatched_rows' ) as $bucket_key ) {
+                                foreach ( (array) ( $summary[ $bucket_key ] ?? array() ) as $row ) {
+                                        if ( is_array( $row ) ) {
+                                                $rows[] = $row;
+                                        }
+                                }
+                        }
+                        $rows = array_values( array_unique( $rows, SORT_REGULAR ) );
+
+                        $safe_matches      = array();
+                        $proposed_updates  = array();
+                        $unchanged_rows    = array();
+                        $ambiguous_rows    = array();
+                        $unmatched_rows    = array();
+                        $draft_line_changes = array();
+
+                        foreach ( $rows as $row ) {
+                                $status          = sanitize_key( (string) ( $row['status'] ?? '' ) );
+                                $classification  = sanitize_key( (string) ( $row['classification'] ?? '' ) );
+                                $confidence      = max( 0.0, min( 1.0, (float) ( $row['confidence'] ?? 0.0 ) ) );
+                                $is_draftable    = ! empty( $row['draftable_update'] );
+                                $line_identifier = sanitize_text_field( (string) ( $row['matched_line_identifier'] ?? '' ) );
+                                $incoming_date   = lpr_allocator_sanitize_ymd( (string) ( $row['incoming_date'] ?? '' ) );
+
+                                if ( in_array( $classification, array( 'exact_match', 'likely_match' ), true ) && $confidence >= 0.72 ) {
+                                        $safe_matches[] = $row;
+                                }
+                                if ( 'changed' === $status && $is_draftable ) {
+                                        $proposed_updates[] = $row;
+                                        if ( '' !== $line_identifier && '' !== $incoming_date ) {
+                                                $draft_line_changes[] = array(
+                                                        'line_identifier' => $line_identifier,
+                                                        'eta_date'        => $incoming_date,
+                                                );
+                                        }
+                                        continue;
+                                }
+                                if ( 'unchanged' === $status ) {
+                                        $unchanged_rows[] = $row;
+                                } elseif ( 'ambiguous' === $classification || 'ambiguous' === $status ) {
+                                        $ambiguous_rows[] = $row;
+                                } elseif ( 'unmatched' === $classification || 'unmatched' === $status ) {
+                                        $unmatched_rows[] = $row;
+                                }
+                        }
+
+                        $grouped_by_po = self::group_reconciled_rows_by_po( $proposed_updates );
+
+                        return array(
+                                'filename'         => sanitize_file_name( (string) ( $summary['filename'] ?? '' ) ),
+                                'row_count'        => max( 0, (int) ( $summary['row_count'] ?? count( $rows ) ) ),
+                                'safe_matches'     => array_values( $safe_matches ),
+                                'proposed_updates' => array_values( $proposed_updates ),
+                                'unchanged_rows'   => array_values( $unchanged_rows ),
+                                'ambiguous_rows'   => array_values( $ambiguous_rows ),
+                                'unmatched_rows'   => array_values( $unmatched_rows ),
+                                'grouped_by_po'    => $grouped_by_po,
+                                'draft_line_changes' => array_values( $draft_line_changes ),
+                        );
+                }
+
+                protected static function build_uploaded_reconciliation_chat_preview( array $summary ): string {
+                        if ( empty( $summary ) ) {
+                                return '';
+                        }
+                        $normalized = self::summarize_reconciled_uploaded_rows( $summary );
+
+                        $lines   = array();
+                        $file    = sanitize_file_name( (string) ( $normalized['filename'] ?? '' ) );
+                        $lines[] = __( 'Opplastet avstemming (fil):', 'lpr-backorder-allocator' ) . ' ' . ( $file !== '' ? $file : __( 'ukjent', 'lpr-backorder-allocator' ) );
+                        $lines[] = sprintf( __( 'Totalt: %d rad(er).', 'lpr-backorder-allocator' ), (int) ( $normalized['row_count'] ?? 0 ) );
+                        $lines[] = sprintf( __( '- Trygge treff: %d', 'lpr-backorder-allocator' ), count( (array) ( $normalized['safe_matches'] ?? array() ) ) );
+                        $lines[] = sprintf( __( '- Foreslåtte oppdateringer: %d', 'lpr-backorder-allocator' ), count( (array) ( $normalized['proposed_updates'] ?? array() ) ) );
+                        $lines[] = sprintf( __( '- Uendrede rader: %d', 'lpr-backorder-allocator' ), count( (array) ( $normalized['unchanged_rows'] ?? array() ) ) );
+                        $lines[] = sprintf( __( '- Tvetydige rader: %d', 'lpr-backorder-allocator' ), count( (array) ( $normalized['ambiguous_rows'] ?? array() ) ) );
+                        $lines[] = sprintf( __( '- Umatchede rader: %d', 'lpr-backorder-allocator' ), count( (array) ( $normalized['unmatched_rows'] ?? array() ) ) );
+
+                        $examples = array();
+                        foreach ( array_slice( (array) ( $normalized['proposed_updates'] ?? array() ), 0, 5 ) as $row ) {
+                                if ( ! is_array( $row ) ) {
+                                        continue;
+                                }
+                                $po_number = sanitize_text_field( (string) ( $row['matched_po_number'] ?? '' ) );
+                                $line_id   = sanitize_text_field( (string) ( $row['matched_line_identifier'] ?? '' ) );
+                                $from      = lpr_allocator_sanitize_ymd( (string) ( $row['current_date'] ?? '' ) );
+                                $to        = lpr_allocator_sanitize_ymd( (string) ( $row['incoming_date'] ?? '' ) );
+                                $examples[] = sprintf(
+                                        'PO %1$s (%2$s): %3$s → %4$s',
+                                        $po_number !== '' ? $po_number : '#?',
+                                        $line_id !== '' ? $line_id : 'linje ukjent',
+                                        $from !== '' ? $from : 'tom',
+                                        $to !== '' ? $to : 'tom'
+                                );
+                        }
+                        if ( ! empty( $examples ) ) {
+                                $lines[] = __( 'Eksempler på foreslåtte ETA-endringer:', 'lpr-backorder-allocator' );
+                                foreach ( $examples as $example ) {
+                                        $lines[] = '  - ' . $example;
+                                }
+                        }
+
+                        if ( count( (array) ( $normalized['ambiguous_rows'] ?? array() ) ) > 0 || count( (array) ( $normalized['unmatched_rows'] ?? array() ) ) > 0 ) {
+                                $lines[] = __( 'Merk: Tvetydige og umatchede rader blir ikke lagt i utkast eller utført automatisk.', 'lpr-backorder-allocator' );
+                        }
+
+                        return implode( "\n", $lines );
+                }
+
+                protected static function build_uploaded_reconciliation_result_message( array $apply_result, array $summary ): string {
+                        if ( empty( $summary ) ) {
+                                return '';
+                        }
+                        $normalized     = self::summarize_reconciled_uploaded_rows( $summary );
+                        $applied_count  = max( 0, (int) ( $apply_result['applied_count'] ?? 0 ) );
+                        $skipped_count  = max( 0, (int) ( $apply_result['skipped_count'] ?? 0 ) );
+                        $error_count    = max( 0, (int) ( $apply_result['error_count'] ?? 0 ) );
+                        $ambiguous_cnt  = count( (array) ( $normalized['ambiguous_rows'] ?? array() ) );
+                        $unmatched_cnt  = count( (array) ( $normalized['unmatched_rows'] ?? array() ) );
+                        $proposed_count = count( (array) ( $normalized['proposed_updates'] ?? array() ) );
+
+                        $lines   = array();
+                        $lines[] = __( 'Resultat for opplastet avstemming:', 'lpr-backorder-allocator' );
+                        $lines[] = sprintf( '- %1$d foreslåtte oppdateringer fra filen.', $proposed_count );
+                        $lines[] = sprintf( '- %1$d linje(r) faktisk oppdatert.', $applied_count );
+                        $lines[] = sprintf( '- %1$d linje(r) hoppet over.', $skipped_count );
+                        $lines[] = sprintf( '- %1$d feil.', $error_count );
+                        if ( $ambiguous_cnt > 0 || $unmatched_cnt > 0 ) {
+                                $lines[] = sprintf(
+                                        '- %1$d tvetydige og %2$d umatchede rad(er) ble holdt utenfor utkast/utføring.',
+                                        $ambiguous_cnt,
+                                        $unmatched_cnt
+                                );
+                        }
+
+                        return implode( "\n", $lines );
+                }
+
                 protected static function maybe_process_uploaded_file( int $user_id ): array {
                         if ( empty( $_FILES['assistant_file'] ) || ! is_array( $_FILES['assistant_file'] ) ) {
                                 return array();
@@ -22954,6 +23118,12 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                 isset( $apply['bundle'] ) && is_array( $apply['bundle'] ) ? $apply['bundle'] : array(),
                                                 isset( $apply['result'] ) && is_array( $apply['result'] ) ? $apply['result'] : array()
                                         );
+                                        if ( ! empty( $apply['bundle']['uploaded_reconciliation_summary'] ) && is_array( $apply['bundle']['uploaded_reconciliation_summary'] ) ) {
+                                                $assistant_message .= "\n\n" . self::build_uploaded_reconciliation_result_message(
+                                                        isset( $apply['result'] ) && is_array( $apply['result'] ) ? $apply['result'] : array(),
+                                                        (array) $apply['bundle']['uploaded_reconciliation_summary']
+                                                );
+                                        }
                                 } else {
                                         $assistant_message = sanitize_text_field( (string) ( $apply['error']['message'] ?? __( 'Kunne ikke utføre endringen.', 'lpr-backorder-allocator' ) ) );
                                 }
@@ -23102,11 +23272,27 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 'action_notice' => sanitize_text_field( (string) ( $parsed['action_notice'] ?? '' ) ),
                         );
                         if ( 'executable' === ( $assistant_turn['action_status'] ?? 'none' ) && is_array( $assistant_turn['action_payload'] ) ) {
+                                if ( ! empty( $reconciliation_summary ) && is_array( $reconciliation_summary ) ) {
+                                        $reconciled_digest = self::summarize_reconciled_uploaded_rows( $reconciliation_summary );
+                                        $draft_lines       = isset( $reconciled_digest['draft_line_changes'] ) && is_array( $reconciled_digest['draft_line_changes'] ) ? array_values( $reconciled_digest['draft_line_changes'] ) : array();
+                                        if ( ! empty( $draft_lines ) ) {
+                                                $assistant_turn['action_payload']['line_changes'] = $draft_lines;
+                                        } else {
+                                                $assistant_turn['action_status'] = 'none';
+                                                $assistant_turn['action_payload'] = null;
+                                                $assistant_turn['message']        = self::build_uploaded_reconciliation_chat_preview( $reconciliation_summary ) . "\n\n" . __( 'Ingen trygge endringer ble foreslått til utkast. Vennligst avklar tvetydige/umatchede rader først.', 'lpr-backorder-allocator' );
+                                        }
+                                }
+                        }
+                        if ( 'executable' === ( $assistant_turn['action_status'] ?? 'none' ) && is_array( $assistant_turn['action_payload'] ) ) {
                                 $source_type = ! empty( $reconciliation_summary ) ? 'chat+file' : 'chat';
                                 $queued_bundle = self::enqueue_draft_bundle( $user_id, $assistant_turn['action_payload'], $source_type, is_array( $reconciliation_summary ) ? $reconciliation_summary : array() );
                                 $digest_payload = wp_json_encode( array( $queued_bundle['id'], $queued_bundle['action_type'], $queued_bundle['before_after'] ) );
                                 $confirm_digest = hash( 'sha256', (string) $digest_payload );
                                 $preview        = self::build_human_readable_bundle_preview( $queued_bundle );
+                                if ( ! empty( $reconciliation_summary ) ) {
+                                        $preview = self::build_uploaded_reconciliation_chat_preview( $reconciliation_summary ) . "\n\n" . $preview;
+                                }
                                 $identifiers    = isset( $queued_bundle['identifiers'] ) && is_array( $queued_bundle['identifiers'] ) ? $queued_bundle['identifiers'] : array();
                                 self::remember_pending_chat_confirmation(
                                         $user_id,
