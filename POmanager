@@ -23374,6 +23374,308 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         return $parsed;
                 }
 
+                protected static function detect_followup_po_edit_intent( string $message ): array {
+                        $text = function_exists( 'mb_strtolower' ) ? mb_strtolower( trim( $message ) ) : strtolower( trim( $message ) );
+                        if ( '' === $text ) {
+                                return array( 'is_actionable_edit' => false, 'intent' => 'none' );
+                        }
+
+                        $has_edit_verb = (bool) preg_match( '/\b(endre|oppdater|oppdatere|sett|change|update|set)\b/ui', $text );
+                        $is_eta        = (bool) preg_match( '/\beta\b/ui', $text );
+                        $is_delivery   = (bool) preg_match( '/\b(leveringsdato|delivery date|delivery)\b/ui', $text );
+                        $is_generic_date = (bool) preg_match( '/\b(dato|date)\b/ui', $text );
+                        $is_quantity   = (bool) preg_match( '/\b(antall|qty|quantity)\b/ui', $text );
+                        $is_product    = (bool) preg_match( '/\b(produkt|product|sku)\b/ui', $text );
+
+                        $intent = 'none';
+                        if ( $has_edit_verb && $is_eta ) {
+                                $intent = 'eta';
+                        } elseif ( $has_edit_verb && $is_delivery ) {
+                                $intent = 'delivery_date';
+                        } elseif ( $has_edit_verb && $is_generic_date ) {
+                                $intent = 'generic_date';
+                        } elseif ( $has_edit_verb && $is_quantity ) {
+                                $intent = 'quantity';
+                        } elseif ( $has_edit_verb && $is_product ) {
+                                $intent = 'product';
+                        }
+
+                        return array(
+                                'is_actionable_edit' => 'none' !== $intent,
+                                'intent'             => $intent,
+                        );
+                }
+
+                protected static function normalize_natural_language_date_for_po_edit( string $message ): array {
+                        $raw = trim( $message );
+                        if ( preg_match( '/\b(\d{4}-\d{2}-\d{2})\b/', $raw, $m ) ) {
+                                $iso = sanitize_text_field( (string) $m[1] );
+                                if ( lpr_allocator_is_valid_iso_date( $iso ) ) {
+                                        return array( 'status' => 'ok', 'date' => $iso, 'used_year_hint' => true );
+                                }
+                        }
+
+                        if ( preg_match( '/\b(\d{1,2})[\/\-](\d{1,2})(?:[\/\-](\d{2,4}))?\b/u', $raw ) ) {
+                                return array( 'status' => 'ambiguous', 'reason' => 'ambiguous_numeric_date' );
+                        }
+
+                        $months = array(
+                                'januar' => 1, 'january' => 1, 'jan' => 1,
+                                'februar' => 2, 'february' => 2, 'feb' => 2,
+                                'mars' => 3, 'march' => 3, 'mar' => 3,
+                                'april' => 4, 'apr' => 4,
+                                'mai' => 5, 'may' => 5,
+                                'juni' => 6, 'june' => 6, 'jun' => 6,
+                                'juli' => 7, 'july' => 7, 'jul' => 7,
+                                'august' => 8, 'aug' => 8,
+                                'september' => 9, 'sep' => 9,
+                                'oktober' => 10, 'october' => 10, 'okt' => 10, 'oct' => 10,
+                                'november' => 11, 'nov' => 11,
+                                'desember' => 12, 'december' => 12, 'des' => 12, 'dec' => 12,
+                        );
+
+                        $day = 0;
+                        $month = 0;
+                        $year = 0;
+                        $year_explicit = false;
+
+                        if ( preg_match( '/\b(\d{1,2})[\.\s-]+([a-zæøå]+)(?:[\s,.-]+(\d{4}))?\b/ui', $raw, $m ) ) {
+                                $day = (int) $m[1];
+                                $month_token = function_exists( 'mb_strtolower' ) ? mb_strtolower( (string) $m[2] ) : strtolower( (string) $m[2] );
+                                $month = (int) ( $months[ $month_token ] ?? 0 );
+                                $year = isset( $m[3] ) ? (int) $m[3] : 0;
+                                $year_explicit = isset( $m[3] ) && (int) $m[3] > 0;
+                        } elseif ( preg_match( '/\b([a-zæøå]+)[\s.-]+(\d{1,2})(?:[\s,.-]+(\d{4}))?\b/ui', $raw, $m ) ) {
+                                $month_token = function_exists( 'mb_strtolower' ) ? mb_strtolower( (string) $m[1] ) : strtolower( (string) $m[1] );
+                                $month = (int) ( $months[ $month_token ] ?? 0 );
+                                $day = (int) $m[2];
+                                $year = isset( $m[3] ) ? (int) $m[3] : 0;
+                                $year_explicit = isset( $m[3] ) && (int) $m[3] > 0;
+                        }
+
+                        if ( $month <= 0 || $day <= 0 ) {
+                                return array( 'status' => 'missing' );
+                        }
+
+                        if ( ! $year_explicit ) {
+                                $year = (int) wp_date( 'Y' );
+                                $candidate = sprintf( '%04d-%02d-%02d', $year, $month, $day );
+                                if ( ! lpr_allocator_is_valid_iso_date( $candidate ) ) {
+                                        return array( 'status' => 'invalid', 'reason' => 'invalid_calendar_date' );
+                                }
+                                if ( $candidate < wp_date( 'Y-m-d' ) ) {
+                                        $year++;
+                                }
+                        }
+
+                        $normalized = sprintf( '%04d-%02d-%02d', $year, $month, $day );
+                        if ( ! lpr_allocator_is_valid_iso_date( $normalized ) ) {
+                                return array( 'status' => 'invalid', 'reason' => 'invalid_calendar_date' );
+                        }
+
+                        return array(
+                                'status'        => 'ok',
+                                'date'          => $normalized,
+                                'used_year_hint'=> ! $year_explicit,
+                        );
+                }
+
+                protected static function resolve_deterministic_po_line_identifier( int $po_id, array $remembered_po, array $remembered_product ): array {
+                        $remembered_identifier = sanitize_text_field( (string) ( $remembered_po['line_identifier'] ?? '' ) );
+                        if ( '' !== $remembered_identifier ) {
+                                return array( 'status' => 'resolved', 'line_identifier' => $remembered_identifier );
+                        }
+
+                        $lines = get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', true );
+                        if ( ! is_array( $lines ) || empty( $lines ) ) {
+                                return array( 'status' => 'missing' );
+                        }
+
+                        $candidate_indexes = array();
+                        $target_product_id   = max( 0, (int) ( $remembered_po['product_id'] ?? $remembered_product['product_id'] ?? 0 ) );
+                        $target_variation_id = max( 0, (int) ( $remembered_po['variation_id'] ?? $remembered_product['variation_id'] ?? 0 ) );
+                        foreach ( $lines as $idx => $line ) {
+                                if ( ! is_array( $line ) ) {
+                                        continue;
+                                }
+                                if ( $target_variation_id > 0 && (int) ( $line['variation_id'] ?? 0 ) === $target_variation_id ) {
+                                        $candidate_indexes[] = (int) $idx;
+                                        continue;
+                                }
+                                if ( $target_product_id > 0 && (int) ( $line['product_id'] ?? 0 ) === $target_product_id ) {
+                                        $candidate_indexes[] = (int) $idx;
+                                }
+                        }
+
+                        if ( empty( $candidate_indexes ) && 1 === count( $lines ) ) {
+                                $candidate_indexes[] = 0;
+                        }
+
+                        $candidate_indexes = array_values( array_unique( array_map( 'intval', $candidate_indexes ) ) );
+                        if ( 1 === count( $candidate_indexes ) ) {
+                                return array(
+                                        'status'          => 'resolved',
+                                        'line_identifier' => sprintf( 'po:%1$d:line:%2$d', $po_id, (int) $candidate_indexes[0] ),
+                                );
+                        }
+
+                        if ( count( $candidate_indexes ) > 1 ) {
+                                return array( 'status' => 'ambiguous', 'line_count' => count( $candidate_indexes ) );
+                        }
+
+                        return array( 'status' => 'missing' );
+                }
+
+                protected static function resolve_followup_po_edit_context( string $latest_message, int $user_id ): array {
+                        $remembered_po      = self::get_remembered_po_context( $user_id );
+                        $remembered_product = self::get_remembered_product_context( $user_id );
+                        $po_resolution      = self::resolve_po_for_action_hydration( $latest_message, $user_id );
+                        $po_id              = max( 0, (int) ( $po_resolution['po_id'] ?? 0 ) );
+                        if ( $po_id <= 0 ) {
+                                return array( 'status' => 'missing_po' );
+                        }
+
+                        $line_resolution = self::resolve_deterministic_po_line_identifier( $po_id, $remembered_po, $remembered_product );
+                        if ( 'resolved' !== ( $line_resolution['status'] ?? '' ) ) {
+                                return array_merge( array( 'status' => 'line_' . sanitize_key( (string) ( $line_resolution['status'] ?? 'missing' ) ), 'po_id' => $po_id ), $line_resolution );
+                        }
+
+                        return array(
+                                'status'          => 'resolved',
+                                'po_id'           => $po_id,
+                                'po_number'       => sanitize_text_field( (string) ( $po_resolution['po_number'] ?? $remembered_po['po_number'] ?? '' ) ),
+                                'line_identifier' => sanitize_text_field( (string) ( $line_resolution['line_identifier'] ?? '' ) ),
+                        );
+                }
+
+                protected static function build_deterministic_po_edit_action_payload( array $intent, array $context, array $date_result, string $latest_message ): array {
+                        $action_type = 'update_delivery_date_draft';
+                        $line_key    = 'delivery_date';
+                        if ( 'eta' === ( $intent['intent'] ?? '' ) ) {
+                                $action_type = 'update_eta_draft';
+                                $line_key    = 'eta_date';
+                        }
+
+                        $line_change = array(
+                                'line_identifier' => sanitize_text_field( (string) ( $context['line_identifier'] ?? '' ) ),
+                                'notes'           => sanitize_textarea_field( sprintf( 'Deterministic follow-up edit from chat: %s', $latest_message ) ),
+                        );
+                        if ( isset( $date_result['date'] ) ) {
+                                $line_change[ $line_key ] = sanitize_text_field( (string) $date_result['date'] );
+                        }
+
+                        return array(
+                                'action_type'   => $action_type,
+                                'target_entity' => 'PO',
+                                'identifiers'   => array_filter(
+                                        array(
+                                                'po_id'     => (string) max( 0, (int) ( $context['po_id'] ?? 0 ) ),
+                                                'po_number' => sanitize_text_field( (string) ( $context['po_number'] ?? '' ) ),
+                                        )
+                                ),
+                                'line_changes'  => array( $line_change ),
+                                'confidence'    => 1.0,
+                                'notes'         => 'Deterministic follow-up PO edit payload built server-side.',
+                        );
+                }
+
+                protected static function maybe_build_po_edit_bundle_from_context( string $latest_message, int $user_id ): array {
+                        $intent = self::detect_followup_po_edit_intent( $latest_message );
+                        if ( empty( $intent['is_actionable_edit'] ) ) {
+                                return array( 'handled' => false, 'actionable_intent' => false );
+                        }
+
+                        $intent_type = sanitize_key( (string) ( $intent['intent'] ?? '' ) );
+                        if ( ! in_array( $intent_type, array( 'eta', 'delivery_date', 'generic_date' ), true ) ) {
+                                return array( 'handled' => false, 'actionable_intent' => true );
+                        }
+
+                        if ( 'generic_date' === $intent_type ) {
+                                return array(
+                                        'handled' => true,
+                                        'parsed'  => self::format_information_response( __( 'Mener du ETA eller leveringsdato på denne PO-en?', 'lpr-backorder-allocator' ) ),
+                                        'actionable_intent' => true,
+                                );
+                        }
+
+                        $context = self::resolve_followup_po_edit_context( $latest_message, $user_id );
+                        if ( 'missing_po' === ( $context['status'] ?? '' ) ) {
+                                return array(
+                                        'handled' => true,
+                                        'parsed'  => self::format_information_response( __( 'Jeg trenger en konkret PO først. Oppgi PO-nummer eller referer til PO-en jeg nettopp viste.', 'lpr-backorder-allocator' ) ),
+                                        'actionable_intent' => true,
+                                );
+                        }
+                        if ( 'line_ambiguous' === ( $context['status'] ?? '' ) ) {
+                                return array(
+                                        'handled' => true,
+                                        'parsed'  => self::format_information_response( __( 'Jeg fant flere linjer på PO-en. Hvilken linje mener du?', 'lpr-backorder-allocator' ) ),
+                                        'actionable_intent' => true,
+                                );
+                        }
+                        if ( 'resolved' !== ( $context['status'] ?? '' ) ) {
+                                return array(
+                                        'handled' => true,
+                                        'parsed'  => self::format_information_response( __( 'Jeg klarte ikke å finne en entydig PO-linje. Oppgi linje/SKU så lager jeg utkastet trygt.', 'lpr-backorder-allocator' ) ),
+                                        'actionable_intent' => true,
+                                );
+                        }
+
+                        $date_result = self::normalize_natural_language_date_for_po_edit( $latest_message );
+                        if ( 'missing' === ( $date_result['status'] ?? '' ) ) {
+                                return array(
+                                        'handled' => true,
+                                        'parsed'  => self::format_information_response( __( 'Hvilken dato vil du sette? Oppgi gjerne YYYY-MM-DD eller «23 januar 2027».', 'lpr-backorder-allocator' ) ),
+                                        'actionable_intent' => true,
+                                );
+                        }
+                        if ( 'ambiguous' === ( $date_result['status'] ?? '' ) ) {
+                                return array(
+                                        'handled' => true,
+                                        'parsed'  => self::format_information_response( __( 'Datoen er tvetydig. Oppgi dato som YYYY-MM-DD eller skriv månedsnavn og år.', 'lpr-backorder-allocator' ) ),
+                                        'actionable_intent' => true,
+                                );
+                        }
+                        if ( 'ok' !== ( $date_result['status'] ?? '' ) ) {
+                                return array(
+                                        'handled' => true,
+                                        'parsed'  => self::format_information_response( __( 'Jeg fikk ikke tolket datoen trygt. Kan du oppgi den som YYYY-MM-DD?', 'lpr-backorder-allocator' ) ),
+                                        'actionable_intent' => true,
+                                );
+                        }
+
+                        $payload    = self::build_deterministic_po_edit_action_payload( $intent, $context, $date_result, $latest_message );
+                        $validation = lpr_allocator_validate_ai_action_payload( $payload );
+                        if ( empty( $validation['is_valid'] ) ) {
+                                return array(
+                                        'handled' => true,
+                                        'parsed'  => self::format_information_response( __( 'Jeg trenger litt mer presis informasjon før jeg kan lage et trygt utkast.', 'lpr-backorder-allocator' ) . ' ' . implode( ' ', array_map( 'sanitize_text_field', (array) ( $validation['errors'] ?? array() ) ) ) ),
+                                        'actionable_intent' => true,
+                                );
+                        }
+
+                        $assistant_text = sprintf(
+                                /* translators: 1: PO reference, 2: date */
+                                __( 'Jeg har klargjort et trygt utkast for PO %1$s med ny dato %2$s.', 'lpr-backorder-allocator' ),
+                                '' !== (string) ( $context['po_number'] ?? '' ) ? (string) $context['po_number'] : (string) (int) ( $context['po_id'] ?? 0 ),
+                                sanitize_text_field( (string) ( $date_result['date'] ?? '' ) )
+                        );
+
+                        return array(
+                                'handled' => true,
+                                'parsed'  => array(
+                                        'assistant_text'  => $assistant_text,
+                                        'action_payload'  => $validation['payload'],
+                                        'action_status'   => 'executable',
+                                        'action_notice'   => '',
+                                        'error_code'      => '',
+                                        'error_message'   => '',
+                                        'latency_ms'      => 0.0,
+                                ),
+                                'actionable_intent' => true,
+                        );
+                }
+
                 protected static function resolve_po_for_action_hydration( string $latest_message, int $user_id ): array {
                         $remembered_po = self::get_remembered_po_context( $user_id );
                         $resolved_po   = self::resolve_assistant_po_reference( $latest_message, $remembered_po );
@@ -23707,7 +24009,11 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 );
                         }
 
-                        if ( self::is_inventory_information_query( $latest_message ) ) {
+                        $deterministic_followup = self::maybe_build_po_edit_bundle_from_context( $latest_message, $user_id );
+                        $has_actionable_followup_intent = ! empty( $deterministic_followup['actionable_intent'] );
+                        if ( ! empty( $deterministic_followup['handled'] ) && isset( $deterministic_followup['parsed'] ) && is_array( $deterministic_followup['parsed'] ) ) {
+                                $parsed = $deterministic_followup['parsed'];
+                        } elseif ( ! $has_actionable_followup_intent && self::is_inventory_information_query( $latest_message ) ) {
                                 $parsed = self::build_inventory_information_reply( $latest_message );
                                 $parsed['latency_ms']   = 0.0;
                                 $parsed['error_code']   = '';
