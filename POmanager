@@ -21718,78 +21718,523 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         return $result;
                 }
 
+                protected static function normalize_uploaded_reference( string $value ): string {
+                        $raw = trim( sanitize_text_field( $value ) );
+                        if ( '' === $raw ) {
+                                return '';
+                        }
+                        $normalized = strtolower( $raw );
+                        $normalized = preg_replace( '/\b(po|ord(?:er)?|ref(?:erence)?|case|nr|no)\b/ui', '', $normalized );
+                        $normalized = preg_replace( '/[^a-z0-9]+/ui', '', (string) $normalized );
+
+                        return (string) $normalized;
+                }
+
+                protected static function uploaded_reference_numeric_core( string $value ): string {
+                        $normalized = self::normalize_uploaded_reference( $value );
+                        if ( '' === $normalized ) {
+                                return '';
+                        }
+
+                        return (string) preg_replace( '/\D+/', '', $normalized );
+                }
+
+                protected static function uploaded_row_reference_values( array $row ): array {
+                        $values = array();
+                        $fields = array(
+                                'po_reference',
+                                'supplier_po_reference',
+                                'customer_order_reference',
+                                'supplier_order_reference',
+                                'delivery_number',
+                                'address_number',
+                        );
+                        foreach ( $fields as $field ) {
+                                $value = sanitize_text_field( (string) ( $row[ $field ] ?? '' ) );
+                                if ( '' !== $value ) {
+                                        $values[] = $value;
+                                }
+                        }
+
+                        return array_values( array_unique( $values ) );
+                }
+
+                protected static function uploaded_reference_similarity_score( string $a, string $b ): float {
+                        $norm_a = self::normalize_uploaded_reference( $a );
+                        $norm_b = self::normalize_uploaded_reference( $b );
+                        if ( '' === $norm_a || '' === $norm_b ) {
+                                return 0.0;
+                        }
+                        if ( $norm_a === $norm_b ) {
+                                return 1.0;
+                        }
+
+                        similar_text( $norm_a, $norm_b, $pct );
+                        return max( 0.0, min( 1.0, (float) $pct / 100.0 ) );
+                }
+
+                protected static function uploaded_row_sku_target_ids( array $row ): array {
+                        $sku = sanitize_text_field( (string) ( $row['sku'] ?? '' ) );
+                        if ( '' === $sku || ! function_exists( 'wc_get_product_id_by_sku' ) ) {
+                                return array();
+                        }
+
+                        $target_ids = array();
+                        $target_id  = max( 0, (int) wc_get_product_id_by_sku( $sku ) );
+                        if ( $target_id > 0 ) {
+                                $target_ids[] = $target_id;
+                                $product = function_exists( 'wc_get_product' ) ? wc_get_product( $target_id ) : null;
+                                if ( $product instanceof \WC_Product_Variation ) {
+                                        $parent_id = max( 0, (int) $product->get_parent_id() );
+                                        if ( $parent_id > 0 ) {
+                                                $target_ids[] = $parent_id;
+                                        }
+                                }
+                        }
+
+                        return array_values( array_unique( array_map( 'absint', $target_ids ) ) );
+                }
+
+                protected static function find_candidate_pos_for_uploaded_row( array $row ): array {
+                        $candidate_map      = array();
+                        $row_references     = self::uploaded_row_reference_values( $row );
+                        $po_type            = defined( __NAMESPACE__ . '\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po';
+                        $po_number_meta_key = defined( __NAMESPACE__ . '\PO_META_PO_NUMBER' ) ? PO_META_PO_NUMBER : '_lpr_po_number';
+                        $line_meta_key      = defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines';
+
+                        $add_candidate = static function ( int $po_id, string $reason ) use ( &$candidate_map ): void {
+                                $po_id = max( 0, $po_id );
+                                if ( $po_id <= 0 ) {
+                                        return;
+                                }
+                                if ( ! isset( $candidate_map[ $po_id ] ) ) {
+                                        $candidate_map[ $po_id ] = array();
+                                }
+                                $candidate_map[ $po_id ][] = sanitize_text_field( $reason );
+                        };
+
+                        foreach ( $row_references as $reference ) {
+                                $exact_query = new \WP_Query(
+                                        array(
+                                                'post_type'      => $po_type,
+                                                'post_status'    => 'any',
+                                                'posts_per_page' => 8,
+                                                'fields'         => 'ids',
+                                                'no_found_rows'  => true,
+                                                'meta_query'     => array(
+                                                        array(
+                                                                'key'     => $po_number_meta_key,
+                                                                'value'   => $reference,
+                                                                'compare' => '=',
+                                                        ),
+                                                ),
+                                        )
+                                );
+                                foreach ( (array) $exact_query->posts as $po_id ) {
+                                        $add_candidate( (int) $po_id, 'exact_po_number_match' );
+                                }
+
+                                if ( preg_match( '/^\d+$/', $reference ) ) {
+                                        $maybe_po = absint( $reference );
+                                        if ( $maybe_po > 0 && get_post_type( $maybe_po ) === $po_type ) {
+                                                $add_candidate( $maybe_po, 'direct_po_id_match' );
+                                        }
+                                }
+                        }
+
+                        $broad_query = new \WP_Query(
+                                array(
+                                        'post_type'      => $po_type,
+                                        'post_status'    => 'any',
+                                        'posts_per_page' => 220,
+                                        'fields'         => 'ids',
+                                        'no_found_rows'  => true,
+                                )
+                        );
+                        foreach ( (array) $broad_query->posts as $po_id ) {
+                                $po_id      = (int) $po_id;
+                                $po_number  = sanitize_text_field( (string) get_post_meta( $po_id, $po_number_meta_key, true ) );
+                                $post_title = sanitize_text_field( (string) get_the_title( $po_id ) );
+                                $po_note    = sanitize_textarea_field( (string) get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_NOTE' ) ? PO_META_NOTE : '_lpr_po_note', true ) );
+                                $supplier   = sanitize_text_field( (string) get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_SUPPLIER_NAME' ) ? PO_META_SUPPLIER_NAME : '_lpr_supplier_name', true ) );
+                                $haystack   = trim( implode( ' ', array( $po_number, $post_title, $po_note, $supplier ) ) );
+                                $haystack_lc = strtolower( $haystack );
+
+                                foreach ( $row_references as $reference ) {
+                                        $reference_lc = strtolower( $reference );
+                                        if ( '' === $reference_lc ) {
+                                                continue;
+                                        }
+                                        if ( '' !== $po_number && strtolower( $po_number ) === $reference_lc ) {
+                                                $add_candidate( $po_id, 'case_insensitive_po_number_match' );
+                                        }
+
+                                        $normalized_reference = self::normalize_uploaded_reference( $reference );
+                                        $normalized_po_number = self::normalize_uploaded_reference( $po_number );
+                                        if ( '' !== $normalized_reference && '' !== $normalized_po_number && $normalized_reference === $normalized_po_number ) {
+                                                $add_candidate( $po_id, 'normalized_po_reference_match' );
+                                        }
+
+                                        if ( '' !== $normalized_reference && '' !== $normalized_po_number && ( false !== strpos( $normalized_reference, $normalized_po_number ) || false !== strpos( $normalized_po_number, $normalized_reference ) ) ) {
+                                                $add_candidate( $po_id, 'normalized_reference_containment_match' );
+                                        }
+
+                                        $reference_core = self::uploaded_reference_numeric_core( $reference );
+                                        $po_core        = self::uploaded_reference_numeric_core( $po_number );
+                                        if ( '' !== $reference_core && '' !== $po_core && $reference_core === $po_core ) {
+                                                $add_candidate( $po_id, 'numeric_core_match' );
+                                        }
+
+                                        if ( false !== strpos( $haystack_lc, $reference_lc ) || false !== strpos( $reference_lc, strtolower( $po_number ) ) ) {
+                                                $add_candidate( $po_id, 'substring_or_containment_match' );
+                                        }
+                                }
+
+                                $customer_refs = array_filter(
+                                        array(
+                                                sanitize_text_field( (string) ( $row['customer_order_reference'] ?? '' ) ),
+                                                sanitize_text_field( (string) ( $row['supplier_order_reference'] ?? '' ) ),
+                                                sanitize_text_field( (string) ( $row['delivery_number'] ?? '' ) ),
+                                                sanitize_text_field( (string) ( $row['address_number'] ?? '' ) ),
+                                        )
+                                );
+                                foreach ( $customer_refs as $customer_ref ) {
+                                        $needle = strtolower( $customer_ref );
+                                        if ( '' !== $needle && false !== strpos( $haystack_lc, $needle ) ) {
+                                                $add_candidate( $po_id, 'customer_case_reference_match' );
+                                        }
+                                }
+                        }
+
+                        $target_ids = self::uploaded_row_sku_target_ids( $row );
+                        if ( ! empty( $target_ids ) ) {
+                                $sku_query = new \WP_Query(
+                                        array(
+                                                'post_type'      => $po_type,
+                                                'post_status'    => 'any',
+                                                'posts_per_page' => 220,
+                                                'fields'         => 'ids',
+                                                'no_found_rows'  => true,
+                                        )
+                                );
+                                foreach ( (array) $sku_query->posts as $po_id ) {
+                                        $lines = get_post_meta( (int) $po_id, $line_meta_key, true );
+                                        if ( ! is_array( $lines ) ) {
+                                                continue;
+                                        }
+                                        foreach ( $lines as $line ) {
+                                                if ( ! is_array( $line ) ) {
+                                                        continue;
+                                                }
+                                                $variation_id = max( 0, (int) ( $line['variation_id'] ?? 0 ) );
+                                                $product_id   = max( 0, (int) ( $line['product_id'] ?? 0 ) );
+                                                if ( in_array( $variation_id, $target_ids, true ) || in_array( $product_id, $target_ids, true ) ) {
+                                                        $add_candidate( (int) $po_id, 'sku_present_on_po_lines' );
+                                                        break;
+                                                }
+                                        }
+                                }
+                        }
+
+                        $candidates = array();
+                        foreach ( $candidate_map as $po_id => $reasons ) {
+                                $candidates[] = array(
+                                        'po_id'   => (int) $po_id,
+                                        'reasons' => array_values( array_unique( array_filter( array_map( 'sanitize_text_field', (array) $reasons ) ) ) ),
+                                );
+                        }
+
+                        return $candidates;
+                }
+
+                protected static function score_uploaded_row_po_candidate( array $row, int $po_id, array $po_lines ): array {
+                        $weights = array(
+                                'normalized_reference_similarity' => 35,
+                                'numeric_core_agreement'          => 20,
+                                'customer_case_reference_match'   => 18,
+                                'exact_sku_on_lines'              => 26,
+                                'item_name_similarity'            => 10,
+                                'quantity_consistency'            => 8,
+                                'date_proximity'                  => 8,
+                                'open_live_po_status_bonus'       => 6,
+                        );
+
+                        $signals = array();
+                        $score   = 0.0;
+                        $reasons = array();
+
+                        $row_references = self::uploaded_row_reference_values( $row );
+                        $po_number = sanitize_text_field( (string) get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_PO_NUMBER' ) ? PO_META_PO_NUMBER : '_lpr_po_number', true ) );
+
+                        $best_similarity = 0.0;
+                        foreach ( $row_references as $reference ) {
+                                $best_similarity = max( $best_similarity, self::uploaded_reference_similarity_score( $reference, $po_number ) );
+                        }
+                        if ( $best_similarity > 0.0 ) {
+                                $signals['normalized_reference_similarity'] = round( $best_similarity, 4 );
+                                $score += $best_similarity * $weights['normalized_reference_similarity'];
+                                $reasons[] = sprintf( 'normalized_similarity=%.2f', $best_similarity );
+                        }
+
+                        $row_cores = array();
+                        foreach ( $row_references as $reference ) {
+                                $core = self::uploaded_reference_numeric_core( $reference );
+                                if ( '' !== $core ) {
+                                        $row_cores[] = $core;
+                                }
+                        }
+                        $row_cores = array_values( array_unique( $row_cores ) );
+                        $po_core   = self::uploaded_reference_numeric_core( $po_number );
+                        if ( '' !== $po_core && in_array( $po_core, $row_cores, true ) ) {
+                                $signals['numeric_core_agreement'] = 1.0;
+                                $score += $weights['numeric_core_agreement'];
+                                $reasons[] = 'numeric_core_match';
+                        }
+
+                        $haystack = strtolower( trim( implode( ' ', array(
+                                $po_number,
+                                sanitize_text_field( (string) get_the_title( $po_id ) ),
+                                sanitize_text_field( (string) get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_SUPPLIER_NAME' ) ? PO_META_SUPPLIER_NAME : '_lpr_supplier_name', true ) ),
+                                sanitize_textarea_field( (string) get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_NOTE' ) ? PO_META_NOTE : '_lpr_po_note', true ) ),
+                        ) ) ) );
+                        $customer_refs = array_filter(
+                                array(
+                                        sanitize_text_field( (string) ( $row['customer_order_reference'] ?? '' ) ),
+                                        sanitize_text_field( (string) ( $row['supplier_order_reference'] ?? '' ) ),
+                                        sanitize_text_field( (string) ( $row['delivery_number'] ?? '' ) ),
+                                        sanitize_text_field( (string) ( $row['address_number'] ?? '' ) ),
+                                )
+                        );
+                        $customer_match = false;
+                        foreach ( $customer_refs as $customer_ref ) {
+                                $needle = strtolower( $customer_ref );
+                                if ( '' !== $needle && false !== strpos( $haystack, $needle ) ) {
+                                        $customer_match = true;
+                                        break;
+                                }
+                        }
+                        if ( $customer_match ) {
+                                $signals['customer_case_reference_match'] = 1.0;
+                                $score += $weights['customer_case_reference_match'];
+                                $reasons[] = 'customer_or_case_ref_match';
+                        }
+
+                        $target_ids = self::uploaded_row_sku_target_ids( $row );
+                        $matched_lines = array();
+                        foreach ( $po_lines as $idx => $line ) {
+                                if ( ! is_array( $line ) ) {
+                                        continue;
+                                }
+                                $variation_id = max( 0, (int) ( $line['variation_id'] ?? 0 ) );
+                                $product_id   = max( 0, (int) ( $line['product_id'] ?? 0 ) );
+                                $is_sku_match = ( ! empty( $target_ids ) ) && ( in_array( $variation_id, $target_ids, true ) || in_array( $product_id, $target_ids, true ) );
+                                if ( $is_sku_match ) {
+                                        $matched_lines[] = array(
+                                                'po_id'      => $po_id,
+                                                'line_index' => $idx,
+                                                'target_id'  => $variation_id > 0 ? $variation_id : $product_id,
+                                        );
+                                }
+                        }
+                        if ( ! empty( $matched_lines ) ) {
+                                $signals['exact_sku_on_lines'] = 1.0;
+                                $score += $weights['exact_sku_on_lines'];
+                                $reasons[] = 'exact_sku_present_on_line';
+                        }
+
+                        $item_name = sanitize_text_field( (string) ( $row['item_name'] ?? '' ) );
+                        $best_item_similarity = 0.0;
+                        if ( '' !== $item_name && function_exists( 'wc_get_product' ) ) {
+                                foreach ( $po_lines as $line ) {
+                                        if ( ! is_array( $line ) ) {
+                                                continue;
+                                        }
+                                        $target_id = max( 0, (int) ( $line['variation_id'] ?? 0 ) );
+                                        if ( $target_id <= 0 ) {
+                                                $target_id = max( 0, (int) ( $line['product_id'] ?? 0 ) );
+                                        }
+                                        if ( $target_id <= 0 ) {
+                                                continue;
+                                        }
+                                        $product = wc_get_product( $target_id );
+                                        if ( ! $product instanceof \WC_Product ) {
+                                                continue;
+                                        }
+                                        similar_text( strtolower( $item_name ), strtolower( wp_strip_all_tags( (string) $product->get_name() ) ), $pct );
+                                        $best_item_similarity = max( $best_item_similarity, max( 0.0, min( 1.0, (float) $pct / 100.0 ) ) );
+                                }
+                        }
+                        if ( $best_item_similarity > 0.0 ) {
+                                $signals['item_name_similarity'] = round( $best_item_similarity, 4 );
+                                $score += $best_item_similarity * $weights['item_name_similarity'];
+                                $reasons[] = sprintf( 'item_name_similarity=%.2f', $best_item_similarity );
+                        }
+
+                        $row_qty = max( 0, (int) ( $row['quantity'] ?? 0 ) );
+                        if ( $row_qty > 0 && ! empty( $po_lines ) ) {
+                                $qty_alignment = 0.0;
+                                foreach ( $po_lines as $line ) {
+                                        if ( ! is_array( $line ) ) {
+                                                continue;
+                                        }
+                                        $ordered = max( 0, (int) ( $line['qty_ordered'] ?? 0 ) );
+                                        if ( $ordered <= 0 ) {
+                                                continue;
+                                        }
+                                        if ( $ordered === $row_qty ) {
+                                                $qty_alignment = max( $qty_alignment, 1.0 );
+                                                break;
+                                        }
+                                        $ratio = (float) min( $ordered, $row_qty ) / (float) max( $ordered, $row_qty );
+                                        $qty_alignment = max( $qty_alignment, $ratio );
+                                }
+                                if ( $qty_alignment > 0.0 ) {
+                                        $signals['quantity_consistency'] = round( $qty_alignment, 4 );
+                                        $score += $qty_alignment * $weights['quantity_consistency'];
+                                        $reasons[] = sprintf( 'quantity_consistency=%.2f', $qty_alignment );
+                                }
+                        }
+
+                        $row_date = lpr_allocator_sanitize_ymd( (string) ( $row['date'] ?? '' ) );
+                        if ( '' !== $row_date ) {
+                                $po_eta = lpr_allocator_sanitize_ymd( (string) get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_ETA_DATE' ) ? PO_META_ETA_DATE : '_lpr_eta_date', true ) );
+                                if ( '' === $po_eta && ! empty( $po_lines ) ) {
+                                        foreach ( $po_lines as $line ) {
+                                                if ( ! is_array( $line ) ) {
+                                                        continue;
+                                                }
+                                                $line_eta = function_exists( __NAMESPACE__ . '\lpr_allocator_resolve_line_eta' ) ? lpr_allocator_resolve_line_eta( $po_id, $line ) : '';
+                                                $line_eta = lpr_allocator_sanitize_ymd( $line_eta );
+                                                if ( '' !== $line_eta ) {
+                                                        $po_eta = $line_eta;
+                                                        break;
+                                                }
+                                        }
+                                }
+                                if ( '' !== $po_eta ) {
+                                        $day_diff = abs( (int) floor( ( strtotime( $row_date . ' 00:00:00' ) - strtotime( $po_eta . ' 00:00:00' ) ) / DAY_IN_SECONDS ) );
+                                        $date_score = 0.0;
+                                        if ( $day_diff <= 3 ) {
+                                                $date_score = 1.0;
+                                        } elseif ( $day_diff <= 7 ) {
+                                                $date_score = 0.75;
+                                        } elseif ( $day_diff <= 14 ) {
+                                                $date_score = 0.45;
+                                        } elseif ( $day_diff <= 30 ) {
+                                                $date_score = 0.2;
+                                        }
+                                        if ( $date_score > 0.0 ) {
+                                                $signals['date_proximity'] = round( $date_score, 4 );
+                                                $score += $date_score * $weights['date_proximity'];
+                                                $reasons[] = sprintf( 'date_proximity(days=%d)', $day_diff );
+                                        }
+                                }
+                        }
+
+                        $status = sanitize_key( (string) get_post_status( $po_id ) );
+                        $live_statuses = function_exists( __NAMESPACE__ . '\lpr_allocator_live_po_statuses' ) ? array_map( 'sanitize_key', (array) lpr_allocator_live_po_statuses() ) : array( 'open', 'partial' );
+                        if ( in_array( $status, $live_statuses, true ) || in_array( $status, array( 'open', 'partial', 'publish' ), true ) ) {
+                                $signals['open_live_po_status_bonus'] = 1.0;
+                                $score += $weights['open_live_po_status_bonus'];
+                                $reasons[] = 'live_po_status_bonus';
+                        }
+
+                        return array(
+                                'po_id'         => $po_id,
+                                'score'         => round( $score, 3 ),
+                                'signals'       => $signals,
+                                'weights'       => $weights,
+                                'reasons'       => $reasons,
+                                'line_matches'  => $matched_lines,
+                                'po_number'     => $po_number,
+                                'status'        => $status,
+                        );
+                }
+
                 protected static function reconcile_uploaded_rows( array $rows ): array {
-                        $reconciled = array();
+                        $reconciled    = array();
+                        $po_lines_cache = array();
 
                         foreach ( array_chunk( $rows, self::upload_chunk_size() ) as $chunk ) {
                                 foreach ( $chunk as $row ) {
                                         $po_reference = sanitize_text_field( (string) ( $row['po_reference'] ?? '' ) );
                                         $sku          = sanitize_text_field( (string) ( $row['sku'] ?? '' ) );
-                                        $po_candidates = array();
-                                        $line_matches  = array();
+                                        $candidates   = self::find_candidate_pos_for_uploaded_row( $row );
+                                        $scored       = array();
 
-                                        if ( '' !== $po_reference ) {
-                                                $po_query = new \WP_Query(
-                                                        array(
-                                                                'post_type'      => defined( __NAMESPACE__ . '\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po',
-                                                                'post_status'    => 'any',
-                                                                'posts_per_page' => 5,
-                                                                'fields'         => 'ids',
-                                                                'meta_query'     => array(
-                                                                        array(
-                                                                                'key'   => defined( __NAMESPACE__ . '\PO_META_PO_NUMBER' ) ? PO_META_PO_NUMBER : '_lpr_po_number',
-                                                                                'value' => $po_reference,
-                                                                        ),
-                                                                ),
-                                                        )
-                                                );
-                                                if ( ! empty( $po_query->posts ) ) {
-                                                        $po_candidates = array_map( 'absint', $po_query->posts );
-                                                } elseif ( preg_match( '/^\d+$/', $po_reference ) ) {
-                                                        $maybe_po = absint( $po_reference );
-                                                        if ( $maybe_po > 0 && get_post_type( $maybe_po ) === ( defined( __NAMESPACE__ . '\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po' ) ) {
-                                                                $po_candidates[] = $maybe_po;
-                                                        }
-                                                }
-                                                wp_reset_postdata();
-                                        }
-
-                                        $target_ids = array();
-                                        if ( '' !== $sku && function_exists( 'wc_get_product_id_by_sku' ) ) {
-                                                $target = absint( wc_get_product_id_by_sku( $sku ) );
-                                                if ( $target > 0 ) {
-                                                        $target_ids[] = $target;
-                                                }
-                                        }
-
-                                        foreach ( $po_candidates as $po_id ) {
-                                                $lines = get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', true );
-                                                if ( ! is_array( $lines ) ) {
+                                        foreach ( $candidates as $candidate ) {
+                                                $po_id = max( 0, (int) ( $candidate['po_id'] ?? 0 ) );
+                                                if ( $po_id <= 0 ) {
                                                         continue;
                                                 }
-                                                foreach ( $lines as $idx => $line ) {
-                                                        if ( ! is_array( $line ) ) {
-                                                                continue;
+                                                if ( ! isset( $po_lines_cache[ $po_id ] ) ) {
+                                                        $po_lines_cache[ $po_id ] = get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', true );
+                                                        if ( ! is_array( $po_lines_cache[ $po_id ] ) ) {
+                                                                $po_lines_cache[ $po_id ] = array();
                                                         }
-                                                        $target_id = isset( $line['variation_id'] ) ? absint( $line['variation_id'] ) : 0;
-                                                        if ( $target_id <= 0 ) {
-                                                                $target_id = isset( $line['product_id'] ) ? absint( $line['product_id'] ) : 0;
+                                                }
+
+                                                $score_row = self::score_uploaded_row_po_candidate( $row, $po_id, $po_lines_cache[ $po_id ] );
+                                                $score_row['discovery_reasons'] = isset( $candidate['reasons'] ) && is_array( $candidate['reasons'] ) ? array_values( $candidate['reasons'] ) : array();
+                                                $score_row['reasons'] = array_values( array_unique( array_merge( (array) $score_row['reasons'], (array) $score_row['discovery_reasons'] ) ) );
+                                                $scored[] = $score_row;
+                                        }
+
+                                        usort(
+                                                $scored,
+                                                static function ( array $a, array $b ): int {
+                                                        $a_score = (float) ( $a['score'] ?? 0 );
+                                                        $b_score = (float) ( $b['score'] ?? 0 );
+                                                        if ( $a_score === $b_score ) {
+                                                                return (int) ( $a['po_id'] ?? 0 ) <=> (int) ( $b['po_id'] ?? 0 );
                                                         }
-                                                        if ( ! empty( $target_ids ) && $target_id > 0 && in_array( $target_id, $target_ids, true ) ) {
-                                                                $line_matches[] = array(
-                                                                        'po_id'      => $po_id,
-                                                                        'line_index' => $idx,
-                                                                        'target_id'  => $target_id,
-                                                                );
-                                                        }
+
+                                                        return $b_score <=> $a_score;
+                                                }
+                                        );
+
+                                        $best      = isset( $scored[0] ) ? (array) $scored[0] : array();
+                                        $runner_up = isset( $scored[1] ) ? (array) $scored[1] : array();
+                                        $top_score = (float) ( $best['score'] ?? 0.0 );
+                                        $next_score = (float) ( $runner_up['score'] ?? 0.0 );
+                                        $score_gap = $top_score - $next_score;
+                                        $classification = 'unmatched';
+
+                                        $top_signals = (array) ( $best['signals'] ?? array() );
+                                        $has_hard_signal = ! empty( $top_signals['exact_sku_on_lines'] ) || ! empty( $top_signals['numeric_core_agreement'] ) || ( isset( $top_signals['normalized_reference_similarity'] ) && (float) $top_signals['normalized_reference_similarity'] >= 0.96 );
+
+                                        if ( ! empty( $best ) && $top_score >= 86 && $score_gap >= 14 && $has_hard_signal ) {
+                                                $classification = 'exact_match';
+                                        } elseif ( ! empty( $best ) && $top_score >= 64 && $score_gap >= 9 ) {
+                                                $classification = 'likely_match';
+                                        } elseif ( ! empty( $best ) && $top_score >= 48 ) {
+                                                $classification = 'ambiguous';
+                                                if ( $next_score > 0 && $score_gap <= 7 ) {
+                                                        $classification = 'ambiguous';
                                                 }
                                         }
 
-                                        $classification = 'unmatched';
-                                        if ( count( $line_matches ) === 1 ) {
-                                                $classification = 'matched';
-                                        } elseif ( count( $line_matches ) > 1 || count( $po_candidates ) > 1 ) {
-                                                $classification = 'ambiguous';
+                                        $line_matches = array();
+                                        if ( ! empty( $best['line_matches'] ) && is_array( $best['line_matches'] ) ) {
+                                                $line_matches = array_values( $best['line_matches'] );
+                                        }
+
+                                        $po_candidates = array();
+                                        foreach ( $scored as $candidate ) {
+                                                $po_candidates[] = max( 0, (int) ( $candidate['po_id'] ?? 0 ) );
+                                        }
+
+                                        $decision_reasons = array(
+                                                sprintf( 'classification=%s', $classification ),
+                                                sprintf( 'top_score=%.3f', $top_score ),
+                                                sprintf( 'runner_up_score=%.3f', $next_score ),
+                                                sprintf( 'score_gap=%.3f', $score_gap ),
+                                        );
+                                        if ( ! empty( $best['reasons'] ) ) {
+                                                $decision_reasons = array_merge( $decision_reasons, (array) $best['reasons'] );
+                                        }
+                                        if ( 'ambiguous' === $classification && $next_score > 0 && $score_gap <= 7 ) {
+                                                $decision_reasons[] = 'ambiguous_due_to_close_scores';
                                         }
 
                                         $reconciled[] = array(
@@ -21800,8 +22245,10 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                 'date'            => sanitize_text_field( (string) ( $row['date'] ?? '' ) ),
                                                 'update_notes'    => sanitize_textarea_field( (string) ( $row['update_notes'] ?? '' ) ),
                                                 'classification'  => $classification,
-                                                'po_candidates'   => array_values( array_unique( array_map( 'absint', $po_candidates ) ) ),
+                                                'po_candidates'   => array_values( array_unique( array_filter( array_map( 'absint', $po_candidates ) ) ) ),
                                                 'line_matches'    => $line_matches,
+                                                'candidate_scores'=> array_slice( $scored, 0, 6 ),
+                                                'reason_log'      => array_values( array_unique( array_filter( $decision_reasons ) ) ),
                                         );
                                 }
                         }
@@ -21814,6 +22261,8 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 'filename'        => sanitize_file_name( $filename ),
                                 'row_count'       => count( $rows ),
                                 'matched_count'   => 0,
+                                'exact_match_count' => 0,
+                                'likely_match_count' => 0,
                                 'ambiguous_count' => 0,
                                 'unmatched_count' => 0,
                                 'matched_rows'    => array(),
@@ -21824,8 +22273,13 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
 
                         foreach ( $rows as $row ) {
                                 $bucket = sanitize_key( (string) ( $row['classification'] ?? 'unmatched' ) );
-                                if ( 'matched' === $bucket ) {
+                                if ( 'exact_match' === $bucket ) {
                                         $summary['matched_count']++;
+                                        $summary['exact_match_count']++;
+                                        $summary['matched_rows'][] = $row;
+                                } elseif ( 'likely_match' === $bucket ) {
+                                        $summary['matched_count']++;
+                                        $summary['likely_match_count']++;
                                         $summary['matched_rows'][] = $row;
                                 } elseif ( 'ambiguous' === $bucket ) {
                                         $summary['ambiguous_count']++;
