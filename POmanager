@@ -22682,6 +22682,172 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         );
                 }
 
+                protected static function is_internal_validation_message( string $message ): bool {
+                        $text = function_exists( 'mb_strtolower' ) ? mb_strtolower( trim( $message ) ) : strtolower( trim( $message ) );
+                        if ( '' === $text ) {
+                                return false;
+                        }
+                        return 0 === strpos( $text, '/run-reconciliation-validation' ) || 0 === strpos( $text, '/run-assistant-validation' );
+                }
+
+                protected static function run_internal_deterministic_validations(): array {
+                        $rows = array(
+                                array(
+                                        'source_row'               => 1,
+                                        'po_reference'             => 'CASE01946015',
+                                        'sku'                      => 'SKU-A',
+                                        'quantity'                 => 4,
+                                        'classification'           => 'exact_match',
+                                        'status'                   => 'unchanged',
+                                        'confidence'               => 0.991,
+                                        'matched_po_id'            => 1946015,
+                                        'matched_po_number'        => 'CASE01946015',
+                                        'matched_line_identifier'  => 'CASE01946015#L1',
+                                        'current_date'             => '2026-04-07',
+                                        'incoming_date'            => '2026-04-07',
+                                        'draftable_update'         => false,
+                                        'candidate_scores'         => array(
+                                                array( 'po_id' => 1946015, 'score' => 98.1 ),
+                                        ),
+                                ),
+                                array(
+                                        'source_row'               => 2,
+                                        'po_reference'             => 'CASE01946015-WEEK1',
+                                        'sku'                      => 'SKU-A',
+                                        'quantity'                 => 4,
+                                        'classification'           => 'likely_match',
+                                        'status'                   => 'changed',
+                                        'confidence'               => 0.912,
+                                        'matched_po_id'            => 1946015,
+                                        'matched_po_number'        => 'CASE01946015',
+                                        'matched_line_identifier'  => 'CASE01946015#L1',
+                                        'current_date'             => '2026-04-07',
+                                        'incoming_date'            => '2026-04-09',
+                                        'draftable_update'         => true,
+                                        'candidate_scores'         => array(
+                                                array( 'po_id' => 1946015, 'score' => 94.0 ),
+                                        ),
+                                ),
+                                array(
+                                        'source_row'               => 3,
+                                        'po_reference'             => '3003390379',
+                                        'sku'                      => 'SKU-B',
+                                        'quantity'                 => 6,
+                                        'classification'           => 'likely_match',
+                                        'status'                   => 'changed',
+                                        'confidence'               => 0.904,
+                                        'matched_po_id'            => 3003390379,
+                                        'matched_po_number'        => 'SO-3003390379',
+                                        'matched_line_identifier'  => 'SO-3003390379#L2',
+                                        'current_date'             => '2026-05-01',
+                                        'incoming_date'            => '2026-05-03',
+                                        'draftable_update'         => true,
+                                        'candidate_scores'         => array(
+                                                array( 'po_id' => 3003390379, 'score' => 93.5 ),
+                                        ),
+                                ),
+                                array(
+                                        'source_row'               => 4,
+                                        'po_reference'             => 'SO-3003390379',
+                                        'sku'                      => 'SKU-B',
+                                        'quantity'                 => 6,
+                                        'classification'           => 'unchanged_match',
+                                        'status'                   => 'unchanged',
+                                        'confidence'               => 0.965,
+                                        'matched_po_id'            => 3003390379,
+                                        'matched_po_number'        => 'SO-3003390379',
+                                        'matched_line_identifier'  => 'SO-3003390379#L2',
+                                        'current_date'             => '2026-05-03',
+                                        'incoming_date'            => '2026-05-03',
+                                        'draftable_update'         => false,
+                                        'candidate_scores'         => array(
+                                                array( 'po_id' => 3003390379, 'score' => 96.2 ),
+                                        ),
+                                ),
+                                array(
+                                        'source_row'               => 5,
+                                        'po_reference'             => 'CASE01946015-WEEK1',
+                                        'sku'                      => 'SKU-A',
+                                        'quantity'                 => 2,
+                                        'classification'           => 'ambiguous',
+                                        'status'                   => 'ambiguous',
+                                        'confidence'               => 0.683,
+                                        'matched_po_id'            => 0,
+                                        'matched_po_number'        => '',
+                                        'matched_line_identifier'  => '',
+                                        'current_date'             => '',
+                                        'incoming_date'            => '2026-04-10',
+                                        'draftable_update'         => false,
+                                        'candidate_scores'         => array(
+                                                array( 'po_id' => 1946015, 'score' => 89.6 ),
+                                                array( 'po_id' => 1946016, 'score' => 89.1 ),
+                                        ),
+                                        'reason_log'               => array( 'ambiguous_due_to_close_scores' ),
+                                ),
+                        );
+
+                        $summary  = self::build_reconciliation_summary( 'deterministic-fixture.csv', $rows );
+                        $digest   = self::summarize_reconciled_uploaded_rows( $summary );
+                        $preview  = self::build_uploaded_reconciliation_chat_preview( $summary );
+                        $results  = array();
+
+                        $results['fixture_case_vs_week1'] = ! empty( $rows[1]['matched_po_number'] ) && 'CASE01946015' === (string) $rows[1]['matched_po_number'];
+                        $results['fixture_numeric_vs_so_prefix'] = ! empty( $rows[2]['matched_po_number'] ) && 'SO-3003390379' === (string) $rows[2]['matched_po_number'];
+                        $results['fixture_close_score_ambiguity'] = 'ambiguous' === (string) $rows[4]['classification'] && ( (float) $rows[4]['candidate_scores'][0]['score'] - (float) $rows[4]['candidate_scores'][1]['score'] ) <= 1.0;
+                        $results['status_exact_single_candidate'] = 'exact_match' === (string) $rows[0]['classification'] && (float) $rows[0]['confidence'] >= 0.9;
+                        $results['status_likely_single_candidate'] = 'likely_match' === (string) $rows[1]['classification'] && 'likely_match' === (string) $rows[2]['classification'];
+                        $results['status_ambiguous_near_tied'] = 'ambiguous' === (string) $rows[4]['status'];
+                        $results['date_logic_changed_unchanged'] = true;
+                        foreach ( $rows as $row ) {
+                                $current  = lpr_allocator_sanitize_ymd( (string) ( $row['current_date'] ?? '' ) );
+                                $incoming = lpr_allocator_sanitize_ymd( (string) ( $row['incoming_date'] ?? '' ) );
+                                $status   = sanitize_key( (string) ( $row['status'] ?? '' ) );
+                                if ( '' !== $current && '' !== $incoming ) {
+                                        if ( $current === $incoming && 'unchanged' !== $status ) {
+                                                $results['date_logic_changed_unchanged'] = false;
+                                                break;
+                                        }
+                                        if ( $current !== $incoming && 'changed' !== $status ) {
+                                                $results['date_logic_changed_unchanged'] = false;
+                                                break;
+                                        }
+                                }
+                        }
+                        $draft_sources = array_map(
+                                static function ( array $entry ): int {
+                                        return max( 0, (int) ( $entry['source_row'] ?? 0 ) );
+                                },
+                                (array) ( $digest['proposed_updates'] ?? array() )
+                        );
+                        sort( $draft_sources );
+                        $results['draft_gating_only_safe_changed_rows'] = $draft_sources === array( 2, 3 );
+                        $results['preview_grouped_human_readable'] =
+                                false !== strpos( $preview, 'Opplastet avstemming (fil):' )
+                                && false !== strpos( $preview, '- Foreslåtte oppdateringer:' )
+                                && false === strpos( $preview, '{"' )
+                                && false === strpos( $preview, '"proposed_updates"' );
+
+                        $all_passed = ! in_array( false, $results, true );
+                        $report_lines = array(
+                                'Internal deterministic validation suite: ' . ( $all_passed ? 'PASS' : 'FAIL' ),
+                                sprintf( 'Fixtures loaded: %d', count( $rows ) ),
+                        );
+                        foreach ( $results as $key => $ok ) {
+                                $report_lines[] = sprintf( '[%1$s] %2$s', $ok ? 'ok' : 'fail', str_replace( '_', ' ', $key ) );
+                        }
+                        $report_lines[] = '';
+                        $report_lines[] = 'Preview sample:';
+                        $report_lines[] = $preview;
+
+                        return array(
+                                'ok'      => $all_passed,
+                                'results' => $results,
+                                'summary' => $summary,
+                                'digest'  => $digest,
+                                'report'  => implode( "\n", $report_lines ),
+                        );
+                }
+
                 protected static function build_uploaded_reconciliation_chat_preview( array $summary ): string {
                         if ( empty( $summary ) ) {
                                 return '';
@@ -23197,6 +23363,31 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                 'history'                => $state['history'],
                                                 'draft_bundles'          => isset( $apply['draft_bundles'] ) && is_array( $apply['draft_bundles'] ) ? $apply['draft_bundles'] : self::get_draft_bundles( $user_id ),
                                                 'reconciliation_summary' => array(),
+                                        )
+                                );
+                        }
+                        if ( self::is_internal_validation_message( $latest_message ) ) {
+                                $validation = self::run_internal_deterministic_validations();
+                                $assistant_turn = array(
+                                        'role'          => 'assistant',
+                                        'message'       => sanitize_textarea_field( (string) ( $validation['report'] ?? '' ) ),
+                                        'time'          => wp_date( 'Y-m-d H:i:s' ),
+                                        'action_payload'=> null,
+                                        'action_status' => 'none',
+                                        'action_notice' => '',
+                                );
+                                $history[] = $assistant_turn;
+                                $state     = self::persist_chat_state( $user_id, $history, array_slice( $history, -$context_limit ) );
+                                self::record_request_meta( $user_id, $model, 0.0, ! empty( $validation['ok'] ) ? 'success' : 'error' );
+                                while ( ob_get_level() > 0 ) {
+                                        ob_end_clean();
+                                }
+                                wp_send_json_success(
+                                        array(
+                                                'assistant'              => $assistant_turn,
+                                                'history'                => $state['history'],
+                                                'draft_bundles'          => self::get_draft_bundles( $user_id ),
+                                                'reconciliation_summary' => isset( $validation['summary'] ) && is_array( $validation['summary'] ) ? $validation['summary'] : array(),
                                         )
                                 );
                         }
