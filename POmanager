@@ -20727,6 +20727,10 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 return 0;
                         }
 
+                        if ( preg_match( '/^po:\d+:line:\d+$/i', $line_identifier ) ) {
+                                return 0;
+                        }
+
                         if ( preg_match( '/(?:item|order_item|line)[:#-]?(\d+)/i', $line_identifier, $matches ) ) {
                                 return absint( $matches[1] );
                         }
@@ -20736,6 +20740,21 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         }
 
                         return 0;
+                }
+
+                protected static function parse_po_line_identifier( string $line_identifier ): array {
+                        $line_identifier = trim( $line_identifier );
+                        if ( preg_match( '/^po:(\d+):line:(\d+)$/i', $line_identifier, $matches ) ) {
+                                return array(
+                                        'po_id'      => absint( $matches[1] ),
+                                        'line_index' => max( 0, (int) $matches[2] ),
+                                );
+                        }
+
+                        return array(
+                                'po_id'      => 0,
+                                'line_index' => -1,
+                        );
                 }
 
                 protected static function parse_order_id( array $identifiers, string $line_identifier = '' ): int {
@@ -20783,7 +20802,51 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
 
                 protected static function execute_line_eta_update( array $line_change ): array {
                         $line_identifier = sanitize_text_field( (string) ( $line_change['line_identifier'] ?? '' ) );
-                        $item_id         = self::parse_order_item_id( $line_identifier );
+                        $eta              = sanitize_text_field( (string) ( $line_change['eta_date'] ?? '' ) );
+                        $allow_historical = self::line_change_allows_historical_date( $line_change );
+                        self::validate_target_date( $eta, $allow_historical, 'ETA' );
+                        $eta_storage = lpr_allocator_sanitize_ymd( $eta );
+                        if ( '' === $eta_storage ) {
+                                throw new \RuntimeException( 'Unable to normalize ETA for storage.' );
+                        }
+
+                        $po_line = self::parse_po_line_identifier( $line_identifier );
+                        if ( (int) ( $po_line['po_id'] ?? 0 ) > 0 && (int) ( $po_line['line_index'] ?? -1 ) >= 0 ) {
+                                $po_id      = (int) $po_line['po_id'];
+                                $line_index = (int) $po_line['line_index'];
+                                $lines      = get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', true );
+                                if ( ! is_array( $lines ) || ! isset( $lines[ $line_index ] ) || ! is_array( $lines[ $line_index ] ) ) {
+                                        throw new \RuntimeException( sprintf( 'PO line %1$s was not found.', $line_identifier ) );
+                                }
+
+                                $before_lines = $lines;
+                                $before       = isset( $lines[ $line_index ]['eta_override'] ) ? lpr_allocator_sanitize_ymd( (string) $lines[ $line_index ]['eta_override'] ) : '';
+                                $lines[ $line_index ]['eta_override'] = $eta_storage;
+                                update_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', $lines );
+                                if ( function_exists( __NAMESPACE__ . '\lpr_allocator_rebuild_po_allocation_index' ) ) {
+                                        lpr_allocator_rebuild_po_allocation_index( $po_id );
+                                }
+                                if ( function_exists( __NAMESPACE__ . '\lpr_allocator_update_order_line_etas_for_po' ) ) {
+                                        lpr_allocator_update_order_line_etas_for_po( $po_id );
+                                }
+
+                                return array(
+                                        'line_identifier' => $line_identifier,
+                                        'status'          => 'applied',
+                                        'message'         => __( 'Applied successfully.', 'lpr-backorder-allocator' ),
+                                        'before'          => $before,
+                                        'after'           => $eta_storage,
+                                        'target_type'     => 'po_line',
+                                        'target_id'       => $po_id,
+                                        '_rollback'       => array(
+                                                'type'  => 'po_lines',
+                                                'po_id' => $po_id,
+                                                'lines' => $before_lines,
+                                        ),
+                                );
+                        }
+
+                        $item_id = self::parse_order_item_id( $line_identifier );
                         if ( $item_id <= 0 ) {
                                 throw new \RuntimeException( 'Missing order item identifier.' );
                         }
@@ -20793,14 +20856,10 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 throw new \RuntimeException( sprintf( 'Order item %d was not found.', $item_id ) );
                         }
 
-                        $eta              = sanitize_text_field( (string) ( $line_change['eta_date'] ?? '' ) );
-                        $allow_historical = self::line_change_allows_historical_date( $line_change );
-                        self::validate_target_date( $eta, $allow_historical, 'ETA' );
-
                         $meta_key = defined( __NAMESPACE__ . '\ORDER_ITEM_META_LINE_ETA' ) ? ORDER_ITEM_META_LINE_ETA : '_lpr_line_eta';
                         $before   = sanitize_text_field( (string) $item->get_meta( $meta_key, true ) );
 
-                        $item->update_meta_data( $meta_key, $eta );
+                        $item->update_meta_data( $meta_key, $eta_storage );
                         $item->save();
 
                         return array(
@@ -20808,7 +20867,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 'status'          => 'applied',
                                 'message'         => __( 'Applied successfully.', 'lpr-backorder-allocator' ),
                                 'before'          => $before,
-                                'after'           => $eta,
+                                'after'           => $eta_storage,
                                 'target_type'     => 'order_item',
                                 'target_id'       => $item_id,
                                 '_rollback'       => array(
@@ -21008,14 +21067,28 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 $after           = '';
 
                                 if ( 'update_eta_draft' === $action_type ) {
-                                        $item_id = self::parse_order_item_id( $line_identifier );
-                                        if ( $item_id > 0 ) {
-                                                $item = function_exists( 'wc_get_order_item' ) ? wc_get_order_item( $item_id ) : null;
-                                                if ( $item instanceof \WC_Order_Item_Product ) {
-                                                        $before = (string) $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_LINE_ETA' ) ? ORDER_ITEM_META_LINE_ETA : '_lpr_line_eta', true );
+                                        $po_line = self::parse_po_line_identifier( $line_identifier );
+                                        if ( (int) ( $po_line['po_id'] ?? 0 ) > 0 && (int) ( $po_line['line_index'] ?? -1 ) >= 0 ) {
+                                                $po_id      = (int) $po_line['po_id'];
+                                                $line_index = (int) $po_line['line_index'];
+                                                $lines      = get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', true );
+                                                if ( is_array( $lines ) && isset( $lines[ $line_index ] ) && is_array( $lines[ $line_index ] ) ) {
+                                                        $before = isset( $lines[ $line_index ]['eta_override'] ) ? lpr_allocator_sanitize_ymd( (string) $lines[ $line_index ]['eta_override'] ) : '';
+                                                }
+                                        } else {
+                                                $item_id = self::parse_order_item_id( $line_identifier );
+                                                if ( $item_id > 0 ) {
+                                                        $item = function_exists( 'wc_get_order_item' ) ? wc_get_order_item( $item_id ) : null;
+                                                        if ( $item instanceof \WC_Order_Item_Product ) {
+                                                                $before = (string) $item->get_meta( defined( __NAMESPACE__ . '\ORDER_ITEM_META_LINE_ETA' ) ? ORDER_ITEM_META_LINE_ETA : '_lpr_line_eta', true );
+                                                        }
                                                 }
                                         }
-                                        $after = sanitize_text_field( (string) ( $line_change['eta_date'] ?? '' ) );
+                                        $after_iso = sanitize_text_field( (string) ( $line_change['eta_date'] ?? '' ) );
+                                        $after     = lpr_allocator_sanitize_ymd( $after_iso );
+                                        if ( '' === $after ) {
+                                                $after = $after_iso;
+                                        }
                                 } elseif ( 'update_delivery_date_draft' === $action_type ) {
                                         $order_id = self::parse_order_id( $identifiers, $line_identifier );
                                         if ( $order_id > 0 ) {
