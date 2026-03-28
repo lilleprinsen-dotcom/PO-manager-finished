@@ -18599,6 +18599,17 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         }
 
                         $bundle_id     = sanitize_text_field( (string) ( $raw['bundle_id'] ?? '' ) );
+                        $bundle_ids    = array_values(
+                                array_filter(
+                                        array_map(
+                                                'sanitize_text_field',
+                                                is_array( $raw['bundle_ids'] ?? null ) ? (array) $raw['bundle_ids'] : array()
+                                        )
+                                )
+                        );
+                        if ( '' !== $bundle_id && ! in_array( $bundle_id, $bundle_ids, true ) ) {
+                                array_unshift( $bundle_ids, $bundle_id );
+                        }
                         $action_type   = sanitize_key( (string) ( $raw['action_type'] ?? '' ) );
                         $target_entity = sanitize_text_field( (string) ( $raw['target_entity'] ?? '' ) );
                         $po_id         = max( 0, (int) ( $raw['po_id'] ?? 0 ) );
@@ -18609,12 +18620,13 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         $preview_summary = sanitize_textarea_field( (string) ( $raw['preview_summary'] ?? '' ) );
                         $created_at     = sanitize_text_field( (string) ( $raw['created_at'] ?? '' ) );
 
-                        if ( '' === $bundle_id || '' === $action_type || '' === $confirm_digest ) {
+                        if ( empty( $bundle_ids ) || '' === $action_type || '' === $confirm_digest ) {
                                 return array();
                         }
 
                         return array(
-                                'bundle_id'            => $bundle_id,
+                                'bundle_id'            => (string) $bundle_ids[0],
+                                'bundle_ids'           => $bundle_ids,
                                 'action_type'          => $action_type,
                                 'target_entity'        => $target_entity,
                                 'po_id'                => $po_id,
@@ -21039,6 +21051,12 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                 }
 
                 protected static function format_before_after_for_chat( string $action_type, array $before_after, array $line_change ): string {
+                        if ( 'update_quantity_draft' === $action_type ) {
+                                return self::maybe_describe_quantity_change( $before_after, $line_change );
+                        }
+                        if ( 'replace_po_draft_product' === $action_type ) {
+                                return self::maybe_describe_product_replacement( $before_after, $line_change );
+                        }
                         $label = 'Verdi';
                         if ( 'update_eta_draft' === $action_type ) {
                                 $label = 'ETA';
@@ -21054,6 +21072,32 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         $before = sanitize_text_field( (string) ( $before_after['before'] ?? '' ) );
                         $after  = sanitize_text_field( (string) ( $before_after['after'] ?? '' ) );
                         return sprintf( '%1$s: %2$s -> %3$s', $label, $before !== '' ? $before : 'n/a', $after !== '' ? $after : 'n/a' );
+                }
+
+                protected static function maybe_describe_quantity_change( array $before_after, array $line_change ): string {
+                        $before = isset( $before_after['before'] ) ? (string) $before_after['before'] : '';
+                        $after  = isset( $before_after['after'] ) ? (string) $before_after['after'] : '';
+                        if ( '' === $after ) {
+                                $after = (string) max( 0, (int) ( $line_change['quantity'] ?? 0 ) );
+                        }
+                        return sprintf( 'Antall: %1$s -> %2$s', $before !== '' ? sanitize_text_field( $before ) : 'n/a', $after !== '' ? sanitize_text_field( $after ) : 'n/a' );
+                }
+
+                protected static function maybe_describe_product_replacement( array $before_after, array $line_change ): string {
+                        $before = sanitize_text_field( (string) ( $before_after['before'] ?? '' ) );
+                        $after  = sanitize_text_field( (string) ( $before_after['after'] ?? '' ) );
+                        if ( '' === $after ) {
+                                $replacement_id = max( 0, (int) ( $line_change['new_product_id'] ?? 0 ) );
+                                if ( $replacement_id > 0 && function_exists( 'wc_get_product' ) ) {
+                                        $product = wc_get_product( $replacement_id );
+                                        if ( $product instanceof \WC_Product ) {
+                                                $sku = sanitize_text_field( (string) $product->get_sku() );
+                                                $name = sanitize_text_field( wp_strip_all_tags( (string) $product->get_name() ) );
+                                                $after = trim( $sku . ( $name !== '' ? ' ' . $name : '' ) );
+                                        }
+                                }
+                        }
+                        return sprintf( 'Produkt: %1$s -> %2$s', $before !== '' ? $before : 'n/a', $after !== '' ? $after : 'n/a' );
                 }
 
                 protected static function build_bundle_change_summary( array $bundle ): array {
@@ -21175,6 +21219,22 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 '- ' . (int) ( $result['skipped_count'] ?? 0 ) . ' hoppet over',
                                 '- ' . (int) ( $result['error_count'] ?? 0 ) . ' feil',
                         );
+                        $action_type  = sanitize_key( (string) ( $bundle['action_type'] ?? '' ) );
+                        $before_after = isset( $bundle['before_after'] ) && is_array( $bundle['before_after'] ) ? array_values( $bundle['before_after'] ) : array();
+                        $line_changes = isset( $bundle['line_changes'] ) && is_array( $bundle['line_changes'] ) ? array_values( $bundle['line_changes'] ) : array();
+                        foreach ( (array) ( $result['line_results'] ?? array() ) as $index => $line_result ) {
+                                if ( ! is_array( $line_result ) || 'applied' !== (string) ( $line_result['status'] ?? '' ) ) {
+                                        continue;
+                                }
+                                $ba = isset( $before_after[ $index ] ) && is_array( $before_after[ $index ] ) ? $before_after[ $index ] : array();
+                                $lc = isset( $line_changes[ $index ] ) && is_array( $line_changes[ $index ] ) ? $line_changes[ $index ] : array();
+                                $change_text = self::format_before_after_for_chat( $action_type, $ba, $lc );
+                                $lines[] = sprintf(
+                                        '- Oppdatert %1$s (%2$s)',
+                                        sanitize_text_field( (string) ( $line_result['line_identifier'] ?? 'n/a' ) ),
+                                        $change_text
+                                );
+                        }
                         foreach ( (array) ( $result['line_results'] ?? array() ) as $line_result ) {
                                 if ( ! is_array( $line_result ) || 'failed' !== (string) ( $line_result['status'] ?? '' ) ) {
                                         continue;
@@ -21375,6 +21435,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
 	                                        'unmatched' => max( 0, (int) ( $entry['unmatched'] ?? 0 ) ),
 	                                        'changed_count' => max( 0, (int) ( $entry['changed_count'] ?? 0 ) ),
 	                                        'unchanged_count' => max( 0, (int) ( $entry['unchanged_count'] ?? 0 ) ),
+	                                        'draftable_count' => max( 0, (int) ( $entry['draftable_count'] ?? 0 ) ),
 	                                        'confidence_bucket_0_9_plus' => max( 0, (int) ( $entry['confidence_bucket_0_9_plus'] ?? 0 ) ),
 	                                        'confidence_bucket_0_75_to_0_9' => max( 0, (int) ( $entry['confidence_bucket_0_75_to_0_9'] ?? 0 ) ),
 	                                        'confidence_bucket_under_0_75' => max( 0, (int) ( $entry['confidence_bucket_under_0_75'] ?? 0 ) ),
@@ -21404,6 +21465,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
 	                                'unmatched' => max( 0, (int) ( $summary['unmatched_count'] ?? 0 ) ),
 	                                'changed_count' => max( 0, (int) ( $summary['changed_count'] ?? 0 ) ),
 	                                'unchanged_count' => max( 0, (int) ( $summary['unchanged_count'] ?? 0 ) ),
+	                                'draftable_count' => count( (array) ( $summary['draftable_rows'] ?? array() ) ),
 	                                'confidence_bucket_0_9_plus' => $bucket_0_9_plus,
 	                                'confidence_bucket_0_75_to_0_9' => $bucket_0_75_to_0_9,
 	                                'confidence_bucket_under_0_75' => $bucket_under_0_75,
@@ -21426,6 +21488,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
 	                                                'unmatched' => max( 0, (int) ( $summary['unmatched_count'] ?? 0 ) ),
 	                                                'changed_count' => max( 0, (int) ( $summary['changed_count'] ?? 0 ) ),
 	                                                'unchanged_count' => max( 0, (int) ( $summary['unchanged_count'] ?? 0 ) ),
+	                                                'draftable_count' => count( (array) ( $summary['draftable_rows'] ?? array() ) ),
 	                                                'confidence_bucket_0_9_plus' => $bucket_0_9_plus,
 	                                                'confidence_bucket_0_75_to_0_9' => $bucket_0_75_to_0_9,
 	                                                'confidence_bucket_under_0_75' => $bucket_under_0_75,
@@ -21448,6 +21511,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
 	                                                'unmatched_count' => max( 0, (int) ( $summary['unmatched_count'] ?? 0 ) ),
 	                                                'changed_count' => max( 0, (int) ( $summary['changed_count'] ?? 0 ) ),
 	                                                'unchanged_count' => max( 0, (int) ( $summary['unchanged_count'] ?? 0 ) ),
+	                                                'draftable_count' => count( (array) ( $summary['draftable_rows'] ?? array() ) ),
 	                                                'confidence_buckets' => array(
 	                                                        '0.9+' => $bucket_0_9_plus,
 	                                                        '0.75-0.9' => $bucket_0_75_to_0_9,
@@ -21490,7 +21554,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 'po_reference'             => array( 'po_reference', 'po_ref', 'po', 'po_number', 'purchase_order', 'purchase_order_number', 'open_order', 'order_no', 'order_number', 'co', 'co_no', 'co_number', 'supplier_order', 'supplier_order_no' ),
                                 'sku'                      => array( 'sku', 'item_no', 'item', 'item_no.', 'article', 'article_no', 'product_identifier', 'product_id', 'product', 'item_sku', 'item_number' ),
                                 'quantity'                 => array( 'quantity', 'qty', 'ordered_qty', 'qty_ordered', 'order', 'units' ),
-                                'date'                     => array( 'date', 'eta', 'eta_date', 'delivery_date', 'update_date', 'delivery date estimated', 'estimated_delivery', 'estimated delivery', 'etd' ),
+                                'incoming_date'            => array( 'incoming_date', 'incoming eta', 'incoming_eta', 'new_eta', 'new_date', 'updated_eta', 'updated_date', 'date', 'eta', 'eta_date', 'delivery_date', 'update_date', 'delivery date estimated', 'estimated_delivery', 'estimated delivery', 'etd' ),
                                 'notes'                    => array( 'update_notes', 'notes', 'note', 'comments', 'comment', 'remarks' ),
                                 'customer_order_reference' => array( 'customer_order', 'customer_order_no', 'customer’s ord', 'customers ord', 'case', 'case_no', 'customer_ref' ),
                                 // Optional reconciliation-support fields.
@@ -21697,6 +21761,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         'raw_comments'             => '',
                                         'quantity'                 => 0,
                                         'date'                     => '',
+                                        'incoming_date'            => '',
                                         'update_notes'             => '',
                                         'raw_row'                  => array_map(
                                                 static function ( $cell_value ): string {
@@ -21710,8 +21775,8 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         $value = isset( $row[ $index ] ) ? trim( (string) $row[ $index ] ) : '';
                                         if ( 'quantity' === $field ) {
                                                 $current['quantity'] = (int) max( 0, round( (float) $value ) );
-                                        } elseif ( 'date' === $field ) {
-                                                $current['date'] = lpr_allocator_sanitize_ymd( $value );
+                                        } elseif ( 'incoming_date' === $field ) {
+                                                $current['incoming_date'] = lpr_allocator_sanitize_ymd( $value );
                                         } elseif ( 'notes' === $field ) {
                                                 $current['update_notes'] = sanitize_textarea_field( $value );
                                         } elseif ( 'po_reference' === $field ) {
@@ -21738,6 +21803,10 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 if ( '' === $current['po_reference'] && '' !== $current['customer_order_reference'] ) {
                                         $current['po_reference'] = $current['customer_order_reference'];
                                 }
+                                if ( '' === $current['incoming_date'] ) {
+                                        $current['incoming_date'] = lpr_allocator_sanitize_ymd( (string) ( $current['date'] ?? '' ) );
+                                }
+                                $current['date'] = $current['incoming_date'];
 
                                 if ( '' === $current['po_reference'] && '' === $current['sku'] ) {
                                         continue;
@@ -21830,6 +21899,34 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 'normalized'    => $normalized,
                                 'tokens'        => $tokens,
                                 'numeric_cores' => array_values( array_unique( $numeric_cores ) ),
+                        );
+                }
+
+                protected static function maybe_match_reference_core( string $incoming, string $candidate ): array {
+                        $incoming_core  = self::extract_reference_core( $incoming );
+                        $candidate_core = self::extract_reference_core( $candidate );
+                        $incoming_norm  = (string) ( $incoming_core['normalized'] ?? '' );
+                        $candidate_norm = (string) ( $candidate_core['normalized'] ?? '' );
+                        if ( '' === $incoming_norm || '' === $candidate_norm ) {
+                                return array(
+                                        'matched'              => false,
+                                        'exact_core'           => false,
+                                        'contains_core'        => false,
+                                        'numeric_core_overlap' => array(),
+                                );
+                        }
+
+                        $contains_core = ( false !== strpos( $incoming_norm, $candidate_norm ) || false !== strpos( $candidate_norm, $incoming_norm ) );
+                        $incoming_nums = (array) ( $incoming_core['numeric_cores'] ?? array() );
+                        $candidate_nums = (array) ( $candidate_core['numeric_cores'] ?? array() );
+                        $numeric_overlap = array_values( array_unique( array_intersect( $incoming_nums, $candidate_nums ) ) );
+                        $exact_core = ( $incoming_norm === $candidate_norm );
+
+                        return array(
+                                'matched'              => $exact_core || $contains_core || ! empty( $numeric_overlap ),
+                                'exact_core'           => $exact_core,
+                                'contains_core'        => $contains_core,
+                                'numeric_core_overlap' => $numeric_overlap,
                         );
                 }
 
@@ -22038,6 +22135,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         }
 
                                         $comparison  = self::compare_supplier_reference_similarity( $reference, $po_number );
+                                        $core_match  = self::maybe_match_reference_core( $reference, $po_number );
                                         $metrics     = (array) ( $comparison['metrics'] ?? array() );
                                         $cmp_reasons = (array) ( $comparison['reasons'] ?? array() );
 
@@ -22051,6 +22149,11 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
 
                                         if ( ! empty( $metrics['numeric_core_agreement'] ) ) {
                                                 $add_candidate( $po_id, 'numeric_core_match' );
+                                        }
+                                        if ( ! empty( $core_match['exact_core'] ) ) {
+                                                $add_candidate( $po_id, 'reference_core_exact' );
+                                        } elseif ( ! empty( $core_match['contains_core'] ) ) {
+                                                $add_candidate( $po_id, 'reference_core_contains' );
                                         }
 
                                         if ( (float) ( $comparison['score'] ?? 0.0 ) >= 0.72 ) {
@@ -22148,10 +22251,21 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         foreach ( $row_references as $reference ) {
                                 $comparison = self::compare_supplier_reference_similarity( $reference, $po_number );
                                 $candidate_similarity = (float) ( $comparison['score'] ?? 0.0 );
+                                $core_match = self::maybe_match_reference_core( $reference, $po_number );
+                                if ( ! empty( $core_match['exact_core'] ) ) {
+                                        $candidate_similarity = max( $candidate_similarity, 0.98 );
+                                } elseif ( ! empty( $core_match['contains_core'] ) || ! empty( $core_match['numeric_core_overlap'] ) ) {
+                                        $candidate_similarity = max( $candidate_similarity, 0.90 );
+                                }
                                 if ( $candidate_similarity > $best_similarity ) {
                                         $best_similarity = $candidate_similarity;
                                         $best_similarity_metrics = (array) ( $comparison['metrics'] ?? array() );
                                         $best_similarity_reasons = (array) ( $comparison['reasons'] ?? array() );
+                                        if ( ! empty( $core_match['exact_core'] ) ) {
+                                                $best_similarity_reasons[] = 'reference_core_exact';
+                                        } elseif ( ! empty( $core_match['contains_core'] ) ) {
+                                                $best_similarity_reasons[] = 'reference_core_contains';
+                                        }
                                 }
                         }
                         if ( $best_similarity > 0.0 ) {
@@ -22414,7 +22528,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         $matched_line_identifier  = '';
                                         $proposed_changes         = array();
                                         $current_date             = '';
-                                        $incoming_date            = lpr_allocator_sanitize_ymd( (string) ( $row['date'] ?? '' ) );
+                                        $incoming_date            = lpr_allocator_sanitize_ymd( (string) ( $row['incoming_date'] ?? ( $row['date'] ?? '' ) ) );
                                         $is_date_changed          = false;
                                         $has_resolved_line_match  = false;
                                         $confidence               = max( 0.0, min( 1.0, (float) $top_score / 100.0 ) );
@@ -22489,8 +22603,11 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         $status = $classification;
                                         if ( $has_resolved_line_match ) {
                                                 $status = $is_date_changed ? 'changed' : 'unchanged';
+                                                if ( ! $is_date_changed && in_array( $classification, array( 'exact_match', 'likely_match' ), true ) ) {
+                                                        $classification = 'unchanged_match';
+                                                }
                                         }
-                                        $is_unique_match = ( $matched_po_id > 0 && 'ambiguous' !== $classification && $score_gap >= 9.0 && count( $line_matches ) === 1 && '' !== $matched_line_identifier );
+                                        $is_unique_match = ( $matched_po_id > 0 && in_array( $classification, array( 'exact_match', 'likely_match' ), true ) && $score_gap >= 9.0 && count( $line_matches ) === 1 && '' !== $matched_line_identifier );
                                         $draftable_update = ( 'changed' === $status && $confidence >= 0.72 && $is_unique_match );
                                         $review_required  = ! $draftable_update && 'unchanged' !== $status;
 
@@ -22552,9 +22669,11 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         foreach ( $rows as $row ) {
                                 $bucket = sanitize_key( (string) ( $row['classification'] ?? 'unmatched' ) );
                                 $status = sanitize_key( (string) ( $row['status'] ?? $bucket ) );
-                                if ( 'exact_match' === $bucket ) {
+                                if ( in_array( $bucket, array( 'exact_match', 'unchanged_match' ), true ) ) {
                                         $summary['matched_count']++;
-                                        $summary['exact_match_count']++;
+                                        if ( 'exact_match' === $bucket ) {
+                                                $summary['exact_match_count']++;
+                                        }
                                         $summary['matched_rows'][] = $row;
                                 } elseif ( 'likely_match' === $bucket ) {
                                         $summary['matched_count']++;
@@ -22645,10 +22764,10 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 $line_identifier = sanitize_text_field( (string) ( $row['matched_line_identifier'] ?? '' ) );
                                 $incoming_date   = lpr_allocator_sanitize_ymd( (string) ( $row['incoming_date'] ?? '' ) );
 
-                                if ( in_array( $classification, array( 'exact_match', 'likely_match' ), true ) && $confidence >= 0.72 ) {
+                                if ( in_array( $classification, array( 'exact_match', 'likely_match', 'unchanged_match' ), true ) && $confidence >= 0.72 ) {
                                         $safe_matches[] = $row;
                                 }
-                                if ( 'changed' === $status && $is_draftable ) {
+                                if ( 'changed' === $status && $is_draftable && in_array( $classification, array( 'exact_match', 'likely_match' ), true ) ) {
                                         $proposed_updates[] = $row;
                                         if ( '' !== $line_identifier && '' !== $incoming_date ) {
                                                 $draft_line_changes[] = array(
@@ -22824,6 +22943,9 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         $results['preview_grouped_human_readable'] =
                                 false !== strpos( $preview, 'Opplastet avstemming (fil):' )
                                 && false !== strpos( $preview, '- Foreslåtte oppdateringer:' )
+                                && false !== strpos( $preview, '- Uendrede rader:' )
+                                && false !== strpos( $preview, '- Tvetydige rader:' )
+                                && false !== strpos( $preview, '- Umatchede rader:' )
                                 && false === strpos( $preview, '{"' )
                                 && false === strpos( $preview, '"proposed_updates"' );
 
@@ -22864,27 +22986,67 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         $lines[] = sprintf( __( '- Tvetydige rader: %d', 'lpr-backorder-allocator' ), count( (array) ( $normalized['ambiguous_rows'] ?? array() ) ) );
                         $lines[] = sprintf( __( '- Umatchede rader: %d', 'lpr-backorder-allocator' ), count( (array) ( $normalized['unmatched_rows'] ?? array() ) ) );
 
-                        $examples = array();
-                        foreach ( array_slice( (array) ( $normalized['proposed_updates'] ?? array() ), 0, 5 ) as $row ) {
-                                if ( ! is_array( $row ) ) {
-                                        continue;
+                        $grouped = (array) ( $normalized['grouped_by_po'] ?? array() );
+                        if ( ! empty( $grouped ) ) {
+                                $lines[] = __( 'Foreslåtte oppdateringer per PO:', 'lpr-backorder-allocator' );
+                                foreach ( $grouped as $group ) {
+                                        if ( ! is_array( $group ) ) {
+                                                continue;
+                                        }
+                                        $po_id = max( 0, (int) ( $group['po_id'] ?? 0 ) );
+                                        $po_number = sanitize_text_field( (string) ( $group['po_number'] ?? '' ) );
+                                        $po_label = $po_number !== '' ? $po_number : ( $po_id > 0 ? '#' . $po_id : '#' );
+                                        $rows = array_slice( (array) ( $group['rows'] ?? array() ), 0, 4 );
+                                        $lines[] = sprintf( '- PO %s:', $po_label );
+                                        foreach ( $rows as $row ) {
+                                                if ( ! is_array( $row ) ) {
+                                                        continue;
+                                                }
+                                                $line_id = sanitize_text_field( (string) ( $row['matched_line_identifier'] ?? '' ) );
+                                                $from = lpr_allocator_sanitize_ymd( (string) ( $row['current_date'] ?? '' ) );
+                                                $to = lpr_allocator_sanitize_ymd( (string) ( $row['incoming_date'] ?? '' ) );
+                                                $lines[] = sprintf(
+                                                        '  - %1$s: %2$s → %3$s',
+                                                        $line_id !== '' ? $line_id : 'linje ukjent',
+                                                        $from !== '' ? $from : 'tom',
+                                                        $to !== '' ? $to : 'tom'
+                                                );
+                                        }
+                                        $group_count = count( (array) ( $group['rows'] ?? array() ) );
+                                        if ( $group_count > 4 ) {
+                                                $lines[] = sprintf( '  - … %d flere linjer', $group_count - 4 );
+                                        }
                                 }
-                                $po_number = sanitize_text_field( (string) ( $row['matched_po_number'] ?? '' ) );
-                                $line_id   = sanitize_text_field( (string) ( $row['matched_line_identifier'] ?? '' ) );
-                                $from      = lpr_allocator_sanitize_ymd( (string) ( $row['current_date'] ?? '' ) );
-                                $to        = lpr_allocator_sanitize_ymd( (string) ( $row['incoming_date'] ?? '' ) );
-                                $examples[] = sprintf(
-                                        'PO %1$s (%2$s): %3$s → %4$s',
-                                        $po_number !== '' ? $po_number : '#?',
-                                        $line_id !== '' ? $line_id : 'linje ukjent',
-                                        $from !== '' ? $from : 'tom',
-                                        $to !== '' ? $to : 'tom'
-                                );
                         }
-                        if ( ! empty( $examples ) ) {
-                                $lines[] = __( 'Eksempler på foreslåtte ETA-endringer:', 'lpr-backorder-allocator' );
-                                foreach ( $examples as $example ) {
-                                        $lines[] = '  - ' . $example;
+
+                        $ambiguous_rows = array_slice( (array) ( $normalized['ambiguous_rows'] ?? array() ), 0, 3 );
+                        if ( ! empty( $ambiguous_rows ) ) {
+                                $lines[] = __( 'Tvetydige rader (ikke lagt i utkast):', 'lpr-backorder-allocator' );
+                                foreach ( $ambiguous_rows as $row ) {
+                                        if ( ! is_array( $row ) ) {
+                                                continue;
+                                        }
+                                        $lines[] = sprintf(
+                                                '- Rad %1$d: ref %2$s, SKU %3$s',
+                                                max( 0, (int) ( $row['source_row'] ?? 0 ) ),
+                                                sanitize_text_field( (string) ( $row['po_reference'] ?? '?' ) ),
+                                                sanitize_text_field( (string) ( $row['sku'] ?? '?' ) )
+                                        );
+                                }
+                        }
+                        $unmatched_rows = array_slice( (array) ( $normalized['unmatched_rows'] ?? array() ), 0, 3 );
+                        if ( ! empty( $unmatched_rows ) ) {
+                                $lines[] = __( 'Umatchede rader (ikke lagt i utkast):', 'lpr-backorder-allocator' );
+                                foreach ( $unmatched_rows as $row ) {
+                                        if ( ! is_array( $row ) ) {
+                                                continue;
+                                        }
+                                        $lines[] = sprintf(
+                                                '- Rad %1$d: ref %2$s, SKU %3$s',
+                                                max( 0, (int) ( $row['source_row'] ?? 0 ) ),
+                                                sanitize_text_field( (string) ( $row['po_reference'] ?? '?' ) ),
+                                                sanitize_text_field( (string) ( $row['sku'] ?? '?' ) )
+                                        );
                                 }
                         }
 
@@ -22922,6 +23084,56 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         }
 
                         return implode( "\n", $lines );
+                }
+
+                protected static function maybe_route_uploaded_reconciliation_to_grouped_bundles( array $action_payload, array $reconciliation_summary ): array {
+                        $digest = self::summarize_reconciled_uploaded_rows( $reconciliation_summary );
+                        $grouped = (array) ( $digest['grouped_by_po'] ?? array() );
+                        if ( empty( $grouped ) ) {
+                                return array( $action_payload );
+                        }
+
+                        $action_type = sanitize_key( (string) ( $action_payload['action_type'] ?? '' ) );
+                        if ( 'update_eta_draft' !== $action_type ) {
+                                return array( $action_payload );
+                        }
+
+                        $bundles = array();
+                        foreach ( $grouped as $group ) {
+                                if ( ! is_array( $group ) ) {
+                                        continue;
+                                }
+                                $line_changes = array();
+                                foreach ( (array) ( $group['rows'] ?? array() ) as $row ) {
+                                        if ( ! is_array( $row ) || empty( $row['draftable_update'] ) || 'changed' !== (string) ( $row['status'] ?? '' ) ) {
+                                                continue;
+                                        }
+                                        $line_identifier = sanitize_text_field( (string) ( $row['matched_line_identifier'] ?? '' ) );
+                                        $incoming_date = lpr_allocator_sanitize_ymd( (string) ( $row['incoming_date'] ?? '' ) );
+                                        if ( '' === $line_identifier || '' === $incoming_date ) {
+                                                continue;
+                                        }
+                                        $line_changes[] = array(
+                                                'line_identifier' => $line_identifier,
+                                                'eta_date'        => $incoming_date,
+                                        );
+                                }
+                                if ( empty( $line_changes ) ) {
+                                        continue;
+                                }
+                                $bundle_payload = $action_payload;
+                                $bundle_payload['line_changes'] = array_values( $line_changes );
+                                $bundle_payload['identifiers'] = isset( $bundle_payload['identifiers'] ) && is_array( $bundle_payload['identifiers'] ) ? $bundle_payload['identifiers'] : array();
+                                $bundle_payload['identifiers']['po_id'] = max( 0, (int) ( $group['po_id'] ?? 0 ) );
+                                $bundle_payload['identifiers']['po_number'] = sanitize_text_field( (string) ( $group['po_number'] ?? '' ) );
+                                $bundles[] = $bundle_payload;
+                        }
+
+                        if ( empty( $bundles ) ) {
+                                return array( $action_payload );
+                        }
+
+                        return $bundles;
                 }
 
                 protected static function maybe_process_uploaded_file( int $user_id ): array {
@@ -23320,14 +23532,56 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 );
                         }
                         if ( ! empty( $pending_confirmation ) && self::is_chat_confirmation_message( $latest_message ) ) {
-                                $apply = self::confirm_and_apply_draft_bundle(
-                                        $user_id,
-                                        (string) $pending_confirmation['bundle_id'],
-                                        'chat-' . md5( (string) $pending_confirmation['bundle_id'] . '|' . wp_date( 'c' ) ),
-                                        (int) ( $pending_confirmation['expected_line_count'] ?? 0 ),
-                                        (int) ( $pending_confirmation['expected_apply_count'] ?? 0 ),
-                                        (string) ( $pending_confirmation['confirm_digest'] ?? '' )
-                                );
+                                $bundle_ids = isset( $pending_confirmation['bundle_ids'] ) && is_array( $pending_confirmation['bundle_ids'] ) ? array_values( $pending_confirmation['bundle_ids'] ) : array( (string) ( $pending_confirmation['bundle_id'] ?? '' ) );
+                                $bundle_ids = array_values( array_filter( array_map( 'sanitize_text_field', $bundle_ids ) ) );
+                                $apply = array( 'ok' => false, 'error' => 'missing_bundle' );
+                                if ( count( $bundle_ids ) <= 1 ) {
+                                        $apply = self::confirm_and_apply_draft_bundle(
+                                                $user_id,
+                                                (string) ( $bundle_ids[0] ?? '' ),
+                                                'chat-' . md5( (string) ( $bundle_ids[0] ?? '' ) . '|' . wp_date( 'c' ) ),
+                                                (int) ( $pending_confirmation['expected_line_count'] ?? 0 ),
+                                                (int) ( $pending_confirmation['expected_apply_count'] ?? 0 ),
+                                                (string) ( $pending_confirmation['confirm_digest'] ?? '' )
+                                        );
+                                } else {
+                                        $expected_lines = max( 0, (int) ( $pending_confirmation['expected_line_count'] ?? 0 ) );
+                                        $expected_apply = max( 0, (int) ( $pending_confirmation['expected_apply_count'] ?? 0 ) );
+                                        $all_ok = true;
+                                        $merged = array( 'applied_count' => 0, 'skipped_count' => 0, 'error_count' => 0, 'errors' => array(), 'line_results' => array() );
+                                        foreach ( $bundle_ids as $index => $pending_bundle_id ) {
+                                                $line_target = 0 === $index ? $expected_lines : 0;
+                                                $apply_target = 0 === $index ? $expected_apply : 0;
+                                                $digest = 0 === $index ? (string) ( $pending_confirmation['confirm_digest'] ?? '' ) : '';
+                                                $partial = self::confirm_and_apply_draft_bundle(
+                                                        $user_id,
+                                                        (string) $pending_bundle_id,
+                                                        'chat-' . md5( (string) $pending_bundle_id . '|' . wp_date( 'c' ) ),
+                                                        $line_target,
+                                                        $apply_target,
+                                                        $digest
+                                                );
+                                                if ( empty( $partial['ok'] ) ) {
+                                                        $all_ok = false;
+                                                        $apply = $partial;
+                                                        break;
+                                                }
+                                                $partial_result = isset( $partial['result'] ) && is_array( $partial['result'] ) ? $partial['result'] : array();
+                                                $merged['applied_count'] += max( 0, (int) ( $partial_result['applied_count'] ?? 0 ) );
+                                                $merged['skipped_count'] += max( 0, (int) ( $partial_result['skipped_count'] ?? 0 ) );
+                                                $merged['error_count'] += max( 0, (int) ( $partial_result['error_count'] ?? 0 ) );
+                                                $merged['errors'] = array_merge( $merged['errors'], (array) ( $partial_result['errors'] ?? array() ) );
+                                                $merged['line_results'] = array_merge( $merged['line_results'], (array) ( $partial_result['line_results'] ?? array() ) );
+                                        }
+                                        if ( $all_ok ) {
+                                                $apply = array(
+                                                        'ok' => true,
+                                                        'result' => $merged,
+                                                        'bundle' => array( 'id' => (string) $bundle_ids[0], 'status' => 'applied' ),
+                                                        'draft_bundles' => self::get_draft_bundles( $user_id ),
+                                                );
+                                        }
+                                }
                                 self::clear_pending_chat_confirmation( $user_id );
                                 if ( ! empty( $apply['ok'] ) ) {
                                         $assistant_message = self::build_human_readable_bundle_result(
@@ -23527,32 +23781,58 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         }
                         if ( 'executable' === ( $assistant_turn['action_status'] ?? 'none' ) && is_array( $assistant_turn['action_payload'] ) ) {
                                 $source_type = ! empty( $reconciliation_summary ) ? 'chat+file' : 'chat';
-                                $queued_bundle = self::enqueue_draft_bundle( $user_id, $assistant_turn['action_payload'], $source_type, is_array( $reconciliation_summary ) ? $reconciliation_summary : array() );
-                                $digest_payload = wp_json_encode( array( $queued_bundle['id'], $queued_bundle['action_type'], $queued_bundle['before_after'] ) );
+                                $payloads_to_queue = array( $assistant_turn['action_payload'] );
+                                if ( ! empty( $reconciliation_summary ) && is_array( $reconciliation_summary ) ) {
+                                        $payloads_to_queue = self::maybe_route_uploaded_reconciliation_to_grouped_bundles( $assistant_turn['action_payload'], $reconciliation_summary );
+                                }
+                                $queued_bundles = array();
+                                foreach ( $payloads_to_queue as $payload_to_queue ) {
+                                        if ( ! is_array( $payload_to_queue ) ) {
+                                                continue;
+                                        }
+                                        $queued_bundles[] = self::enqueue_draft_bundle( $user_id, $payload_to_queue, $source_type, is_array( $reconciliation_summary ) ? $reconciliation_summary : array() );
+                                }
+                                if ( empty( $queued_bundles ) ) {
+                                        $assistant_turn['action_status'] = 'none';
+                                        $assistant_turn['action_payload'] = null;
+                                        $assistant_turn['message'] = __( 'Kunne ikke klargjøre utkast for bekreftelse. Prøv igjen.', 'lpr-backorder-allocator' );
+                                } else {
+                                $primary_bundle = $queued_bundles[0];
+                                $digest_payload = wp_json_encode( array( $primary_bundle['id'], $primary_bundle['action_type'], $primary_bundle['before_after'] ) );
                                 $confirm_digest = hash( 'sha256', (string) $digest_payload );
-                                $preview        = self::build_human_readable_bundle_preview( $queued_bundle );
+                                $preview        = self::build_grouped_chat_confirmation_preview( $queued_bundles );
                                 if ( ! empty( $reconciliation_summary ) ) {
                                         $preview = self::build_uploaded_reconciliation_chat_preview( $reconciliation_summary ) . "\n\n" . $preview;
                                 }
-                                $identifiers    = isset( $queued_bundle['identifiers'] ) && is_array( $queued_bundle['identifiers'] ) ? $queued_bundle['identifiers'] : array();
+                                $identifiers    = isset( $primary_bundle['identifiers'] ) && is_array( $primary_bundle['identifiers'] ) ? $primary_bundle['identifiers'] : array();
+                                $total_expected_lines = 0;
+                                $total_expected_apply = 0;
+                                $bundle_ids = array();
+                                foreach ( $queued_bundles as $queued_bundle ) {
+                                        $total_expected_lines += count( (array) ( $queued_bundle['line_changes'] ?? array() ) );
+                                        $total_expected_apply += count( (array) ( $queued_bundle['before_after'] ?? array() ) );
+                                        $bundle_ids[] = sanitize_text_field( (string) ( $queued_bundle['id'] ?? '' ) );
+                                }
                                 self::remember_pending_chat_confirmation(
                                         $user_id,
                                         array(
-                                                'bundle_id'            => (string) ( $queued_bundle['id'] ?? '' ),
-                                                'action_type'          => (string) ( $queued_bundle['action_type'] ?? '' ),
-                                                'target_entity'        => (string) ( $queued_bundle['target_entity'] ?? '' ),
+                                                'bundle_id'            => (string) ( $primary_bundle['id'] ?? '' ),
+                                                'bundle_ids'           => $bundle_ids,
+                                                'action_type'          => (string) ( $primary_bundle['action_type'] ?? '' ),
+                                                'target_entity'        => (string) ( $primary_bundle['target_entity'] ?? '' ),
                                                 'po_id'                => max( 0, (int) ( $identifiers['po_id'] ?? 0 ) ),
                                                 'po_number'            => sanitize_text_field( (string) ( $identifiers['po_number'] ?? '' ) ),
                                                 'confirm_digest'       => $confirm_digest,
-                                                'expected_line_count'  => count( (array) ( $queued_bundle['line_changes'] ?? array() ) ),
-                                                'expected_apply_count' => count( (array) ( $queued_bundle['before_after'] ?? array() ) ),
+                                                'expected_line_count'  => $total_expected_lines,
+                                                'expected_apply_count' => $total_expected_apply,
                                                 'preview_summary'      => $preview,
                                                 'created_at'           => wp_date( 'c' ),
                                         )
                                 );
                                 $assistant_turn['message']       = $preview;
                                 $assistant_turn['action_notice'] = '';
-                                $assistant_turn['draft_bundle_id'] = (string) ( $queued_bundle['id'] ?? '' );
+                                $assistant_turn['draft_bundle_id'] = (string) ( $primary_bundle['id'] ?? '' );
+                                }
                         }
 
                         $history[] = $assistant_turn;
