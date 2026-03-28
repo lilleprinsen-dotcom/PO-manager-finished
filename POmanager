@@ -18787,7 +18787,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         }
                         return array(
                                 'scope'             => $scope,
-                                'asks_eta'          => (bool) preg_match( '/\b(n[åa]r|when|neste|first|f[øo]rste)\b/ui', $text ) || false !== strpos( $text, 'eta' ) || false !== strpos( $text, 'levering' ) || false !== strpos( $text, 'påfyll' ),
+                                'asks_eta'          => (bool) preg_match( '/\b(n[åa]r|when|neste|first|f[øo]rste)\b/ui', $text ) || false !== strpos( $text, 'eta' ) || false !== strpos( $text, 'levering' ) || false !== strpos( $text, 'leveringsdato' ) || false !== strpos( $text, 'delivery date' ) || false !== strpos( $text, 'påfyll' ),
                                 'asks_free_qty'     => (bool) preg_match( '/\b(fri|ledig|free|available)\b/ui', $text ),
                                 'asks_allocated_qty'=> (bool) preg_match( '/\b(allokert|allocated)\b/ui', $text ),
                                 'asks_incoming'     => false !== strpos( $text, 'incoming' ) || false !== strpos( $text, 'innkjøpsordre' ) || false !== strpos( $text, 'purchase order' ) || false !== strpos( $text, 'open po' ) || false !== strpos( $text, 'åpne po' ),
@@ -19569,6 +19569,9 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         $po = $forced_po_id > 0 ? array( 'status' => 'resolved', 'po_id' => $forced_po_id ) : self::resolve_assistant_po_reference( $message, self::get_remembered_po_context( $user_id ) );
                                         if ( 'resolved' !== ( $po['status'] ?? '' ) ) {
                                                 $last_failure = 'po_unresolved';
+                                                if ( self::message_contains_explicit_po_reference( $message ) ) {
+                                                        break;
+                                                }
                                                 continue;
                                         }
                                         $ctx = self::build_po_allocator_context( (int) ( $po['po_id'] ?? 0 ) );
@@ -19753,27 +19756,76 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         return $out;
                 }
 
+
+                protected static function message_contains_explicit_po_reference( string $message ): bool {
+                        $text = trim( $message );
+                        if ( '' === $text ) {
+                                return false;
+                        }
+                        if ( preg_match( '/\b(po|purchase order|innkj[øo]psordre)\b/ui', $text ) ) {
+                                return true;
+                        }
+                        return (bool) preg_match( '/\b([a-z]{2,}\d{4,}[a-z0-9_-]*)\b/ui', $text );
+                }
+
+                protected static function normalize_po_token( string $token ): string {
+                        $value = strtoupper( trim( sanitize_text_field( $token ) ) );
+                        $value = preg_replace( '/[^A-Z0-9._-]+/', '', (string) $value );
+                        return (string) $value;
+                }
+
                 protected static function find_po_id_by_number_token( string $token ): int {
-                        $needle = sanitize_text_field( trim( $token ) );
+                        $needle_raw = sanitize_text_field( trim( $token ) );
+                        $needle     = self::normalize_po_token( $needle_raw );
                         if ( '' === $needle ) {
                                 return 0;
                         }
+                        $meta_key = defined( __NAMESPACE__ . '\PO_META_PO_NUMBER' ) ? PO_META_PO_NUMBER : '_lpr_po_number';
                         $query = new \WP_Query(
                                 array(
                                         'post_type'      => defined( __NAMESPACE__ . '\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po',
                                         'post_status'    => 'any',
-                                        'posts_per_page' => 1,
+                                        'posts_per_page' => 8,
                                         'fields'         => 'ids',
                                         'meta_query'     => array(
                                                 array(
-                                                        'key'     => defined( __NAMESPACE__ . '\PO_META_PO_NUMBER' ) ? PO_META_PO_NUMBER : '_lpr_po_number',
+                                                        'key'     => $meta_key,
                                                         'value'   => $needle,
                                                         'compare' => '=',
                                                 ),
                                         ),
                                 )
                         );
-                        return ! empty( $query->posts[0] ) ? max( 0, (int) $query->posts[0] ) : 0;
+                        if ( ! empty( $query->posts[0] ) ) {
+                                return max( 0, (int) $query->posts[0] );
+                        }
+
+                        $like_query = new \WP_Query(
+                                array(
+                                        'post_type'      => defined( __NAMESPACE__ . '\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po',
+                                        'post_status'    => 'any',
+                                        'posts_per_page' => 20,
+                                        'fields'         => 'ids',
+                                        'meta_query'     => array(
+                                                array(
+                                                        'key'     => $meta_key,
+                                                        'value'   => $needle,
+                                                        'compare' => 'LIKE',
+                                                ),
+                                        ),
+                                )
+                        );
+                        foreach ( (array) $like_query->posts as $po_id ) {
+                                $po_number = self::normalize_po_token( (string) get_post_meta( (int) $po_id, $meta_key, true ) );
+                                if ( '' === $po_number ) {
+                                        continue;
+                                }
+                                if ( $po_number === $needle || false !== strpos( $po_number, $needle ) || false !== strpos( $needle, $po_number ) ) {
+                                        return max( 0, (int) $po_id );
+                                }
+                        }
+
+                        return 0;
                 }
 
                 protected static function resolve_assistant_order_reference( string $message, array $remembered = array() ): array {
@@ -23399,6 +23451,36 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         $line_changes[ $idx ]['eta_date'] = self::normalize_target_date_string( (string) ( $line_change['eta_date'] ?? '' ), $latest_message );
                                 }
                         }
+
+                        if ( 'update_delivery_date_draft' === $action_type ) {
+                                $has_po_identifier = ! empty( $identifiers['po_id'] ) || ! empty( $identifiers['po_number'] );
+                                $has_po_line_identifier = false;
+                                foreach ( $line_changes as $line_change ) {
+                                        if ( ! is_array( $line_change ) ) {
+                                                continue;
+                                        }
+                                        $line_identifier = sanitize_text_field( (string) ( $line_change['line_identifier'] ?? '' ) );
+                                        if ( '' !== $line_identifier && 0 === strpos( $line_identifier, 'po:' ) ) {
+                                                $has_po_line_identifier = true;
+                                                break;
+                                        }
+                                }
+                                if ( $has_po_identifier || $has_po_line_identifier ) {
+                                        foreach ( $line_changes as $idx => $line_change ) {
+                                                if ( ! is_array( $line_change ) ) {
+                                                        continue;
+                                                }
+                                                $delivery_date = sanitize_text_field( (string) ( $line_change['delivery_date'] ?? '' ) );
+                                                if ( '' !== $delivery_date && empty( $line_change['eta_date'] ) ) {
+                                                        $line_changes[ $idx ]['eta_date'] = $delivery_date;
+                                                }
+                                                unset( $line_changes[ $idx ]['delivery_date'] );
+                                        }
+                                        $action_type = 'update_eta_draft';
+                                        $payload['action_type'] = 'update_eta_draft';
+                                }
+                        }
+
                         $payload['line_changes'] = $line_changes;
 
                         $validation = lpr_allocator_validate_ai_action_payload( $payload );
@@ -23659,7 +23741,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                 protected static function build_deterministic_po_edit_payload_for_scope( array $intent, array $context, array $date_result, string $latest_message, string $scope, array $line_identifiers ): array {
                         $action_type = 'update_delivery_date_draft';
                         $line_key    = 'delivery_date';
-                        if ( 'eta' === ( $intent['intent'] ?? '' ) ) {
+                        if ( in_array( (string) ( $intent['intent'] ?? '' ), array( 'eta', 'delivery_date' ), true ) ) {
                                 $action_type = 'update_eta_draft';
                                 $line_key    = 'eta_date';
                         }
