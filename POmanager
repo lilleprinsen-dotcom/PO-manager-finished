@@ -20239,9 +20239,9 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 return array( 'status' => 'not_ordinal' );
                         }
                         $ordinal_map = array(
-                                1 => '/\b(den\s+f[øo]rste|f[øo]rste(?:\s+(?:produkt|po|ordre))?|nr\.?\s*1|nummer\s*1|the\s+first|first(?:\s+one)?)\b/ui',
-                                2 => '/\b(den\s+andre|andre(?:\s+(?:produkt|po|ordre))?|nr\.?\s*2|nummer\s*2|the\s+second|second(?:\s+one)?)\b/ui',
-                                3 => '/\b(den\s+tredje|tredje(?:\s+(?:produkt|po|ordre))?|nr\.?\s*3|nummer\s*3|the\s+third|third(?:\s+one)?)\b/ui',
+                                1 => '/\b(den\s+f[øo]rste|f[øo]rste\s+(?:produkt|po|ordre|linje|kandidat)|nr\.?\s*1|nummer\s*1|the\s+first(?:\s+one)?|first\s+one)\b/ui',
+                                2 => '/\b(den\s+andre|andre\s+(?:produkt|po|ordre|linje|kandidat)|nr\.?\s*2|nummer\s*2|the\s+second(?:\s+one)?|second\s+one)\b/ui',
+                                3 => '/\b(den\s+tredje|tredje\s+(?:produkt|po|ordre|linje|kandidat)|nr\.?\s*3|nummer\s*3|the\s+third(?:\s+one)?|third\s+one)\b/ui',
                         );
                         $position = 0;
                         foreach ( $ordinal_map as $idx => $pattern ) {
@@ -23993,11 +23993,16 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 (int) ( $remembered_product['variation_id'] ?? 0 )
                         );
                         $details = array_values( (array) ( $ctx['open_po_details'] ?? array() ) );
-                        if ( 1 !== count( $details ) ) {
-                                $has_pointer = (bool) preg_match( '/\b(denne|same|samme|this|den)\b/ui', $latest_message );
-                                return $has_pointer ? array( 'ambiguous' => true ) : array();
+                        if ( 1 === count( $details ) ) {
+                                return self::build_po_memory_payload( (array) $details[0], $ctx );
                         }
-                        return self::build_po_memory_payload( (array) $details[0], $ctx );
+
+                        $has_pointer = (bool) preg_match( '/\b(denne|den\s+her|her|same|samme|this|that\s+one|den)\b/ui', $latest_message );
+                        if ( count( $details ) > 1 && $has_pointer ) {
+                                return array( 'ambiguous' => true );
+                        }
+
+                        return array();
                 }
 
                 protected static function normalize_target_date_string( string $raw_value, string $latest_message ): string {
