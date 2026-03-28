@@ -18697,6 +18697,181 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         );
                 }
 
+                protected static function normalize_assistant_search_text( string $text ): string {
+                        $value = function_exists( 'mb_strtolower' ) ? mb_strtolower( trim( $text ) ) : strtolower( trim( $text ) );
+                        $value = preg_replace( '/[^\p{L}\p{N}\s]+/u', ' ', $value );
+                        $value = preg_replace( '/\s+/u', ' ', (string) $value );
+                        return trim( (string) $value );
+                }
+
+                protected static function extract_assistant_product_search_tokens( string $text ): array {
+                        $normalized = self::normalize_assistant_search_text( $text );
+                        if ( '' === $normalized ) {
+                                return array();
+                        }
+                        $stop_words = array(
+                                'når', 'naar', 'neste', 'gang', 'vi', 'får', 'faar', 'påfyll', 'paafyll', 'av', 'produkt', 'sku', 'skuen',
+                                'er', 'den', 'denne', 'same', 'this', 'har', 'hva', 'hvilke', 'hvilken', 'hvor', 'mange', 'inn', 'igjen',
+                                'incoming', 'open', 'po', 'eta', 'for', 'med', 'til',
+                        );
+                        $tokens = array();
+                        foreach ( preg_split( '/\s+/u', $normalized ) as $token ) {
+                                $token = trim( (string) $token );
+                                if ( '' === $token || in_array( $token, $stop_words, true ) ) {
+                                        continue;
+                                }
+                                if ( strlen( $token ) <= 1 ) {
+                                        continue;
+                                }
+                                $tokens[] = $token;
+                        }
+                        return array_values( array_unique( $tokens ) );
+                }
+
+                protected static function detect_explicit_sku_from_message( string $message ): string {
+                        $text = trim( $message );
+                        if ( preg_match( '/\bsku(?:en)?\s*(?:er|[:#-])?\s*([a-z0-9._-]{2,})\b/i', $text, $m ) ) {
+                                return trim( (string) $m[1] );
+                        }
+                        if ( preg_match( '/\b([a-z0-9._-]{3,})\s+er\s+sku(?:en)?\b/ui', $text, $m ) ) {
+                                return trim( (string) $m[1] );
+                        }
+                        if ( preg_match( '/^\s*([a-z0-9._-]{5,})\s*$/i', $text, $m ) ) {
+                                return trim( (string) $m[1] );
+                        }
+                        return '';
+                }
+
+                protected static function search_products_by_normalized_name( string $normalized_phrase, int $limit = 20 ): array {
+                        if ( '' === $normalized_phrase ) {
+                                return array();
+                        }
+                        $ids = get_posts(
+                                array(
+                                        'post_type'      => array( 'product', 'product_variation' ),
+                                        'post_status'    => array( 'publish', 'private', 'draft' ),
+                                        'posts_per_page' => max( 1, $limit ),
+                                        'fields'         => 'ids',
+                                        's'              => $normalized_phrase,
+                                )
+                        );
+                        return array_values( array_map( 'intval', (array) $ids ) );
+                }
+
+                protected static function search_products_by_tokens( array $tokens, int $limit = 30 ): array {
+                        if ( empty( $tokens ) ) {
+                                return array();
+                        }
+                        $query = implode( ' ', array_slice( $tokens, 0, 8 ) );
+                        $ids = get_posts(
+                                array(
+                                        'post_type'      => array( 'product', 'product_variation' ),
+                                        'post_status'    => array( 'publish', 'private', 'draft' ),
+                                        'posts_per_page' => max( 1, $limit ),
+                                        'fields'         => 'ids',
+                                        's'              => $query,
+                                )
+                        );
+                        return array_values( array_map( 'intval', (array) $ids ) );
+                }
+
+                protected static function build_assistant_product_facts( int $id ): array {
+                        if ( $id <= 0 || ! function_exists( 'wc_get_product' ) ) {
+                                return array();
+                        }
+                        $product = wc_get_product( $id );
+                        if ( ! $product instanceof \WC_Product ) {
+                                return array();
+                        }
+                        $is_variation = $product->is_type( 'variation' );
+                        $parent_id    = $is_variation ? (int) $product->get_parent_id() : 0;
+                        $parent       = $parent_id > 0 ? wc_get_product( $parent_id ) : null;
+                        $name         = wp_strip_all_tags( $product->get_formatted_name() );
+                        $parent_name  = $parent instanceof \WC_Product ? wp_strip_all_tags( $parent->get_name() ) : '';
+                        $stock_qty_raw = $product->get_stock_quantity();
+                        $stock_qty     = null === $stock_qty_raw ? null : (int) $stock_qty_raw;
+                        $stock_status  = sanitize_key( (string) $product->get_stock_status() );
+                        $type          = sanitize_key( (string) $product->get_type() );
+                        $manage_stock  = (bool) $product->managing_stock();
+                        $backorders_mode = method_exists( $product, 'get_backorders' ) ? sanitize_key( (string) $product->get_backorders() ) : 'no';
+                        $backorders_allowed = method_exists( $product, 'backorders_allowed' ) ? (bool) $product->backorders_allowed() : ( 'no' !== $backorders_mode );
+                        $incoming = self::build_assistant_inventory_context( $is_variation ? $parent_id : $id, $is_variation ? $id : 0 );
+
+                        return array(
+                                'id'                => $id,
+                                'target_id'         => $id,
+                                'product_id'        => $is_variation ? $parent_id : $id,
+                                'variation_id'      => $is_variation ? $id : 0,
+                                'product_name'      => $name,
+                                'parent_name'       => $parent_name,
+                                'sku'               => (string) $product->get_sku(),
+                                'normalized_name'   => self::normalize_assistant_search_text( $name . ' ' . $parent_name ),
+                                'product_type'      => $type,
+                                'is_variation'      => $is_variation,
+                                'is_composite_sku'  => (bool) preg_match( '/[+|,\/]/', (string) $product->get_sku() ),
+                                'stock_quantity'    => $stock_qty,
+                                'stock_status'      => $stock_status,
+                                'manage_stock'      => $manage_stock,
+                                'backorders_allowed'=> $backorders_allowed,
+                                'backorders_mode'   => $backorders_mode,
+                                'has_stock_data'    => ( null !== $stock_qty || '' !== $stock_status ),
+                                'has_incoming_data' => ! empty( $incoming['has_open_pos'] ) || max( 0, (int) ( $incoming['incoming_total'] ?? 0 ) ) > 0 || '' !== (string) ( $incoming['next_extra_eta'] ?? '' ),
+                        );
+                }
+
+                protected static function score_assistant_product_candidate( array $facts, string $explicit_sku, string $normalized_phrase, array $tokens ): int {
+                        $score           = 0;
+                        $candidate_name  = (string) ( $facts['normalized_name'] ?? '' );
+                        $candidate_sku_l = function_exists( 'mb_strtolower' ) ? mb_strtolower( trim( (string) ( $facts['sku'] ?? '' ) ) ) : strtolower( trim( (string) ( $facts['sku'] ?? '' ) ) );
+                        $explicit_sku_l  = function_exists( 'mb_strtolower' ) ? mb_strtolower( trim( $explicit_sku ) ) : strtolower( trim( $explicit_sku ) );
+
+                        if ( '' !== $explicit_sku_l ) {
+                                if ( $candidate_sku_l === $explicit_sku_l ) {
+                                        $score += 180;
+                                } elseif ( '' !== $candidate_sku_l && false !== strpos( $candidate_sku_l, $explicit_sku_l ) ) {
+                                        $score += ! empty( $facts['is_composite_sku'] ) ? -8 : 8;
+                                } else {
+                                        $score -= 20;
+                                }
+                        }
+
+                        if ( '' !== $normalized_phrase && '' !== $candidate_name ) {
+                                if ( $candidate_name === $normalized_phrase ) {
+                                        $score += 90;
+                                } elseif ( false !== strpos( $candidate_name, $normalized_phrase ) ) {
+                                        $score += 46;
+                                }
+                        }
+
+                        $token_hits = 0;
+                        foreach ( $tokens as $token ) {
+                                $token = (string) $token;
+                                if ( '' === $token || '' === $candidate_name ) {
+                                        continue;
+                                }
+                                if ( false !== strpos( $candidate_name, $token ) ) {
+                                        ++$token_hits;
+                                        $score += strlen( $token ) >= 4 || preg_match( '/\d/', $token ) ? 11 : 6;
+                                }
+                        }
+                        if ( $token_hits >= 2 ) {
+                                $score += 12;
+                        } elseif ( 1 === $token_hits ) {
+                                $score -= 8;
+                        }
+
+                        if ( ! empty( $facts['is_variation'] ) ) {
+                                $score += 4;
+                        }
+                        if ( ! empty( $facts['has_incoming_data'] ) ) {
+                                $score += 6;
+                        }
+                        if ( ! empty( $facts['has_stock_data'] ) ) {
+                                $score += 4;
+                        }
+                        return $score;
+                }
+
                 /**
                  * Resolve product reference in assistant text with conservative ambiguity handling.
                  *
@@ -18720,6 +18895,9 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         $seen       = array();
                         $text       = trim( $message );
                         $text_lc    = function_exists( 'mb_strtolower' ) ? mb_strtolower( $text ) : strtolower( $text );
+                        $normalized_phrase = self::normalize_assistant_search_text( $text );
+                        $tokens           = self::extract_assistant_product_search_tokens( $text );
+                        $explicit_sku     = self::detect_explicit_sku_from_message( $text );
                         $has_generic_pointer = (bool) preg_match( '/\b(for\s+denne|denne|this product|this|samme produkt|samme|den)\b/ui', $text_lc );
 
                         $add_candidate = static function ( int $id, int $score, string $reason ) use ( &$candidates, &$seen ): void {
@@ -18739,33 +18917,41 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 $candidates = array_values( $seen );
                         };
 
+                        // PASS A: exact hard identifiers (product/variation IDs and SKU).
+                        if ( preg_match( '/\b(?:variation|variant)\s*id\s*[:#-]?\s*(\d{1,9})\b/ui', $text, $variation_id_match ) ) {
+                                $id = absint( $variation_id_match[1] );
+                                if ( $id > 0 && wc_get_product( $id ) instanceof \WC_Product ) {
+                                        $add_candidate( $id, 220, 'exact_variation_id' );
+                                }
+                        }
+
                         if ( preg_match( '/\b(?:id|#)\s*(\d{1,9})\b/ui', $text, $id_inline_match ) ) {
                                 $id = absint( $id_inline_match[1] );
                                 if ( $id > 0 && wc_get_product( $id ) instanceof \WC_Product ) {
-                                        $add_candidate( $id, 100, 'id_token' );
+                                        $add_candidate( $id, 210, 'id_token' );
                                 }
                         }
 
                         if ( preg_match( '/(?:produkt(?:\s*id)?|product(?:\s*id)?)\s*[:#-]?\s*(\d{1,9})\b/i', $text, $id_match ) ) {
                                 $id = absint( $id_match[1] );
                                 if ( $id > 0 && wc_get_product( $id ) instanceof \WC_Product ) {
-                                        $add_candidate( $id, 100, 'exact_id' );
+                                        $add_candidate( $id, 210, 'exact_id' );
                                 }
                         }
 
-                        if ( preg_match( '/\bsku\s*[:#-]?\s*([a-z0-9._-]{2,})\b/i', $text, $sku_match ) ) {
-                                $sku = trim( (string) $sku_match[1] );
-                                if ( '' !== $sku ) {
+                        if ( '' !== $explicit_sku ) {
+                                $sku = trim( (string) $explicit_sku );
+                                if ( '' !== $sku && function_exists( 'wc_get_products' ) ) {
                                         $ids = wc_get_products(
                                                 array(
                                                         'sku'    => $sku,
-                                                        'limit'  => 8,
-                                                        'status' => array( 'publish', 'private' ),
+                                                        'limit'  => 20,
+                                                        'status' => array( 'publish', 'private', 'draft' ),
                                                         'return' => 'ids',
                                                 )
                                         );
                                         foreach ( (array) $ids as $id ) {
-                                                $add_candidate( (int) $id, 98, 'exact_sku' );
+                                                $add_candidate( (int) $id, 205, 'exact_sku' );
                                         }
                                 }
                         }
@@ -18778,10 +18964,11 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 }
                                 $id_from_sku = function_exists( 'wc_get_product_id_by_sku' ) ? (int) wc_get_product_id_by_sku( $token ) : 0;
                                 if ( $id_from_sku > 0 ) {
-                                        $add_candidate( $id_from_sku, 96, 'sku_token' );
+                                        $add_candidate( $id_from_sku, 198, 'sku_token' );
                                 }
                         }
 
+                        // PASS B: high-confidence text and variation display/name matches.
                         $title_exact_ids = get_posts(
                                 array(
                                         'post_type'      => array( 'product', 'product_variation' ),
@@ -18792,83 +18979,15 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 )
                         );
                         foreach ( (array) $title_exact_ids as $id ) {
-                                $add_candidate( (int) $id, 94, 'exact_title' );
+                                $add_candidate( (int) $id, 125, 'exact_title' );
+                        }
+                        foreach ( self::search_products_by_normalized_name( $normalized_phrase, 20 ) as $id ) {
+                                $add_candidate( (int) $id, 112, 'normalized_title' );
                         }
 
-                        $normalized_text_title = trim( preg_replace( '/\s+/', ' ', (string) preg_replace( '/[^\p{L}\p{N}\s]+/u', ' ', $text_lc ) ) );
-                        if ( '' !== $normalized_text_title ) {
-                                $title_clean_ids = get_posts(
-                                        array(
-                                                'post_type'      => array( 'product', 'product_variation' ),
-                                                'post_status'    => array( 'publish', 'private' ),
-                                                'posts_per_page' => 10,
-                                                'fields'         => 'ids',
-                                                's'              => $normalized_text_title,
-                                        )
-                                );
-                                foreach ( (array) $title_clean_ids as $id ) {
-                                        $add_candidate( (int) $id, 86, 'normalized_title' );
-                                }
-                        }
-
-                        $search_ids = get_posts(
-                                array(
-                                        'post_type'      => array( 'product', 'product_variation' ),
-                                        'post_status'    => array( 'publish', 'private' ),
-                                        'posts_per_page' => 12,
-                                        'fields'         => 'ids',
-                                        's'              => $text,
-                                )
-                        );
-                        foreach ( (array) $search_ids as $id ) {
-                                $add_candidate( (int) $id, 78, 'search_match' );
-                        }
-
-                        $normalized_phrase = trim( (string) preg_replace( '/\b(?:n[åa]r|kommer|inn|igjen|incoming|open|po|produkt|product|sku|p[åa]fyll|eta|ledig|fri|qty|free|for|av|har|vi|hva|hvilke|hvilken|f[øo]rste|levering|samme|denne|this|total|hvor\s+mange|how\s+many|er|det|neste)\b/ui', ' ', $text ) );
-                        if ( '' !== $normalized_phrase && $normalized_phrase !== $text ) {
-                                $phrase_ids = get_posts(
-                                        array(
-                                                'post_type'      => array( 'product', 'product_variation' ),
-                                                'post_status'    => array( 'publish', 'private' ),
-                                                'posts_per_page' => 12,
-                                                'fields'         => 'ids',
-                                                's'              => $normalized_phrase,
-                                        )
-                                );
-                                foreach ( (array) $phrase_ids as $id ) {
-                                        $add_candidate( (int) $id, 84, 'stripped_phrase' );
-                                }
-                        }
-
-                        // Conservative fuzzy fallback only for short candidate sets and clear winner.
-                        if ( count( $candidates ) <= 1 && strlen( $text_lc ) >= 4 ) {
-                                $fuzzy_ids = get_posts(
-                                        array(
-                                                'post_type'      => array( 'product', 'product_variation' ),
-                                                'post_status'    => array( 'publish', 'private' ),
-                                                'posts_per_page' => 15,
-                                                'fields'         => 'ids',
-                                                's'              => preg_replace( '/\b(?:neste|incoming|open|po|produkt|product|sku|påfyll|eta|ledig|fri|qty|for|av|har|vi|hva|hvilke|kommer)\b/ui', ' ', $text ),
-                                        )
-                                );
-                                $best_id       = 0;
-                                $best_distance = 999;
-                                $second_best   = 999;
-                                foreach ( (array) $fuzzy_ids as $id ) {
-                                        $label = function_exists( __NAMESPACE__ . '\lpr_allocator_product_option_label' ) ? lpr_allocator_product_option_label( (int) $id ) : get_the_title( (int) $id );
-                                        $name  = function_exists( 'mb_strtolower' ) ? mb_strtolower( wp_strip_all_tags( (string) $label ) ) : strtolower( wp_strip_all_tags( (string) $label ) );
-                                        $dist  = levenshtein( $text_lc, $name );
-                                        if ( $dist < $best_distance ) {
-                                                $second_best   = $best_distance;
-                                                $best_distance = $dist;
-                                                $best_id       = (int) $id;
-                                        } elseif ( $dist < $second_best ) {
-                                                $second_best = $dist;
-                                        }
-                                }
-                                if ( $best_id > 0 && $best_distance <= 6 && ( $second_best - $best_distance ) >= 2 ) {
-                                        $add_candidate( $best_id, 70, 'fuzzy_high_confidence' );
-                                }
+                        // PASS C: token-based name search with weak-word stripping.
+                        foreach ( self::search_products_by_tokens( $tokens, 35 ) as $id ) {
+                                $add_candidate( (int) $id, 88, 'token_search' );
                         }
 
                         if ( empty( $candidates ) ) {
@@ -18886,6 +19005,17 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         }
 
                         $candidates = self::maybe_rank_exact_sku_over_composite_matches( $candidates, $text );
+                        foreach ( $candidates as &$candidate ) {
+                                if ( ! is_array( $candidate ) ) {
+                                        continue;
+                                }
+                                $facts = self::build_assistant_product_facts( (int) ( $candidate['id'] ?? 0 ) );
+                                if ( empty( $facts ) ) {
+                                        continue;
+                                }
+                                $candidate['score'] = (int) ( $candidate['score'] ?? 0 ) + self::score_assistant_product_candidate( $facts, $explicit_sku, $normalized_phrase, $tokens );
+                        }
+                        unset( $candidate );
 
                         usort(
                                 $candidates,
@@ -18949,10 +19079,11 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         if ( empty( $candidates ) || ! function_exists( 'wc_get_product' ) ) {
                                 return $candidates;
                         }
-                        if ( ! preg_match( '/\bsku\s*[:#-]?\s*([a-z0-9._-]{2,})\b/i', $message, $sku_match ) ) {
+                        $detected = self::detect_explicit_sku_from_message( $message );
+                        if ( '' === $detected ) {
                                 return $candidates;
                         }
-                        $sku = strtolower( trim( (string) $sku_match[1] ) );
+                        $sku = strtolower( trim( $detected ) );
                         if ( '' === $sku ) {
                                 return $candidates;
                         }
@@ -19055,6 +19186,13 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         $incoming_total += max( 0, (int) ( $detail['qty_ordered'] ?? 0 ) );
                                 }
                         }
+                        if ( empty( $details ) || $incoming_total <= 0 ) {
+                                $open_po_fallback = self::lookup_open_po_rows_for_target( $target_id, $fallback_id );
+                                if ( ! empty( $open_po_fallback['details'] ) ) {
+                                        $details        = (array) $open_po_fallback['details'];
+                                        $incoming_total = max( $incoming_total, (int) ( $open_po_fallback['incoming_total'] ?? 0 ) );
+                                }
+                        }
 
                         $has_free_qty                    = false;
                         $total_free_qty_across_open_pos  = 0;
@@ -19080,11 +19218,33 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 }
                         }
 
+                        $parent_product = $fallback_id > 0 && function_exists( 'wc_get_product' ) ? wc_get_product( $fallback_id ) : null;
+                        $stock_qty_raw  = $product->get_stock_quantity();
+                        $stock_status   = sanitize_key( (string) $product->get_stock_status() );
+                        $manage_stock   = (bool) $product->managing_stock();
+                        $backorders_mode = method_exists( $product, 'get_backorders' ) ? sanitize_key( (string) $product->get_backorders() ) : 'no';
+                        $backorders_allowed = method_exists( $product, 'backorders_allowed' ) ? (bool) $product->backorders_allowed() : ( 'no' !== $backorders_mode );
+                        $availability_text = method_exists( $product, 'get_availability' ) ? trim( wp_strip_all_tags( (string) ( $product->get_availability()['availability'] ?? '' ) ) ) : '';
+
                         return array(
                                 'product_id'      => $product_id,
                                 'variation_id'    => $variation_id,
+                                'target_id'       => $target_id,
                                 'product_name'    => wp_strip_all_tags( $product->get_formatted_name() ),
+                                'parent_product_name' => $parent_product instanceof \WC_Product ? wp_strip_all_tags( $parent_product->get_name() ) : '',
                                 'sku'             => (string) $product->get_sku(),
+                                'product_type'    => sanitize_key( (string) $product->get_type() ),
+                                'is_variation'    => $product->is_type( 'variation' ),
+                                'parent_id'       => $fallback_id,
+                                'post_status'     => sanitize_key( (string) get_post_status( $target_id ) ),
+                                'catalog_visibility' => method_exists( $product, 'get_catalog_visibility' ) ? sanitize_key( (string) $product->get_catalog_visibility() ) : '',
+                                'stock_quantity'  => null === $stock_qty_raw ? null : (int) $stock_qty_raw,
+                                'stock_status'    => $stock_status,
+                                'manage_stock'    => $manage_stock,
+                                'backorders_allowed' => $backorders_allowed,
+                                'backorders_mode' => $backorders_mode,
+                                'is_on_backorder' => method_exists( $product, 'is_on_backorder' ) ? (bool) $product->is_on_backorder( 1 ) : false,
+                                'availability_text' => $availability_text,
                                 'next_extra_qty'  => max( 0, $next_extra_qty ),
                                 'next_extra_eta'  => $next_extra_eta,
                                 'incoming_total'  => max( 0, $incoming_total ),
@@ -19101,6 +19261,58 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 'context_source'  => $variation_id > 0 ? ( $used_fallback ? 'variation_with_parent_fallback' : 'variation' ) : 'product',
                                 'used_parent_fallback' => $used_fallback,
                         );
+                }
+
+                protected static function lookup_open_po_rows_for_target( int $target_id, int $parent_id = 0 ): array {
+                        $target_id = max( 0, $target_id );
+                        $parent_id = max( 0, $parent_id );
+                        if ( $target_id <= 0 ) {
+                                return array( 'details' => array(), 'incoming_total' => 0 );
+                        }
+                        $statuses = function_exists( __NAMESPACE__ . '\lpr_allocator_live_po_statuses' ) ? lpr_allocator_live_po_statuses() : array( 'open', 'partial' );
+                        $query = new \WP_Query(
+                                array(
+                                        'post_type'      => defined( __NAMESPACE__ . '\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po',
+                                        'post_status'    => $statuses,
+                                        'posts_per_page' => 250,
+                                        'fields'         => 'ids',
+                                        'no_found_rows'  => true,
+                                )
+                        );
+                        $details = array();
+                        $incoming_total = 0;
+                        foreach ( (array) $query->posts as $po_id ) {
+                                $lines = get_post_meta( (int) $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', true );
+                                if ( ! is_array( $lines ) ) {
+                                        continue;
+                                }
+                                foreach ( $lines as $line ) {
+                                        if ( ! is_array( $line ) ) {
+                                                continue;
+                                        }
+                                        $line_product_id   = max( 0, (int) ( $line['product_id'] ?? 0 ) );
+                                        $line_variation_id = max( 0, (int) ( $line['variation_id'] ?? 0 ) );
+                                        if ( $line_variation_id !== $target_id && $line_product_id !== $target_id && ( $parent_id <= 0 || $line_product_id !== $parent_id ) ) {
+                                                continue;
+                                        }
+                                        $ordered = max( 0, (int) ( $line['qty_ordered'] ?? 0 ) );
+                                        $received = max( 0, (int) ( $line['qty_received'] ?? 0 ) );
+                                        $allocated = max( 0, (int) ( $line['qty_allocated'] ?? 0 ) );
+                                        $incoming_qty = max( 0, $ordered - $received );
+                                        if ( $incoming_qty <= 0 ) {
+                                                continue;
+                                        }
+                                        $incoming_total += $incoming_qty;
+                                        $details[] = array(
+                                                'po_id'       => (int) $po_id,
+                                                'po_number'   => sanitize_text_field( (string) get_post_meta( (int) $po_id, defined( __NAMESPACE__ . '\PO_META_PO_NUMBER' ) ? PO_META_PO_NUMBER : '_lpr_po_number', true ) ),
+                                                'eta'         => lpr_allocator_resolve_line_eta( (int) $po_id, (array) $line ),
+                                                'qty_ordered' => $incoming_qty,
+                                                'qty_free'    => max( 0, $incoming_qty - $allocated ),
+                                        );
+                                }
+                        }
+                        return array( 'details' => $details, 'incoming_total' => $incoming_total );
                 }
 
                 protected static function format_assistant_po_breakdown_row( array $row ): string {
@@ -19563,9 +19775,22 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         }
                         $incoming = max( 0, (int) ( $ctx['incoming_total'] ?? 0 ) );
                         $free     = max( 0, (int) ( $ctx['total_free_qty_across_open_pos'] ?? 0 ) );
+                        $stock_qty = $ctx['stock_quantity'] ?? null;
+                        $stock_status = trim( (string) ( $ctx['stock_status'] ?? '' ) );
+                        $availability_text = trim( (string) ( $ctx['availability_text'] ?? '' ) );
                         $lines[]  = $head;
+                        if ( null !== $stock_qty || '' !== $stock_status ) {
+                                $stock_text = null === $stock_qty ? __( 'ukjent', 'lpr-backorder-allocator' ) : (string) (int) $stock_qty;
+                                $lines[] = sprintf( __( 'Lager nå: %1$s (%2$s).', 'lpr-backorder-allocator' ), $stock_text, '' !== $stock_status ? $stock_status : __( 'ukjent', 'lpr-backorder-allocator' ) );
+                        }
+                        if ( ! empty( $ctx['is_on_backorder'] ) || ! empty( $ctx['backorders_allowed'] ) ) {
+                                $lines[] = __( 'Produktet tillater restordre/backorder.', 'lpr-backorder-allocator' );
+                        }
+                        if ( '' !== $availability_text ) {
+                                $lines[] = sprintf( __( 'Tilgjengelighet: %s.', 'lpr-backorder-allocator' ), $availability_text );
+                        }
                         if ( ! empty( $intent['asks_yes_no'] ) ) {
-                                $lines[] = $incoming > 0 ? __( 'Ja, det finnes åpne innkjøp for produktet.', 'lpr-backorder-allocator' ) : __( 'Nei, ingen åpne innkjøp funnet for produktet.', 'lpr-backorder-allocator' );
+                                $lines[] = $incoming > 0 ? __( 'Ja, det finnes åpne innkjøp for produktet.', 'lpr-backorder-allocator' ) : __( 'Nei, ingen åpne innkjøp funnet for produktet akkurat nå.', 'lpr-backorder-allocator' );
                         }
                         $eta_from_free = trim( (string) ( $ctx['earliest_eta_with_free_qty'] ?? '' ) );
                         $eta_any       = trim( (string) ( $ctx['earliest_eta'] ?? '' ) );
@@ -19578,7 +19803,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 } elseif ( '' !== $meta_eta ) {
                                         $lines[] = sprintf( __( 'Neste ETA: %s (kilde: produktmeta).', 'lpr-backorder-allocator' ), $meta_eta );
                                 } else {
-                                        $lines[] = __( 'Jeg fant åpne innkjøp, men ingen ETA er registrert på PO-radene eller produktmeta.', 'lpr-backorder-allocator' );
+                                        $lines[] = __( 'Jeg finner ikke registrert ETA i incoming-data akkurat nå.', 'lpr-backorder-allocator' );
                                 }
                         } elseif ( ! empty( $intent['asks_free_qty'] ) ) {
                                 $lines[] = sprintf( __( 'Total fri qty: %d.', 'lpr-backorder-allocator' ), $free );
@@ -19601,7 +19826,9 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 $lines[] = __( 'Data er delvis hentet fra parent-produkt.', 'lpr-backorder-allocator' );
                         }
                         if ( $incoming <= 0 && empty( $details ) ) {
-                                $lines[] = __( 'Ingen åpne PO-er eller incoming-data funnet for produktet akkurat nå.', 'lpr-backorder-allocator' );
+                                $lines[] = __( 'Det finnes ingen åpne incoming-rader med ETA for produktet akkurat nå.', 'lpr-backorder-allocator' );
+                        } elseif ( '' === $eta_from_free && '' === $eta_any && '' === $meta_eta ) {
+                                $lines[] = __( 'Incoming finnes, men uten ETA på nåværende rader.', 'lpr-backorder-allocator' );
                         }
                         return implode( "\n", array_filter( $lines ) );
                 }
