@@ -22369,6 +22369,65 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                 $line_matches = array_values( $best['line_matches'] );
                                         }
 
+                                        $matched_po_id            = max( 0, (int) ( $best['po_id'] ?? 0 ) );
+                                        $matched_po_number        = sanitize_text_field( (string) ( $best['po_number'] ?? '' ) );
+                                        $matched_line_identifier  = '';
+                                        $proposed_changes         = array();
+                                        $current_date             = '';
+                                        $incoming_date            = lpr_allocator_sanitize_ymd( (string) ( $row['date'] ?? '' ) );
+                                        $is_date_changed          = false;
+                                        $has_resolved_line_match  = false;
+                                        $confidence               = max( 0.0, min( 1.0, (float) $top_score / 100.0 ) );
+
+                                        if ( $matched_po_id > 0 && isset( $po_lines_cache[ $matched_po_id ] ) && is_array( $po_lines_cache[ $matched_po_id ] ) && ! empty( $line_matches ) ) {
+                                                $selected_line = array();
+                                                foreach ( $line_matches as $line_match ) {
+                                                        if ( ! is_array( $line_match ) ) {
+                                                                continue;
+                                                        }
+                                                        $line_po_id = max( 0, (int) ( $line_match['po_id'] ?? 0 ) );
+                                                        $line_index = isset( $line_match['line_index'] ) ? (int) $line_match['line_index'] : -1;
+                                                        if ( $line_po_id !== $matched_po_id || $line_index < 0 || ! isset( $po_lines_cache[ $matched_po_id ][ $line_index ] ) ) {
+                                                                continue;
+                                                        }
+                                                        if ( empty( $selected_line ) ) {
+                                                                $selected_line = array(
+                                                                        'line_index' => $line_index,
+                                                                        'line'       => (array) $po_lines_cache[ $matched_po_id ][ $line_index ],
+                                                                );
+                                                        }
+                                                        if ( '' !== $incoming_date ) {
+                                                                $candidate_eta = function_exists( __NAMESPACE__ . '\lpr_allocator_resolve_line_eta' ) ? lpr_allocator_resolve_line_eta( $matched_po_id, (array) $po_lines_cache[ $matched_po_id ][ $line_index ] ) : '';
+                                                                $candidate_eta = lpr_allocator_sanitize_ymd( (string) $candidate_eta );
+                                                                if ( $candidate_eta === $incoming_date ) {
+                                                                        $selected_line = array(
+                                                                                'line_index' => $line_index,
+                                                                                'line'       => (array) $po_lines_cache[ $matched_po_id ][ $line_index ],
+                                                                        );
+                                                                        break;
+                                                                }
+                                                        }
+                                                }
+
+                                                if ( ! empty( $selected_line ) ) {
+                                                        $has_resolved_line_match = true;
+                                                        $line_index              = (int) ( $selected_line['line_index'] ?? -1 );
+                                                        $line_data               = (array) ( $selected_line['line'] ?? array() );
+                                                        $matched_line_identifier = sprintf( 'po:%1$d:line:%2$d', $matched_po_id, $line_index );
+                                                        $current_date            = function_exists( __NAMESPACE__ . '\lpr_allocator_resolve_line_eta' ) ? lpr_allocator_resolve_line_eta( $matched_po_id, $line_data ) : '';
+                                                        $current_date            = lpr_allocator_sanitize_ymd( (string) $current_date );
+                                                        $is_date_changed         = ( '' !== $incoming_date && $incoming_date !== $current_date );
+                                                        if ( $is_date_changed ) {
+                                                                $proposed_changes[] = array(
+                                                                        'field'          => 'eta_date',
+                                                                        'line_identifier'=> $matched_line_identifier,
+                                                                        'before'         => $current_date,
+                                                                        'after'          => $incoming_date,
+                                                                );
+                                                        }
+                                                }
+                                        }
+
                                         $po_candidates = array();
                                         foreach ( $scored as $candidate ) {
                                                 $po_candidates[] = max( 0, (int) ( $candidate['po_id'] ?? 0 ) );
@@ -22387,6 +22446,14 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                 $decision_reasons[] = 'ambiguous_due_to_close_scores';
                                         }
 
+                                        $status = $classification;
+                                        if ( $has_resolved_line_match ) {
+                                                $status = $is_date_changed ? 'changed' : 'unchanged';
+                                        }
+                                        $is_unique_match = ( $matched_po_id > 0 && 'ambiguous' !== $classification && $score_gap >= 9.0 && count( $line_matches ) === 1 && '' !== $matched_line_identifier );
+                                        $draftable_update = ( 'changed' === $status && $confidence >= 0.72 && $is_unique_match );
+                                        $review_required  = ! $draftable_update && 'unchanged' !== $status;
+
                                         $reconciled[] = array(
                                                 'source_row'      => max( 0, (int) ( $row['source_row'] ?? 0 ) ),
                                                 'po_reference'    => $po_reference,
@@ -22394,6 +22461,17 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                 'quantity'        => max( 0, (int) ( $row['quantity'] ?? 0 ) ),
                                                 'date'            => sanitize_text_field( (string) ( $row['date'] ?? '' ) ),
                                                 'update_notes'    => sanitize_textarea_field( (string) ( $row['update_notes'] ?? '' ) ),
+                                                'status'          => $status,
+                                                'confidence'      => round( $confidence, 3 ),
+                                                'matched_po_id'   => $matched_po_id,
+                                                'matched_po_number' => $matched_po_number,
+                                                'matched_line_identifier' => $matched_line_identifier,
+                                                'match_reasons'   => array_values( array_unique( array_filter( array_map( 'sanitize_text_field', $decision_reasons ) ) ) ),
+                                                'proposed_changes'=> $proposed_changes,
+                                                'review_required' => (bool) $review_required,
+                                                'draftable_update'=> (bool) $draftable_update,
+                                                'current_date'    => $current_date,
+                                                'incoming_date'   => $incoming_date,
                                                 'classification'  => $classification,
                                                 'po_candidates'   => array_values( array_unique( array_filter( array_map( 'absint', $po_candidates ) ) ) ),
                                                 'line_matches'    => $line_matches,
@@ -22415,14 +22493,20 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 'likely_match_count' => 0,
                                 'ambiguous_count' => 0,
                                 'unmatched_count' => 0,
+                                'changed_count'   => 0,
+                                'unchanged_count' => 0,
                                 'matched_rows'    => array(),
                                 'ambiguous_rows'  => array(),
                                 'unmatched_rows'  => array(),
+                                'changed_rows'    => array(),
+                                'unchanged_rows'  => array(),
+                                'draftable_rows'  => array(),
                                 'status'          => 'processed',
                         );
 
                         foreach ( $rows as $row ) {
                                 $bucket = sanitize_key( (string) ( $row['classification'] ?? 'unmatched' ) );
+                                $status = sanitize_key( (string) ( $row['status'] ?? $bucket ) );
                                 if ( 'exact_match' === $bucket ) {
                                         $summary['matched_count']++;
                                         $summary['exact_match_count']++;
@@ -22438,11 +22522,24 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         $summary['unmatched_count']++;
                                         $summary['unmatched_rows'][] = $row;
                                 }
+                                if ( 'changed' === $status ) {
+                                        $summary['changed_count']++;
+                                        $summary['changed_rows'][] = $row;
+                                        if ( ! empty( $row['draftable_update'] ) ) {
+                                                $summary['draftable_rows'][] = $row;
+                                        }
+                                } elseif ( 'unchanged' === $status ) {
+                                        $summary['unchanged_count']++;
+                                        $summary['unchanged_rows'][] = $row;
+                                }
                         }
 
                         $summary['matched_rows']   = array_slice( $summary['matched_rows'], 0, 80 );
                         $summary['ambiguous_rows'] = array_slice( $summary['ambiguous_rows'], 0, 80 );
                         $summary['unmatched_rows'] = array_slice( $summary['unmatched_rows'], 0, 80 );
+                        $summary['changed_rows']   = array_slice( $summary['changed_rows'], 0, 80 );
+                        $summary['unchanged_rows'] = array_slice( $summary['unchanged_rows'], 0, 80 );
+                        $summary['draftable_rows'] = array_slice( $summary['draftable_rows'], 0, 80 );
 
                         return $summary;
                 }
@@ -22549,6 +22646,8 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         $parts[] = 'Matched=' . (int) ( $summary['matched_count'] ?? 0 );
                         $parts[] = 'Ambiguous=' . (int) ( $summary['ambiguous_count'] ?? 0 );
                         $parts[] = 'Unmatched=' . (int) ( $summary['unmatched_count'] ?? 0 );
+                        $parts[] = 'Changed=' . (int) ( $summary['changed_count'] ?? 0 );
+                        $parts[] = 'Unchanged=' . (int) ( $summary['unchanged_count'] ?? 0 );
 
                         $examples = array();
                         foreach ( array_slice( (array) ( $summary['matched_rows'] ?? array() ), 0, 10 ) as $row ) {
@@ -23491,7 +23590,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                 <div id="lpr-ai-reconciliation-summary" style="margin:8px 0 12px;">
                                                         <?php if ( ! empty( $reconciliation_summary ) ) : ?>
                                                                 <div class="notice notice-info inline" style="margin:0;">
-                                                                        <p style="margin:8px 12px;"><strong><?php echo esc_html__( 'Uploaded reconciliation', 'lpr-backorder-allocator' ); ?>:</strong> <?php echo esc_html( (string) ( $reconciliation_summary['filename'] ?? '' ) ); ?> — <?php echo esc_html( sprintf( __( '%1$d rows, %2$d matched, %3$d ambiguous, %4$d unmatched', 'lpr-backorder-allocator' ), (int) ( $reconciliation_summary['row_count'] ?? 0 ), (int) ( $reconciliation_summary['matched_count'] ?? 0 ), (int) ( $reconciliation_summary['ambiguous_count'] ?? 0 ), (int) ( $reconciliation_summary['unmatched_count'] ?? 0 ) ) ); ?></p>
+                                                                        <p style="margin:8px 12px;"><strong><?php echo esc_html__( 'Uploaded reconciliation', 'lpr-backorder-allocator' ); ?>:</strong> <?php echo esc_html( (string) ( $reconciliation_summary['filename'] ?? '' ) ); ?> — <?php echo esc_html( sprintf( __( '%1$d rows, %2$d matched, %3$d ambiguous, %4$d unmatched, %5$d changed, %6$d unchanged', 'lpr-backorder-allocator' ), (int) ( $reconciliation_summary['row_count'] ?? 0 ), (int) ( $reconciliation_summary['matched_count'] ?? 0 ), (int) ( $reconciliation_summary['ambiguous_count'] ?? 0 ), (int) ( $reconciliation_summary['unmatched_count'] ?? 0 ), (int) ( $reconciliation_summary['changed_count'] ?? 0 ), (int) ( $reconciliation_summary['unchanged_count'] ?? 0 ) ) ); ?></p>
                                                                 </div>
                                                         <?php endif; ?>
                                                 </div>
@@ -23700,7 +23799,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                 wrap.style.margin = '0';
                                                 var p = document.createElement('p');
                                                 p.style.margin = '8px 12px';
-                                                p.textContent = 'Uploaded reconciliation: ' + (summary.filename || '') + ' — ' + (summary.row_count || 0) + ' rows, ' + (summary.matched_count || 0) + ' matched, ' + (summary.ambiguous_count || 0) + ' ambiguous, ' + (summary.unmatched_count || 0) + ' unmatched';
+                                                p.textContent = 'Uploaded reconciliation: ' + (summary.filename || '') + ' — ' + (summary.row_count || 0) + ' rows, ' + (summary.matched_count || 0) + ' matched, ' + (summary.ambiguous_count || 0) + ' ambiguous, ' + (summary.unmatched_count || 0) + ' unmatched, ' + (summary.changed_count || 0) + ' changed, ' + (summary.unchanged_count || 0) + ' unchanged';
                                                 wrap.appendChild(p);
                                                 reconciliationRoot.appendChild(wrap);
                                         }
