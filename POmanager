@@ -168,7 +168,7 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_generate_ai_assistant_re
          * @return string
          */
         function lpr_allocator_ai_assistant_system_instruction(): string {
-                return 'You are an internal assistant for PO allocator admins. Propose draft actions only and do not claim to make live updates. For informational inventory/open-PO questions, answer only from provided plugin context and never invent PO numbers, ETA dates, quantities, suppliers, or availability. If product matching is ambiguous, ask a clarifying question. For actionable requests, respond with valid JSON only using this shape: {"conversational_text":"string","action":{"action_type":"create_po_draft|update_eta_draft|update_delivery_date_draft","target_entity":"string","identifiers":{"key":"value"},"line_changes":[{"line_identifier":"string","quantity":1,"eta_date":"YYYY-MM-DD","delivery_date":"YYYY-MM-DD","notes":"string"}],"confidence":0.0,"notes":"string"}}. For informational/non-actionable requests, return {"conversational_text":"string","action":null}.';
+                return 'You are an internal assistant for PO allocator admins. Propose draft actions only and do not claim to make live updates. For informational inventory/open-PO questions, answer only from provided plugin context and never invent PO numbers, ETA dates, quantities, suppliers, or availability. If product matching is ambiguous, ask a clarifying question. If the user asks to modify ETA or delivery date for a PO and a concrete PO is known from context, always include identifiers.po_id in the action. For actionable requests, respond with valid JSON only using this shape: {"conversational_text":"string","action":{"action_type":"create_po_draft|update_eta_draft|update_delivery_date_draft","target_entity":"string","identifiers":{"key":"value"},"line_changes":[{"line_identifier":"string","quantity":1,"eta_date":"YYYY-MM-DD","delivery_date":"YYYY-MM-DD","notes":"string"}],"confidence":0.0,"notes":"string"}}. For informational/non-actionable requests, return {"conversational_text":"string","action":null}.';
         }
 
         /**
@@ -18502,6 +18502,10 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         return 'lpr_allocator_ai_assistant_last_resolved_global';
                 }
 
+                protected static function focus_context_meta_key(): string {
+                        return 'lpr_allocator_ai_assistant_last_focus_type';
+                }
+
                 protected static function request_meta_key(): string {
                         return 'lpr_allocator_ai_assistant_request_meta';
                 }
@@ -19088,7 +19092,8 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         if ( 'global' === $scope ) {
                                 $ctx = self::build_global_allocator_context();
                                 self::remember_global_context( $user_id, $ctx );
-                                return self::format_information_response( self::format_global_allocator_reply( $ctx, $intent ) );
+                                self::remember_focus_context( $user_id, 'global' );
+                                return self::format_information_response( self::format_global_allocator_reply( $ctx, $intent ), array( 'last_focus_type' => 'global' ) );
                         }
 
                         if ( 'po' === $scope ) {
@@ -19101,7 +19106,14 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 }
                                 $ctx = self::build_po_allocator_context( (int) ( $po['po_id'] ?? 0 ) );
                                 self::remember_po_context( $user_id, $ctx );
-                                return self::format_information_response( self::format_po_allocator_reply( $ctx, $intent ) );
+                                self::remember_focus_context( $user_id, 'po' );
+                                return self::format_information_response(
+                                        self::format_po_allocator_reply( $ctx, $intent ),
+                                        array(
+                                                'resolved_po'    => self::build_po_memory_payload( $ctx ),
+                                                'last_focus_type'=> 'po',
+                                        )
+                                );
                         }
 
                         if ( 'order' === $scope ) {
@@ -19114,7 +19126,8 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 }
                                 $ctx = self::build_order_allocator_context( (int) ( $order['order_id'] ?? 0 ) );
                                 self::remember_order_context( $user_id, $ctx );
-                                return self::format_information_response( self::format_order_allocator_reply( $ctx, $intent ) );
+                                self::remember_focus_context( $user_id, 'order' );
+                                return self::format_information_response( self::format_order_allocator_reply( $ctx, $intent ), array( 'last_focus_type' => 'order' ) );
                         }
 
                         $resolved = self::resolve_assistant_product_reference( $message, self::get_remembered_product_context( $user_id ) );
@@ -19142,24 +19155,84 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         'sku'          => sanitize_text_field( (string) ( $ctx['sku'] ?? '' ) ),
                                 )
                         );
-                        return self::format_information_response( self::format_product_allocator_reply( $ctx, $intent ) );
+                        $response = array(
+                                'resolved_product' => array(
+                                        'product_id'   => (int) ( $resolved['product_id'] ?? 0 ),
+                                        'variation_id' => (int) ( $resolved['variation_id'] ?? 0 ),
+                                        'target_id'    => (int) ( $resolved['target_id'] ?? 0 ),
+                                        'product_name' => sanitize_text_field( (string) ( $ctx['product_name'] ?? '' ) ),
+                                        'sku'          => sanitize_text_field( (string) ( $ctx['sku'] ?? '' ) ),
+                                ),
+                                'last_focus_type'  => 'product',
+                        );
+                        $primary_po = self::select_primary_po_from_inventory_context( $ctx, $intent );
+                        if ( ! empty( $primary_po['po_id'] ) ) {
+                                $response['resolved_po'] = $primary_po;
+                        }
+                        self::remember_focus_context( $user_id, 'product' );
+                        return self::format_information_response( self::format_product_allocator_reply( $ctx, $intent ), $response );
                 }
 
-                protected static function format_information_response( string $text ): array {
+                protected static function select_primary_po_from_inventory_context( array $ctx, array $intent = array() ): array {
+                        $details = array_values( (array) ( $ctx['open_po_details'] ?? array() ) );
+                        if ( count( $details ) === 1 ) {
+                                return self::build_po_memory_payload( (array) $details[0], $ctx );
+                        }
+                        if ( empty( $details ) ) {
+                                return array();
+                        }
+                        if ( ! empty( $intent['asks_first_po'] ) || ! empty( $intent['asks_eta'] ) || ! empty( $intent['asks_yes_no'] ) ) {
+                                return self::build_po_memory_payload( (array) $details[0], $ctx );
+                        }
+                        return array();
+                }
+
+                protected static function build_po_memory_payload( array $po, array $product_ctx = array() ): array {
+                        $po_id = max( 0, (int) ( $po['po_id'] ?? 0 ) );
+                        if ( $po_id <= 0 ) {
+                                return array();
+                        }
                         return array(
+                                'po_id'          => $po_id,
+                                'po_number'      => sanitize_text_field( (string) ( $po['po_number'] ?? '' ) ),
+                                'line_identifier'=> sanitize_text_field( (string) ( $po['line_identifier'] ?? '' ) ),
+                                'product_id'     => max( 0, (int) ( $product_ctx['product_id'] ?? $po['product_id'] ?? 0 ) ),
+                                'variation_id'   => max( 0, (int) ( $product_ctx['variation_id'] ?? $po['variation_id'] ?? 0 ) ),
+                                'product_name'   => sanitize_text_field( (string) ( $product_ctx['product_name'] ?? '' ) ),
+                                'sku'            => sanitize_text_field( (string) ( $product_ctx['sku'] ?? '' ) ),
+                        );
+                }
+
+                protected static function format_information_response( string $text, array $extra = array() ): array {
+                        return array_merge(
+                                array(
                                 'assistant_text' => trim( $text ),
                                 'action_payload' => null,
                                 'action_status'  => 'none',
                                 'action_notice'  => '',
+                                ),
+                                $extra
                         );
                 }
 
                 protected static function resolve_assistant_po_reference( string $message, array $remembered = array() ): array {
                         $out  = array( 'status' => 'not_found', 'po_id' => 0 );
                         $text = trim( $message );
-                        if ( preg_match( '/\bpo\s*#?\s*(\d{1,9})\b/ui', $text, $m ) || preg_match( '/\binnkj[øo]psordre\s*#?\s*(\d{1,9})\b/ui', $text, $m ) ) {
+                        if ( preg_match( '/\bpo(?:\s*id)?\s*[:#-]?\s*(\d{1,9})\b/ui', $text, $m ) || preg_match( '/\binnkj[øo]psordre(?:\s*id)?\s*[:#-]?\s*(\d{1,9})\b/ui', $text, $m ) ) {
                                 $po_id = absint( $m[1] );
                                 if ( $po_id > 0 && get_post( $po_id ) instanceof \WP_Post ) {
+                                        return array( 'status' => 'resolved', 'po_id' => $po_id );
+                                }
+                        }
+                        if ( preg_match( '/\b(po\s*#?|po-?|innkj[øo]psordre\s*#?)\s*([a-z0-9][a-z0-9._-]{3,})\b/ui', $text, $m ) ) {
+                                $po_id = self::find_po_id_by_number_token( (string) $m[2] );
+                                if ( $po_id > 0 ) {
+                                        return array( 'status' => 'resolved', 'po_id' => $po_id );
+                                }
+                        }
+                        if ( preg_match( '/\b([a-z]{2,}\d{4,}[a-z0-9_-]*)\b/ui', $text, $m ) ) {
+                                $po_id = self::find_po_id_by_number_token( (string) $m[1] );
+                                if ( $po_id > 0 ) {
                                         return array( 'status' => 'resolved', 'po_id' => $po_id );
                                 }
                         }
@@ -19172,6 +19245,29 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 return array( 'status' => 'context_missing', 'po_id' => 0 );
                         }
                         return $out;
+                }
+
+                protected static function find_po_id_by_number_token( string $token ): int {
+                        $needle = sanitize_text_field( trim( $token ) );
+                        if ( '' === $needle ) {
+                                return 0;
+                        }
+                        $query = new \WP_Query(
+                                array(
+                                        'post_type'      => defined( __NAMESPACE__ . '\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po',
+                                        'post_status'    => 'any',
+                                        'posts_per_page' => 1,
+                                        'fields'         => 'ids',
+                                        'meta_query'     => array(
+                                                array(
+                                                        'key'     => defined( __NAMESPACE__ . '\PO_META_PO_NUMBER' ) ? PO_META_PO_NUMBER : '_lpr_po_number',
+                                                        'value'   => $needle,
+                                                        'compare' => '=',
+                                                ),
+                                        ),
+                                )
+                        );
+                        return ! empty( $query->posts[0] ) ? max( 0, (int) $query->posts[0] ) : 0;
                 }
 
                 protected static function resolve_assistant_order_reference( string $message, array $remembered = array() ): array {
@@ -19372,12 +19468,17 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 $lines[] = '' !== $eta ? sprintf( __( 'Første ETA: %s.', 'lpr-backorder-allocator' ), $eta ) : __( 'ETA mangler på åpne PO-linjer.', 'lpr-backorder-allocator' );
                         } elseif ( ! empty( $intent['asks_free_qty'] ) ) {
                                 $lines[] = sprintf( __( 'Total fri qty: %d.', 'lpr-backorder-allocator' ), $free );
+                        } elseif ( ! empty( $intent['asks_allocated_qty'] ) ) {
+                                $allocated_total = max( 0, $incoming - $free );
+                                $lines[] = sprintf( __( 'Total allokert qty: %d.', 'lpr-backorder-allocator' ), $allocated_total );
                         } else {
                                 $lines[] = sprintf( __( 'Incoming total: %d. Fri qty: %d.', 'lpr-backorder-allocator' ), $incoming, $free );
                         }
                         $details = (array) ( $ctx['open_po_details'] ?? array() );
-                        foreach ( array_slice( $details, 0, 5 ) as $row ) {
-                                $lines[] = '- ' . self::format_assistant_po_breakdown_row( (array) $row );
+                        if ( ! empty( $intent['asks_po_list'] ) || ! empty( $intent['asks_first_po'] ) || ! empty( $intent['asks_incoming'] ) || $incoming > 0 ) {
+                                foreach ( array_slice( $details, 0, 5 ) as $row ) {
+                                        $lines[] = '- ' . self::format_assistant_po_breakdown_row( (array) $row );
+                                }
                         }
                         if ( count( $details ) > 5 ) {
                                 $lines[] = sprintf( __( 'Viser 5 av %d PO-rader.', 'lpr-backorder-allocator' ), count( $details ) );
@@ -19479,6 +19580,11 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         return array(
                                 'po_id'       => max( 0, (int) ( $raw['po_id'] ?? 0 ) ),
                                 'po_number'   => sanitize_text_field( (string) ( $raw['po_number'] ?? '' ) ),
+                                'line_identifier' => sanitize_text_field( (string) ( $raw['line_identifier'] ?? '' ) ),
+                                'product_id'  => max( 0, (int) ( $raw['product_id'] ?? 0 ) ),
+                                'variation_id'=> max( 0, (int) ( $raw['variation_id'] ?? 0 ) ),
+                                'product_name'=> sanitize_text_field( (string) ( $raw['product_name'] ?? '' ) ),
+                                'sku'         => sanitize_text_field( (string) ( $raw['sku'] ?? '' ) ),
                                 'remembered_at'=> sanitize_text_field( (string) ( $raw['remembered_at'] ?? '' ) ),
                         );
                 }
@@ -19512,6 +19618,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         'remembered_at' => wp_date( 'c' ),
                                 )
                         );
+                        self::remember_focus_context( $user_id, 'product' );
                 }
 
                 protected static function remember_po_context( int $user_id, array $ctx ): void {
@@ -19525,9 +19632,15 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 array(
                                         'po_id'        => $po_id,
                                         'po_number'    => sanitize_text_field( (string) ( $ctx['po_number'] ?? '' ) ),
+                                        'line_identifier' => sanitize_text_field( (string) ( $ctx['line_identifier'] ?? '' ) ),
+                                        'product_id'   => max( 0, (int) ( $ctx['product_id'] ?? 0 ) ),
+                                        'variation_id' => max( 0, (int) ( $ctx['variation_id'] ?? 0 ) ),
+                                        'product_name' => sanitize_text_field( (string) ( $ctx['product_name'] ?? '' ) ),
+                                        'sku'          => sanitize_text_field( (string) ( $ctx['sku'] ?? '' ) ),
                                         'remembered_at'=> wp_date( 'c' ),
                                 )
                         );
+                        self::remember_focus_context( $user_id, 'po' );
                 }
 
                 protected static function remember_order_context( int $user_id, array $ctx ): void {
@@ -19544,6 +19657,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         'remembered_at'=> wp_date( 'c' ),
                                 )
                         );
+                        self::remember_focus_context( $user_id, 'order' );
                 }
 
                 protected static function remember_global_context( int $user_id, array $ctx ): void {
@@ -19552,6 +19666,22 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 self::global_context_meta_key(),
                                 array(
                                         'summary'      => is_array( $ctx ) ? $ctx : array(),
+                                        'remembered_at'=> wp_date( 'c' ),
+                                )
+                        );
+                        self::remember_focus_context( $user_id, 'global' );
+                }
+
+                protected static function remember_focus_context( int $user_id, string $focus_type ): void {
+                        $focus = sanitize_key( $focus_type );
+                        if ( ! in_array( $focus, array( 'product', 'po', 'order', 'global' ), true ) ) {
+                                return;
+                        }
+                        update_user_meta(
+                                $user_id,
+                                self::focus_context_meta_key(),
+                                array(
+                                        'focus_type'   => $focus,
                                         'remembered_at'=> wp_date( 'c' ),
                                 )
                         );
@@ -19789,6 +19919,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         delete_user_meta( $user_id, self::po_context_meta_key() );
                         delete_user_meta( $user_id, self::order_context_meta_key() );
                         delete_user_meta( $user_id, self::global_context_meta_key() );
+                        delete_user_meta( $user_id, self::focus_context_meta_key() );
                         delete_transient( self::context_transient_key( $user_id ) );
                 }
 
@@ -20912,6 +21043,130 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         );
                 }
 
+                protected static function normalize_ai_action_payload( array $parsed, string $latest_message, int $user_id ): array {
+                        $payload = isset( $parsed['action_payload'] ) && is_array( $parsed['action_payload'] ) ? $parsed['action_payload'] : null;
+                        if ( ! is_array( $payload ) ) {
+                                return $parsed;
+                        }
+
+                        $action_type = sanitize_key( (string) ( $payload['action_type'] ?? '' ) );
+                        if ( ! in_array( $action_type, array( 'update_eta_draft', 'update_delivery_date_draft' ), true ) ) {
+                                return $parsed;
+                        }
+
+                        $identifiers = isset( $payload['identifiers'] ) && is_array( $payload['identifiers'] ) ? $payload['identifiers'] : array();
+                        $po_hydration_ambiguous = false;
+                        if ( empty( $identifiers['po_id'] ) ) {
+                                $po_resolution = self::resolve_po_for_action_hydration( $latest_message, $user_id );
+                                if ( ! empty( $po_resolution['po_id'] ) ) {
+                                        $identifiers['po_id'] = (string) (int) $po_resolution['po_id'];
+                                }
+                                if ( ! empty( $po_resolution['po_number'] ) ) {
+                                        $identifiers['po_number'] = sanitize_text_field( (string) $po_resolution['po_number'] );
+                                }
+                                $po_hydration_ambiguous = ! empty( $po_resolution['ambiguous'] );
+                        }
+                        $payload['identifiers'] = $identifiers;
+
+                        $line_changes = isset( $payload['line_changes'] ) && is_array( $payload['line_changes'] ) ? $payload['line_changes'] : array();
+                        foreach ( $line_changes as $idx => $line_change ) {
+                                if ( ! is_array( $line_change ) ) {
+                                        continue;
+                                }
+                                if ( 'update_delivery_date_draft' === $action_type ) {
+                                        $line_changes[ $idx ]['delivery_date'] = self::normalize_target_date_string( (string) ( $line_change['delivery_date'] ?? '' ), $latest_message );
+                                }
+                                if ( 'update_eta_draft' === $action_type ) {
+                                        $line_changes[ $idx ]['eta_date'] = self::normalize_target_date_string( (string) ( $line_change['eta_date'] ?? '' ), $latest_message );
+                                }
+                        }
+                        $payload['line_changes'] = $line_changes;
+
+                        $validation = lpr_allocator_validate_ai_action_payload( $payload );
+                        $parsed['action_payload'] = $validation['payload'];
+                        if ( ! empty( $validation['is_valid'] ) ) {
+                                $parsed['action_status'] = 'executable';
+                                $parsed['action_notice'] = '';
+                        } else {
+                                $parsed['action_status'] = 'advisory_only';
+                                $prefix = $po_hydration_ambiguous ? __( 'Flere PO-er passer «denne/samme». Oppgi PO-nummer før jeg lager utkastet.', 'lpr-backorder-allocator' ) . ' ' : '';
+                                $parsed['action_notice'] = $prefix . __( 'Structured action was not safely executable and has been marked advisory only.', 'lpr-backorder-allocator' ) . ' ' . implode( ' ', array_map( 'sanitize_text_field', (array) $validation['errors'] ) );
+                        }
+
+                        return $parsed;
+                }
+
+                protected static function resolve_po_for_action_hydration( string $latest_message, int $user_id ): array {
+                        $remembered_po = self::get_remembered_po_context( $user_id );
+                        $resolved_po   = self::resolve_assistant_po_reference( $latest_message, $remembered_po );
+                        if ( 'resolved' === ( $resolved_po['status'] ?? '' ) ) {
+                                $ctx = self::build_po_allocator_context( (int) ( $resolved_po['po_id'] ?? 0 ) );
+                                return self::build_po_memory_payload( $ctx, $remembered_po );
+                        }
+
+                        $remembered_product = self::get_remembered_product_context( $user_id );
+                        $target_id          = max( 0, (int) ( $remembered_product['target_id'] ?? 0 ) );
+                        if ( $target_id <= 0 ) {
+                                return array();
+                        }
+                        $ctx = self::build_assistant_inventory_context(
+                                (int) ( $remembered_product['product_id'] ?? 0 ),
+                                (int) ( $remembered_product['variation_id'] ?? 0 )
+                        );
+                        $details = array_values( (array) ( $ctx['open_po_details'] ?? array() ) );
+                        if ( 1 !== count( $details ) ) {
+                                $has_pointer = (bool) preg_match( '/\b(denne|same|samme|this|den)\b/ui', $latest_message );
+                                return $has_pointer ? array( 'ambiguous' => true ) : array();
+                        }
+                        return self::build_po_memory_payload( (array) $details[0], $ctx );
+                }
+
+                protected static function normalize_target_date_string( string $raw_value, string $latest_message ): string {
+                        $raw_value = trim( $raw_value );
+                        if ( lpr_allocator_is_valid_iso_date( $raw_value ) ) {
+                                return $raw_value;
+                        }
+
+                        if ( preg_match( '/\b(\d{4}-\d{2}-\d{2})\b/', $latest_message, $m ) && lpr_allocator_is_valid_iso_date( (string) $m[1] ) ) {
+                                return (string) $m[1];
+                        }
+
+                        $months = array(
+                                'januar' => 1, 'january' => 1, 'jan' => 1,
+                                'februar' => 2, 'february' => 2, 'feb' => 2,
+                                'mars' => 3, 'march' => 3,
+                                'april' => 4, 'apr' => 4,
+                                'mai' => 5, 'may' => 5,
+                                'juni' => 6, 'june' => 6, 'jun' => 6,
+                                'juli' => 7, 'july' => 7, 'jul' => 7,
+                                'august' => 8, 'aug' => 8,
+                                'september' => 9, 'sep' => 9,
+                                'oktober' => 10, 'october' => 10, 'okt' => 10, 'oct' => 10,
+                                'november' => 11, 'nov' => 11,
+                                'desember' => 12, 'december' => 12, 'des' => 12, 'dec' => 12,
+                        );
+                        if ( preg_match( '/\b(\d{1,2})[\.\s-]+([a-zæøå]+)(?:[\s,.-]+(\d{4}))?\b/ui', $latest_message, $m ) ) {
+                                $day = max( 1, min( 31, (int) ( $m[1] ?? 0 ) ) );
+                                $month_token = function_exists( 'mb_strtolower' ) ? mb_strtolower( (string) ( $m[2] ?? '' ) ) : strtolower( (string) ( $m[2] ?? '' ) );
+                                $month = isset( $months[ $month_token ] ) ? (int) $months[ $month_token ] : 0;
+                                if ( $month > 0 ) {
+                                        $year = isset( $m[3] ) ? (int) $m[3] : (int) wp_date( 'Y' );
+                                        if ( ! isset( $m[3] ) ) {
+                                                $candidate = sprintf( '%04d-%02d-%02d', $year, $month, $day );
+                                                if ( lpr_allocator_is_valid_iso_date( $candidate ) && strtotime( $candidate ) < strtotime( wp_date( 'Y-m-d' ) ) ) {
+                                                        ++$year;
+                                                }
+                                        }
+                                        $normalized = sprintf( '%04d-%02d-%02d', $year, $month, $day );
+                                        if ( lpr_allocator_is_valid_iso_date( $normalized ) ) {
+                                                return $normalized;
+                                        }
+                                }
+                        }
+
+                        return $raw_value;
+                }
+
                 public static function ajax_submit(): void {
                         ob_start();
                         try {
@@ -21034,8 +21289,26 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 if ( ! empty( $parsed['resolved_product'] ) && is_array( $parsed['resolved_product'] ) ) {
                                         self::remember_product_context( $user_id, $parsed['resolved_product'] );
                                 }
+                                if ( ! empty( $parsed['resolved_po'] ) && is_array( $parsed['resolved_po'] ) ) {
+                                        self::remember_po_context( $user_id, $parsed['resolved_po'] );
+                                }
+                                if ( ! empty( $parsed['last_focus_type'] ) ) {
+                                        self::remember_focus_context( $user_id, (string) $parsed['last_focus_type'] );
+                                }
                         } else {
                                 $parsed = lpr_allocator_generate_ai_assistant_reply( $latest_message, $context, $settings );
+                                $parsed = self::normalize_ai_action_payload( $parsed, $latest_message, $user_id );
+                                if ( is_array( $parsed['action_payload'] ?? null ) ) {
+                                        $normalized_payload = $parsed['action_payload'];
+                                        $identifiers = isset( $normalized_payload['identifiers'] ) && is_array( $normalized_payload['identifiers'] ) ? $normalized_payload['identifiers'] : array();
+                                        $po_id = max( 0, (int) ( $identifiers['po_id'] ?? 0 ) );
+                                        if ( $po_id > 0 ) {
+                                                $po_ctx = self::build_po_allocator_context( $po_id );
+                                                if ( ! empty( $po_ctx['po_id'] ) ) {
+                                                        self::remember_po_context( $user_id, self::build_po_memory_payload( $po_ctx ) );
+                                                }
+                                        }
+                                }
                         }
 
                         $user_turn = array(
