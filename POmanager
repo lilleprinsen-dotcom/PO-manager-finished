@@ -463,6 +463,8 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_parse_openai_chat_respon
                         $po_identifier = isset( $identifiers['po_id'] ) ? trim( (string) $identifiers['po_id'] ) : '';
                         if ( '' === $po_identifier ) {
                                 $errors[] = 'Update draft actions require identifiers.po_id.';
+                        } elseif ( ! ctype_digit( $po_identifier ) || (int) $po_identifier <= 0 ) {
+                                $errors[] = 'identifiers.po_id must be a numeric internal PO post ID.';
                         }
                 }
 
@@ -18662,7 +18664,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         if ( '' === $text ) {
                                 return false;
                         }
-                        return (bool) preg_match( '/\b(bekreft|ja[, ]*bekreft|utf[øo]r|kj[øo]r|apply|confirm|ja[, ]*gj[øo]r det)\b/ui', $text );
+                        return (bool) preg_match( '/\b(bekreft|ja[, ]*bekreft|utf[øo]r|kj[øo]r|apply|confirm|ja[, ]*gj[øo]r det|ja[, ]*det kan du|ja|go ahead|proceed)\b/ui', $text );
                 }
 
                 protected static function is_chat_cancellation_message( string $message ): bool {
@@ -22948,6 +22950,38 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 && false !== strpos( $preview, '- Umatchede rader:' )
                                 && false === strpos( $preview, '{"' )
                                 && false === strpos( $preview, '"proposed_updates"' );
+                        $followup_intent = self::detect_followup_po_edit_intent( 'kan du korrigere leveringsdatoen til 23 januar?' );
+                        $results['followup_korrigere_detected_delivery_date'] =
+                                ! empty( $followup_intent['is_actionable_edit'] )
+                                && 'delivery_date' === (string) ( $followup_intent['intent'] ?? '' );
+                        $results['followup_confirmation_ja_det_kan_du'] = self::is_chat_confirmation_message( 'ja det kan du' );
+                        $scope_line = self::detect_followup_po_edit_scope(
+                                'kan du oppdatere datoen?',
+                                array(
+                                        'has_resolved_line' => true,
+                                        'line_resolution_status' => 'resolved',
+                                        'plausible_line_count' => 1,
+                                )
+                        );
+                        $scope_whole_po = self::detect_followup_po_edit_scope( 'oppdater hele PO-en til 23 januar', array() );
+                        $results['followup_scope_line_first_default'] = 'line' === $scope_line;
+                        $results['followup_scope_whole_po_explicit'] = 'whole_po' === $scope_whole_po;
+                        $invalid_po_payload = array(
+                                'action_type'   => 'update_delivery_date_draft',
+                                'target_entity' => 'PO',
+                                'identifiers'   => array(
+                                        'po_id' => 'CASE01946015',
+                                ),
+                                'line_changes'  => array(
+                                        array(
+                                                'line_identifier' => 'po:1946015:line:0',
+                                                'delivery_date'   => '2026-01-23',
+                                        ),
+                                ),
+                                'confidence'    => 1.0,
+                        );
+                        $invalid_po_validation = lpr_allocator_validate_ai_action_payload( $invalid_po_payload );
+                        $results['followup_po_id_numeric_integrity'] = ! empty( $invalid_po_validation['is_valid'] ) ? false : in_array( 'identifiers.po_id must be a numeric internal PO post ID.', (array) ( $invalid_po_validation['errors'] ?? array() ), true );
 
                         $all_passed = ! in_array( false, $results, true );
                         $report_lines = array(
@@ -23333,6 +23367,13 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         }
 
                         $identifiers = isset( $payload['identifiers'] ) && is_array( $payload['identifiers'] ) ? $payload['identifiers'] : array();
+                        $raw_po_id   = isset( $identifiers['po_id'] ) ? trim( (string) $identifiers['po_id'] ) : '';
+                        if ( '' !== $raw_po_id && ( ! ctype_digit( $raw_po_id ) || (int) $raw_po_id <= 0 ) ) {
+                                if ( empty( $identifiers['po_number'] ) ) {
+                                        $identifiers['po_number'] = sanitize_text_field( $raw_po_id );
+                                }
+                                unset( $identifiers['po_id'] );
+                        }
                         $po_hydration_ambiguous = false;
                         if ( empty( $identifiers['po_id'] ) && in_array( $action_type, array( 'update_eta_draft', 'update_delivery_date_draft', 'replace_po_draft_product' ), true ) ) {
                                 $po_resolution = self::resolve_po_for_action_hydration( $latest_message, $user_id );
@@ -23380,7 +23421,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 return array( 'is_actionable_edit' => false, 'intent' => 'none' );
                         }
 
-                        $has_edit_verb = (bool) preg_match( '/\b(endre|oppdater|oppdatere|sett|change|update|set)\b/ui', $text );
+                        $has_edit_verb = (bool) preg_match( '/\b(endre|oppdater|oppdatere|sett|korriger|korrigere|juster|flytt|skyv|rett|change|update|set|correct|adjust|move)\b/ui', $text );
                         $is_eta        = (bool) preg_match( '/\beta\b/ui', $text );
                         $is_delivery   = (bool) preg_match( '/\b(leveringsdato|delivery date|delivery)\b/ui', $text );
                         $is_generic_date = (bool) preg_match( '/\b(dato|date)\b/ui', $text );
@@ -23404,6 +23445,36 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 'is_actionable_edit' => 'none' !== $intent,
                                 'intent'             => $intent,
                         );
+                }
+
+                protected static function detect_followup_po_edit_scope( string $message, array $hints = array() ): string {
+                        $text = function_exists( 'mb_strtolower' ) ? mb_strtolower( trim( $message ) ) : strtolower( trim( $message ) );
+                        if ( '' !== $text && preg_match( '/\b(hele\s*po(?:-?en)?|hele\s*innkj[øo]pet|alle\s*linjer|all\s*lines\s*on\s*this\s*po|update\s*the\s*whole\s*po|whole\s*po)\b/ui', $text ) ) {
+                                return 'whole_po';
+                        }
+
+                        $has_resolved_line = ! empty( $hints['has_resolved_line'] );
+                        if ( $has_resolved_line ) {
+                                return 'line';
+                        }
+
+                        $line_resolution_status = sanitize_key( (string) ( $hints['line_resolution_status'] ?? '' ) );
+                        if ( 'ambiguous' === $line_resolution_status ) {
+                                return 'ambiguous';
+                        }
+                        if ( 'resolved' === $line_resolution_status ) {
+                                return 'line';
+                        }
+
+                        $plausible_line_count = max( 0, (int) ( $hints['plausible_line_count'] ?? 0 ) );
+                        if ( $plausible_line_count > 1 ) {
+                                return 'ambiguous';
+                        }
+                        if ( 1 === $plausible_line_count ) {
+                                return 'line';
+                        }
+
+                        return 'line';
                 }
 
                 protected static function normalize_natural_language_date_for_po_edit( string $message ): array {
@@ -23536,19 +23607,56 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         }
 
                         $line_resolution = self::resolve_deterministic_po_line_identifier( $po_id, $remembered_po, $remembered_product );
-                        if ( 'resolved' !== ( $line_resolution['status'] ?? '' ) ) {
-                                return array_merge( array( 'status' => 'line_' . sanitize_key( (string) ( $line_resolution['status'] ?? 'missing' ) ), 'po_id' => $po_id ), $line_resolution );
-                        }
+                        $lines          = get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', true );
+                        $po_line_count  = is_array( $lines ) ? count( $lines ) : 0;
 
                         return array(
                                 'status'          => 'resolved',
                                 'po_id'           => $po_id,
                                 'po_number'       => sanitize_text_field( (string) ( $po_resolution['po_number'] ?? $remembered_po['po_number'] ?? '' ) ),
                                 'line_identifier' => sanitize_text_field( (string) ( $line_resolution['line_identifier'] ?? '' ) ),
+                                'line_resolution' => $line_resolution,
+                                'po_line_count'   => max( 0, (int) $po_line_count ),
+                                'has_resolved_line' => 'resolved' === ( $line_resolution['status'] ?? '' ),
                         );
                 }
 
-                protected static function build_deterministic_po_edit_action_payload( array $intent, array $context, array $date_result, string $latest_message ): array {
+                protected static function resolve_followup_po_edit_lines( array $context, string $scope ): array {
+                        $po_id = max( 0, (int) ( $context['po_id'] ?? 0 ) );
+                        if ( $po_id <= 0 ) {
+                                return array( 'status' => 'missing_po' );
+                        }
+
+                        if ( 'whole_po' === $scope ) {
+                                $lines = get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', true );
+                                if ( ! is_array( $lines ) || empty( $lines ) ) {
+                                        return array( 'status' => 'missing' );
+                                }
+                                $identifiers = array();
+                                foreach ( $lines as $idx => $line ) {
+                                        if ( ! is_array( $line ) ) {
+                                                continue;
+                                        }
+                                        $identifiers[] = sprintf( 'po:%1$d:line:%2$d', $po_id, (int) $idx );
+                                }
+                                if ( empty( $identifiers ) ) {
+                                        return array( 'status' => 'missing' );
+                                }
+                                return array( 'status' => 'resolved', 'line_identifiers' => array_values( $identifiers ) );
+                        }
+
+                        $line_resolution = isset( $context['line_resolution'] ) && is_array( $context['line_resolution'] ) ? $context['line_resolution'] : array();
+                        if ( 'resolved' !== ( $line_resolution['status'] ?? '' ) ) {
+                                return array( 'status' => sanitize_key( (string) ( $line_resolution['status'] ?? 'missing' ) ) );
+                        }
+                        $line_identifier = sanitize_text_field( (string) ( $line_resolution['line_identifier'] ?? '' ) );
+                        if ( '' === $line_identifier ) {
+                                return array( 'status' => 'missing' );
+                        }
+                        return array( 'status' => 'resolved', 'line_identifiers' => array( $line_identifier ) );
+                }
+
+                protected static function build_deterministic_po_edit_payload_for_scope( array $intent, array $context, array $date_result, string $latest_message, string $scope, array $line_identifiers ): array {
                         $action_type = 'update_delivery_date_draft';
                         $line_key    = 'delivery_date';
                         if ( 'eta' === ( $intent['intent'] ?? '' ) ) {
@@ -23556,12 +23664,20 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 $line_key    = 'eta_date';
                         }
 
-                        $line_change = array(
-                                'line_identifier' => sanitize_text_field( (string) ( $context['line_identifier'] ?? '' ) ),
-                                'notes'           => sanitize_textarea_field( sprintf( 'Deterministic follow-up edit from chat: %s', $latest_message ) ),
-                        );
-                        if ( isset( $date_result['date'] ) ) {
-                                $line_change[ $line_key ] = sanitize_text_field( (string) $date_result['date'] );
+                        $line_changes = array();
+                        foreach ( $line_identifiers as $line_identifier ) {
+                                $line_identifier = sanitize_text_field( (string) $line_identifier );
+                                if ( '' === $line_identifier ) {
+                                        continue;
+                                }
+                                $line_change = array(
+                                        'line_identifier' => $line_identifier,
+                                        'notes'           => sanitize_textarea_field( sprintf( 'Deterministic follow-up edit from chat (%1$s scope): %2$s', $scope, $latest_message ) ),
+                                );
+                                if ( isset( $date_result['date'] ) ) {
+                                        $line_change[ $line_key ] = sanitize_text_field( (string) $date_result['date'] );
+                                }
+                                $line_changes[] = $line_change;
                         }
 
                         return array(
@@ -23573,7 +23689,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                 'po_number' => sanitize_text_field( (string) ( $context['po_number'] ?? '' ) ),
                                         )
                                 ),
-                                'line_changes'  => array( $line_change ),
+                                'line_changes'  => array_values( $line_changes ),
                                 'confidence'    => 1.0,
                                 'notes'         => 'Deterministic follow-up PO edit payload built server-side.',
                         );
@@ -23606,14 +23722,32 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         'actionable_intent' => true,
                                 );
                         }
-                        if ( 'line_ambiguous' === ( $context['status'] ?? '' ) ) {
+
+                        $scope = self::detect_followup_po_edit_scope(
+                                $latest_message,
+                                array(
+                                        'has_resolved_line'     => ! empty( $context['has_resolved_line'] ),
+                                        'line_resolution_status'=> sanitize_key( (string) ( $context['line_resolution']['status'] ?? '' ) ),
+                                        'plausible_line_count'  => max( 0, (int) ( $context['line_resolution']['line_count'] ?? 0 ) ),
+                                )
+                        );
+                        if ( 'ambiguous' === $scope ) {
                                 return array(
                                         'handled' => true,
                                         'parsed'  => self::format_information_response( __( 'Jeg fant flere linjer på PO-en. Hvilken linje mener du?', 'lpr-backorder-allocator' ) ),
                                         'actionable_intent' => true,
                                 );
                         }
-                        if ( 'resolved' !== ( $context['status'] ?? '' ) ) {
+
+                        $line_resolution = self::resolve_followup_po_edit_lines( $context, $scope );
+                        if ( 'ambiguous' === ( $line_resolution['status'] ?? '' ) ) {
+                                return array(
+                                        'handled' => true,
+                                        'parsed'  => self::format_information_response( __( 'Jeg fant flere mulige linjer. Oppgi SKU/linje, eller si eksplisitt «hele PO-en».', 'lpr-backorder-allocator' ) ),
+                                        'actionable_intent' => true,
+                                );
+                        }
+                        if ( 'resolved' !== ( $line_resolution['status'] ?? '' ) ) {
                                 return array(
                                         'handled' => true,
                                         'parsed'  => self::format_information_response( __( 'Jeg klarte ikke å finne en entydig PO-linje. Oppgi linje/SKU så lager jeg utkastet trygt.', 'lpr-backorder-allocator' ) ),
@@ -23644,7 +23778,14 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 );
                         }
 
-                        $payload    = self::build_deterministic_po_edit_action_payload( $intent, $context, $date_result, $latest_message );
+                        $payload    = self::build_deterministic_po_edit_payload_for_scope(
+                                $intent,
+                                $context,
+                                $date_result,
+                                $latest_message,
+                                $scope,
+                                (array) ( $line_resolution['line_identifiers'] ?? array() )
+                        );
                         $validation = lpr_allocator_validate_ai_action_payload( $payload );
                         if ( empty( $validation['is_valid'] ) ) {
                                 return array(
@@ -23655,10 +23796,13 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         }
 
                         $assistant_text = sprintf(
-                                /* translators: 1: PO reference, 2: date */
-                                __( 'Jeg har klargjort et trygt utkast for PO %1$s med ny dato %2$s.', 'lpr-backorder-allocator' ),
+                                /* translators: 1: PO reference, 2: date, 3: scope label */
+                                __( 'Jeg har klargjort et trygt utkast for PO %1$s med ny dato %2$s (%3$s).', 'lpr-backorder-allocator' ),
                                 '' !== (string) ( $context['po_number'] ?? '' ) ? (string) $context['po_number'] : (string) (int) ( $context['po_id'] ?? 0 ),
-                                sanitize_text_field( (string) ( $date_result['date'] ?? '' ) )
+                                sanitize_text_field( (string) ( $date_result['date'] ?? '' ) ),
+                                'whole_po' === $scope
+                                        ? __( 'hele PO-en / alle linjer', 'lpr-backorder-allocator' )
+                                        : __( 'linjenivå', 'lpr-backorder-allocator' )
                         );
 
                         return array(
