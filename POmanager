@@ -21351,8 +21351,8 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                 }
 
 
-                protected static function normalize_upload_log( $raw_log ): array {
-                        $entries = array();
+	                protected static function normalize_upload_log( $raw_log ): array {
+	                        $entries = array();
                         if ( ! is_array( $raw_log ) ) {
                                 return $entries;
                         }
@@ -21362,35 +21362,53 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         continue;
                                 }
 
-                                $entries[] = array(
-                                        'timestamp' => sanitize_text_field( (string) ( $entry['timestamp'] ?? '' ) ),
-                                        'filename'  => sanitize_file_name( (string) ( $entry['filename'] ?? '' ) ),
-                                        'user_id'   => max( 0, (int) ( $entry['user_id'] ?? 0 ) ),
-                                        'source'    => sanitize_key( (string) ( $entry['source'] ?? 'file' ) ),
-                                        'rows'      => max( 0, (int) ( $entry['rows'] ?? 0 ) ),
-                                        'matched'   => max( 0, (int) ( $entry['matched'] ?? 0 ) ),
-                                        'ambiguous' => max( 0, (int) ( $entry['ambiguous'] ?? 0 ) ),
-                                        'unmatched' => max( 0, (int) ( $entry['unmatched'] ?? 0 ) ),
-                                        'status'    => sanitize_key( (string) ( $entry['status'] ?? 'unknown' ) ),
-                                );
-                        }
+	                                $entries[] = array(
+	                                        'timestamp' => sanitize_text_field( (string) ( $entry['timestamp'] ?? '' ) ),
+	                                        'filename'  => sanitize_file_name( (string) ( $entry['filename'] ?? '' ) ),
+	                                        'user_id'   => max( 0, (int) ( $entry['user_id'] ?? 0 ) ),
+	                                        'source'    => sanitize_key( (string) ( $entry['source'] ?? 'file' ) ),
+	                                        'rows'      => max( 0, (int) ( $entry['rows'] ?? 0 ) ),
+	                                        'matched'   => max( 0, (int) ( $entry['matched'] ?? 0 ) ),
+	                                        'exact_match_count' => max( 0, (int) ( $entry['exact_match_count'] ?? 0 ) ),
+	                                        'likely_match_count' => max( 0, (int) ( $entry['likely_match_count'] ?? 0 ) ),
+	                                        'ambiguous' => max( 0, (int) ( $entry['ambiguous'] ?? 0 ) ),
+	                                        'unmatched' => max( 0, (int) ( $entry['unmatched'] ?? 0 ) ),
+	                                        'changed_count' => max( 0, (int) ( $entry['changed_count'] ?? 0 ) ),
+	                                        'unchanged_count' => max( 0, (int) ( $entry['unchanged_count'] ?? 0 ) ),
+	                                        'confidence_bucket_0_9_plus' => max( 0, (int) ( $entry['confidence_bucket_0_9_plus'] ?? 0 ) ),
+	                                        'confidence_bucket_0_75_to_0_9' => max( 0, (int) ( $entry['confidence_bucket_0_75_to_0_9'] ?? 0 ) ),
+	                                        'confidence_bucket_under_0_75' => max( 0, (int) ( $entry['confidence_bucket_under_0_75'] ?? 0 ) ),
+	                                        'status'    => sanitize_key( (string) ( $entry['status'] ?? 'unknown' ) ),
+	                                );
+	                        }
 
                         return $entries;
                 }
 
-                protected static function record_upload_log( int $user_id, array $summary, string $status ): void {
-                        $log = self::normalize_upload_log( get_user_meta( $user_id, self::upload_log_meta_key(), true ) );
-                        $log[] = array(
-                                'timestamp' => wp_date( 'c' ),
-                                'filename'  => sanitize_file_name( (string) ( $summary['filename'] ?? '' ) ),
-                                'user_id'   => $user_id,
-                                'source'    => 'file',
-                                'rows'      => max( 0, (int) ( $summary['row_count'] ?? 0 ) ),
-                                'matched'   => max( 0, (int) ( $summary['matched_count'] ?? 0 ) ),
-                                'ambiguous' => max( 0, (int) ( $summary['ambiguous_count'] ?? 0 ) ),
-                                'unmatched' => max( 0, (int) ( $summary['unmatched_count'] ?? 0 ) ),
-                                'status'    => sanitize_key( $status ),
-                        );
+	                protected static function record_upload_log( int $user_id, array $summary, string $status ): void {
+	                        $log = self::normalize_upload_log( get_user_meta( $user_id, self::upload_log_meta_key(), true ) );
+	                        $confidence_buckets = isset( $summary['confidence_buckets'] ) && is_array( $summary['confidence_buckets'] ) ? $summary['confidence_buckets'] : array();
+	                        $bucket_0_9_plus = max( 0, (int) ( $confidence_buckets['0.9+'] ?? 0 ) );
+	                        $bucket_0_75_to_0_9 = max( 0, (int) ( $confidence_buckets['0.75-0.9'] ?? 0 ) );
+	                        $bucket_under_0_75 = max( 0, (int) ( $confidence_buckets['<0.75'] ?? 0 ) );
+	                        $log[] = array(
+	                                'timestamp' => wp_date( 'c' ),
+	                                'filename'  => sanitize_file_name( (string) ( $summary['filename'] ?? '' ) ),
+	                                'user_id'   => $user_id,
+	                                'source'    => 'file',
+	                                'rows'      => max( 0, (int) ( $summary['row_count'] ?? 0 ) ),
+	                                'matched'   => max( 0, (int) ( $summary['matched_count'] ?? 0 ) ),
+	                                'exact_match_count' => max( 0, (int) ( $summary['exact_match_count'] ?? 0 ) ),
+	                                'likely_match_count' => max( 0, (int) ( $summary['likely_match_count'] ?? 0 ) ),
+	                                'ambiguous' => max( 0, (int) ( $summary['ambiguous_count'] ?? 0 ) ),
+	                                'unmatched' => max( 0, (int) ( $summary['unmatched_count'] ?? 0 ) ),
+	                                'changed_count' => max( 0, (int) ( $summary['changed_count'] ?? 0 ) ),
+	                                'unchanged_count' => max( 0, (int) ( $summary['unchanged_count'] ?? 0 ) ),
+	                                'confidence_bucket_0_9_plus' => $bucket_0_9_plus,
+	                                'confidence_bucket_0_75_to_0_9' => $bucket_0_75_to_0_9,
+	                                'confidence_bucket_under_0_75' => $bucket_under_0_75,
+	                                'status'    => sanitize_key( $status ),
+	                        );
                         $log = array_slice( $log, -30 );
                         update_user_meta( $user_id, self::upload_log_meta_key(), $log );
 
@@ -21400,25 +21418,44 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         array(
                                                 'user_id'   => $user_id,
                                                 'filename'  => sanitize_file_name( (string) ( $summary['filename'] ?? '' ) ),
-                                                'rows'      => max( 0, (int) ( $summary['row_count'] ?? 0 ) ),
-                                                'matched'   => max( 0, (int) ( $summary['matched_count'] ?? 0 ) ),
-                                                'ambiguous' => max( 0, (int) ( $summary['ambiguous_count'] ?? 0 ) ),
-                                                'unmatched' => max( 0, (int) ( $summary['unmatched_count'] ?? 0 ) ),
-                                                'status'    => sanitize_key( $status ),
-                                        )
-                                );
+	                                                'rows'      => max( 0, (int) ( $summary['row_count'] ?? 0 ) ),
+	                                                'matched'   => max( 0, (int) ( $summary['matched_count'] ?? 0 ) ),
+	                                                'exact_match_count' => max( 0, (int) ( $summary['exact_match_count'] ?? 0 ) ),
+	                                                'likely_match_count' => max( 0, (int) ( $summary['likely_match_count'] ?? 0 ) ),
+	                                                'ambiguous' => max( 0, (int) ( $summary['ambiguous_count'] ?? 0 ) ),
+	                                                'unmatched' => max( 0, (int) ( $summary['unmatched_count'] ?? 0 ) ),
+	                                                'changed_count' => max( 0, (int) ( $summary['changed_count'] ?? 0 ) ),
+	                                                'unchanged_count' => max( 0, (int) ( $summary['unchanged_count'] ?? 0 ) ),
+	                                                'confidence_bucket_0_9_plus' => $bucket_0_9_plus,
+	                                                'confidence_bucket_0_75_to_0_9' => $bucket_0_75_to_0_9,
+	                                                'confidence_bucket_under_0_75' => $bucket_under_0_75,
+	                                                'status'    => sanitize_key( $status ),
+	                                        )
+	                                );
                         }
                         self::append_immutable_audit_record(
                                 $user_id,
                                 array(
                                         'event'      => 'ai_upload_processed',
                                         'source'     => 'file',
-                                        'approved'   => array(
-                                                'filename' => sanitize_file_name( (string) ( $summary['filename'] ?? '' ) ),
-                                                'rows'     => max( 0, (int) ( $summary['row_count'] ?? 0 ) ),
-                                        ),
-                                        'live_changes' => array(),
-                                        'outcome'    => sanitize_key( $status ),
+	                                        'approved'   => array(
+	                                                'filename' => sanitize_file_name( (string) ( $summary['filename'] ?? '' ) ),
+	                                                'rows'     => max( 0, (int) ( $summary['row_count'] ?? 0 ) ),
+	                                                'matched_count' => max( 0, (int) ( $summary['matched_count'] ?? 0 ) ),
+	                                                'exact_match_count' => max( 0, (int) ( $summary['exact_match_count'] ?? 0 ) ),
+	                                                'likely_match_count' => max( 0, (int) ( $summary['likely_match_count'] ?? 0 ) ),
+	                                                'ambiguous_count' => max( 0, (int) ( $summary['ambiguous_count'] ?? 0 ) ),
+	                                                'unmatched_count' => max( 0, (int) ( $summary['unmatched_count'] ?? 0 ) ),
+	                                                'changed_count' => max( 0, (int) ( $summary['changed_count'] ?? 0 ) ),
+	                                                'unchanged_count' => max( 0, (int) ( $summary['unchanged_count'] ?? 0 ) ),
+	                                                'confidence_buckets' => array(
+	                                                        '0.9+' => $bucket_0_9_plus,
+	                                                        '0.75-0.9' => $bucket_0_75_to_0_9,
+	                                                        '<0.75' => $bucket_under_0_75,
+	                                                ),
+	                                        ),
+	                                        'live_changes' => array(),
+	                                        'outcome'    => sanitize_key( $status ),
                                 )
                         );
                 }
@@ -22496,9 +22533,14 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 'likely_match_count' => 0,
                                 'ambiguous_count' => 0,
                                 'unmatched_count' => 0,
-                                'changed_count'   => 0,
-                                'unchanged_count' => 0,
-                                'matched_rows'    => array(),
+	                                'changed_count'   => 0,
+	                                'unchanged_count' => 0,
+	                                'confidence_buckets' => array(
+	                                        '0.9+'     => 0,
+	                                        '0.75-0.9' => 0,
+	                                        '<0.75'    => 0,
+	                                ),
+	                                'matched_rows'    => array(),
                                 'ambiguous_rows'  => array(),
                                 'unmatched_rows'  => array(),
                                 'changed_rows'    => array(),
@@ -22525,17 +22567,25 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         $summary['unmatched_count']++;
                                         $summary['unmatched_rows'][] = $row;
                                 }
-                                if ( 'changed' === $status ) {
+	                                if ( 'changed' === $status ) {
                                         $summary['changed_count']++;
                                         $summary['changed_rows'][] = $row;
                                         if ( ! empty( $row['draftable_update'] ) ) {
                                                 $summary['draftable_rows'][] = $row;
                                         }
-                                } elseif ( 'unchanged' === $status ) {
-                                        $summary['unchanged_count']++;
-                                        $summary['unchanged_rows'][] = $row;
-                                }
-                        }
+	                                } elseif ( 'unchanged' === $status ) {
+	                                        $summary['unchanged_count']++;
+	                                        $summary['unchanged_rows'][] = $row;
+	                                }
+	                                $confidence = max( 0.0, min( 1.0, (float) ( $row['confidence'] ?? 0.0 ) ) );
+	                                if ( $confidence >= 0.9 ) {
+	                                        $summary['confidence_buckets']['0.9+']++;
+	                                } elseif ( $confidence >= 0.75 ) {
+	                                        $summary['confidence_buckets']['0.75-0.9']++;
+	                                } else {
+	                                        $summary['confidence_buckets']['<0.75']++;
+	                                }
+	                        }
 
                         $summary['matched_rows']   = array_slice( $summary['matched_rows'], 0, 80 );
                         $summary['ambiguous_rows'] = array_slice( $summary['ambiguous_rows'], 0, 80 );
