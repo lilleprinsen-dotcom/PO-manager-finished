@@ -168,7 +168,7 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_generate_ai_assistant_re
          * @return string
          */
         function lpr_allocator_ai_assistant_system_instruction(): string {
-                return 'You are an internal assistant for PO allocator admins. Use a strict two-step workflow for changes: (1) prepare a draft action and confirmation preview; (2) only after explicit user confirmation may the controller execute it. Never claim a live change is applied before confirmation. For informational inventory/open-PO questions, answer only from provided plugin context and never invent PO numbers, ETA dates, quantities, suppliers, or availability. If product matching is ambiguous, ask a clarifying question. If the user asks to modify ETA or delivery date for a PO and a concrete PO is known from context, always include identifiers.po_id in the action. Do not output diagnostic or advisory JSON to the user; keep conversational_text human-readable. For actionable requests, respond with valid JSON only using this shape: {"conversational_text":"string","action":{"action_type":"create_po_draft|update_eta_draft|update_delivery_date_draft","target_entity":"string","identifiers":{"key":"value"},"line_changes":[{"line_identifier":"string","quantity":1,"eta_date":"YYYY-MM-DD","delivery_date":"YYYY-MM-DD","notes":"string"}],"confidence":0.0,"notes":"string"}}. For informational/non-actionable requests, return {"conversational_text":"string","action":null}.';
+                return 'You are an internal assistant for PO allocator admins. Always follow a strict two-step workflow for any change proposal: (1) prepare a draft proposal bundle and human-readable confirmation preview; (2) only after explicit user confirmation may the controller execute it. Never claim a live change is applied before confirmation. For informational inventory/open-PO questions, answer only from provided plugin context and never invent PO numbers, ETA dates, quantities, suppliers, or availability. If product or PO matching is ambiguous, ask a clarifying question. For actionable requests, produce machine-usable action payloads internally and keep conversational_text simple and human-readable. Never output diagnostic/advisory JSON blobs in normal user-facing text. Use one of these action types when applicable: create_po_draft, update_eta_draft, update_delivery_date_draft, update_quantity_draft, replace_po_draft_product. Include identifiers.po_id whenever a concrete PO is known. JSON shape: {"conversational_text":"string","action":{"action_type":"...","target_entity":"string","identifiers":{"key":"value"},"line_changes":[{"line_identifier":"string","quantity":1,"eta_date":"YYYY-MM-DD","delivery_date":"YYYY-MM-DD","new_product_id":123,"notes":"string"}],"confidence":0.0,"notes":"string"}}. For informational/non-actionable requests, return {"conversational_text":"string","action":null}.';
         }
 
         /**
@@ -336,6 +336,8 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_parse_openai_chat_respon
                         'create_po_draft',
                         'update_eta_draft',
                         'update_delivery_date_draft',
+                        'update_quantity_draft',
+                        'replace_po_draft_product',
                 );
         }
 
@@ -407,8 +409,8 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_parse_openai_chat_respon
                         }
                 }
 
-                if ( 'create_po_draft' === $action_type && empty( $line_changes ) ) {
-                        $errors[] = 'create_po_draft requires at least one line change.';
+                if ( in_array( $action_type, array( 'create_po_draft', 'update_eta_draft', 'update_delivery_date_draft', 'update_quantity_draft', 'replace_po_draft_product' ), true ) && empty( $line_changes ) ) {
+                        $errors[] = 'This action type requires at least one line change.';
                 }
 
                 foreach ( $line_changes as $line_change ) {
@@ -442,9 +444,22 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_parse_openai_chat_respon
                                         $errors[] = 'Delivery-date draft updates require valid delivery_date values in YYYY-MM-DD format.';
                                 }
                         }
+
+                        if ( in_array( $action_type, array( 'update_quantity_draft', 'create_po_draft' ), true ) ) {
+                                if ( ! array_key_exists( 'quantity', $line_change ) || (float) $line_change['quantity'] <= 0 ) {
+                                        $errors[] = 'Quantity updates require positive quantity values.';
+                                }
+                        }
+
+                        if ( 'replace_po_draft_product' === $action_type ) {
+                                $new_product_id = absint( $line_change['new_product_id'] ?? 0 );
+                                if ( $new_product_id <= 0 ) {
+                                        $errors[] = 'replace_po_draft_product requires line_change.new_product_id.';
+                                }
+                        }
                 }
 
-                if ( in_array( $action_type, array( 'update_eta_draft', 'update_delivery_date_draft' ), true ) ) {
+                if ( in_array( $action_type, array( 'update_eta_draft', 'update_delivery_date_draft', 'replace_po_draft_product' ), true ) ) {
                         $po_identifier = isset( $identifiers['po_id'] ) ? trim( (string) $identifiers['po_id'] ) : '';
                         if ( '' === $po_identifier ) {
                                 $errors[] = 'Update draft actions require identifiers.po_id.';
@@ -479,6 +494,8 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_parse_openai_chat_respon
                         $assistant_candidate = isset( $decoded['conversational_text'] ) ? trim( (string) $decoded['conversational_text'] ) : '';
                         if ( '' !== $assistant_candidate ) {
                                 $text = $assistant_candidate;
+                        } elseif ( is_array( $action ) || array_key_exists( 'action', $decoded ) ) {
+                                $text = __( 'Jeg har klargjort et endringsforslag og viser en trygg forhåndsvisning under.', 'lpr-backorder-allocator' );
                         }
                         if ( array_key_exists( 'action', $decoded ) && is_array( $decoded['action'] ) ) {
                                 $action = $decoded['action'];
@@ -488,8 +505,9 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_parse_openai_chat_respon
                                 $action = $decoded;
                         }
                 } elseif ( false !== strpos( $text, '{' ) && false !== strpos( $text, '}' ) ) {
-                        $notice       = __( 'Assistant response included a structured action block that could not be safely parsed and is advisory only.', 'lpr-backorder-allocator' );
+                        $notice       = __( 'Jeg kunne ikke tolke endringsforslaget trygt. Beskriv ønsket endring på nytt med PO og linje.', 'lpr-backorder-allocator' );
                         $action_state = 'advisory_only';
+                        $text         = __( 'Jeg fikk ikke laget et trygt utkast denne gangen.', 'lpr-backorder-allocator' );
                 }
 
                 if ( is_array( $action ) ) {
@@ -500,7 +518,7 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_parse_openai_chat_respon
                         } else {
                                 $action       = $validation['payload'];
                                 $action_state = 'advisory_only';
-                                $notice       = __( 'Structured action was not safely executable and has been marked advisory only.', 'lpr-backorder-allocator' ) . ' ' . implode( ' ', array_map( 'sanitize_text_field', (array) $validation['errors'] ) );
+                                $notice       = __( 'Forslaget manglet nødvendig informasjon for trygg utføring.', 'lpr-backorder-allocator' ) . ' ' . implode( ' ', array_map( 'sanitize_text_field', (array) $validation['errors'] ) );
                         }
                 }
 
@@ -20771,6 +20789,85 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         );
                 }
 
+                protected static function execute_line_quantity_update( array $line_change ): array {
+                        $line_identifier = sanitize_text_field( (string) ( $line_change['line_identifier'] ?? '' ) );
+                        $item_id         = self::parse_order_item_id( $line_identifier );
+                        if ( $item_id <= 0 ) {
+                                throw new \RuntimeException( 'Missing order item identifier.' );
+                        }
+                        $item = function_exists( 'wc_get_order_item' ) ? wc_get_order_item( $item_id ) : null;
+                        if ( ! ( $item instanceof \WC_Order_Item_Product ) ) {
+                                throw new \RuntimeException( sprintf( 'Order item %d was not found.', $item_id ) );
+                        }
+                        $qty = max( 1, (int) round( (float) ( $line_change['quantity'] ?? 0 ) ) );
+                        $before = (string) (int) $item->get_quantity();
+                        $item->set_quantity( $qty );
+                        $item->save();
+
+                        return array(
+                                'line_identifier' => $line_identifier,
+                                'status'          => 'applied',
+                                'message'         => __( 'Applied successfully.', 'lpr-backorder-allocator' ),
+                                'before'          => $before,
+                                'after'           => (string) $qty,
+                                'target_type'     => 'order_item',
+                                'target_id'       => $item_id,
+                                '_rollback'       => array(
+                                        'type'     => 'order_item_quantity',
+                                        'item_id'  => $item_id,
+                                        'before'   => $before,
+                                ),
+                        );
+                }
+
+                protected static function execute_replace_po_draft_product( array $identifiers, array $line_change ): array {
+                        $po_id = absint( $identifiers['po_id'] ?? 0 );
+                        if ( $po_id <= 0 ) {
+                                throw new \RuntimeException( 'Missing PO identifier.' );
+                        }
+                        $from_product_id = absint( $line_change['line_identifier'] ?? 0 );
+                        $to_product_id   = absint( $line_change['new_product_id'] ?? 0 );
+                        if ( $from_product_id <= 0 || $to_product_id <= 0 ) {
+                                throw new \RuntimeException( 'Product replacement requires both source and target product IDs.' );
+                        }
+                        $lines = get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', true );
+                        if ( ! is_array( $lines ) ) {
+                                $lines = array();
+                        }
+                        $before_lines = $lines;
+                        $updated = false;
+                        foreach ( $lines as &$row ) {
+                                if ( ! is_array( $row ) ) {
+                                        continue;
+                                }
+                                if ( absint( $row['product_id'] ?? 0 ) === $from_product_id ) {
+                                        $row['product_id'] = $to_product_id;
+                                        $updated = true;
+                                        break;
+                                }
+                        }
+                        unset( $row );
+                        if ( ! $updated ) {
+                                throw new \RuntimeException( 'Could not find requested source product on PO draft line.' );
+                        }
+                        update_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', $lines );
+
+                        return array(
+                                'line_identifier' => (string) $from_product_id,
+                                'status'          => 'applied',
+                                'message'         => __( 'Applied successfully.', 'lpr-backorder-allocator' ),
+                                'before'          => (string) $from_product_id,
+                                'after'           => (string) $to_product_id,
+                                'target_type'     => 'po_line',
+                                'target_id'       => $po_id,
+                                '_rollback'       => array(
+                                        'type'  => 'po_lines',
+                                        'po_id' => $po_id,
+                                        'lines' => $before_lines,
+                                ),
+                        );
+                }
+
                 protected static function rollback_line_result( array $line_result ): bool {
                         $rollback = isset( $line_result['_rollback'] ) && is_array( $line_result['_rollback'] ) ? $line_result['_rollback'] : array();
                         $type     = sanitize_key( (string) ( $rollback['type'] ?? '' ) );
@@ -20799,6 +20896,21 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         return false;
                                 }
                                 update_post_meta( $post_id, $meta_key, $before );
+                                return true;
+                        }
+
+                        if ( 'order_item_quantity' === $type ) {
+                                $item_id = absint( $rollback['item_id'] ?? 0 );
+                                $before  = max( 1, (int) ( $rollback['before'] ?? 0 ) );
+                                if ( $item_id <= 0 ) {
+                                        return false;
+                                }
+                                $item = function_exists( 'wc_get_order_item' ) ? wc_get_order_item( $item_id ) : null;
+                                if ( ! ( $item instanceof \WC_Order_Item_Product ) ) {
+                                        return false;
+                                }
+                                $item->set_quantity( $before );
+                                $item->save();
                                 return true;
                         }
 
@@ -20846,6 +20958,18 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         $before = 'n/a';
                                         $qty    = isset( $line_change['quantity'] ) ? (float) $line_change['quantity'] : 0;
                                         $after  = sprintf( 'qty %s', rtrim( rtrim( number_format( $qty, 2, '.', '' ), '0' ), '.' ) );
+                                } elseif ( 'update_quantity_draft' === $action_type ) {
+                                        $item_id = self::parse_order_item_id( $line_identifier );
+                                        if ( $item_id > 0 ) {
+                                                $item = function_exists( 'wc_get_order_item' ) ? wc_get_order_item( $item_id ) : null;
+                                                if ( $item instanceof \WC_Order_Item_Product ) {
+                                                        $before = (string) (int) $item->get_quantity();
+                                                }
+                                        }
+                                        $after = (string) max( 0, (int) round( (float) ( $line_change['quantity'] ?? 0 ) ) );
+                                } elseif ( 'replace_po_draft_product' === $action_type ) {
+                                        $before = sanitize_text_field( (string) $line_identifier );
+                                        $after  = sanitize_text_field( (string) ( $line_change['new_product_id'] ?? '' ) );
                                 }
 
                                 $rows[] = array(
@@ -20917,6 +21041,10 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 $label = 'ETA';
                         } elseif ( 'update_delivery_date_draft' === $action_type ) {
                                 $label = 'Leveringsdato';
+                        } elseif ( 'update_quantity_draft' === $action_type ) {
+                                $label = 'Antall';
+                        } elseif ( 'replace_po_draft_product' === $action_type ) {
+                                $label = 'Produkt';
                         } elseif ( 'create_po_draft' === $action_type ) {
                                 $label = 'Endring';
                         }
@@ -20973,14 +21101,20 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         }
                         $action_type = sanitize_key( (string) ( $bundle['action_type'] ?? '' ) );
                         $field_label = 'Felt';
-                        if ( 'update_eta_draft' === $action_type ) {
-                                $field_label = 'ETA';
-                        } elseif ( 'update_delivery_date_draft' === $action_type ) {
-                                $field_label = 'Leveringsdato';
+                        $field_map = array(
+                                'update_eta_draft' => 'ETA',
+                                'update_delivery_date_draft' => 'Leveringsdato',
+                                'update_quantity_draft' => 'Antall',
+                                'replace_po_draft_product' => 'Produkt',
+                                'create_po_draft' => 'Nye utkastlinjer',
+                        );
+                        if ( isset( $field_map[ $action_type ] ) ) {
+                                $field_label = $field_map[ $action_type ];
                         }
                         $summary_rows = self::build_bundle_change_summary( $bundle );
                         $lines        = array();
-                        $lines[]      = sprintf( 'Jeg har klargjort følgende endring for PO %s:', $po_number !== '' ? $po_number : ( $po_id > 0 ? '#' . $po_id : 'ukjent' ) );
+                        $lines[]      = __( 'Jeg har klargjort følgende forslag:', 'lpr-backorder-allocator' );
+                        $lines[]      = sprintf( 'PO %s', $po_number !== '' ? $po_number : ( $po_id > 0 ? '#' . $po_id : 'ukjent' ) );
                         $lines[]      = '- PO: ' . ( $po_number !== '' ? $po_number : (string) $po_id );
                         $lines[]      = '- Felt: ' . $field_label;
                         $lines[]      = '- Linjer som påvirkes:';
@@ -20991,11 +21125,39 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 $lines[] = '     - ' . (string) $row['before_after'];
                         }
                         if ( ! empty( $bundle['requires_manual_review'] ) ) {
-                                $lines[] = '- Merk: Krever manuell gjennomgang før apply.';
+                                $lines[] = '- Krever manuell gjennomgang før utføring.';
+                                foreach ( (array) ( $bundle['manual_review_reasons'] ?? array() ) as $reason ) {
+                                        $lines[] = '  - ' . sanitize_text_field( (string) $reason );
+                                }
                         }
                         $lines[] = sprintf( 'Dette vil oppdatere %d linje(r).', count( $summary_rows ) );
                         $lines[] = "Svar 'bekreft' for å utføre endringen, eller 'avbryt' for å stoppe.";
                         return implode( "\n", $lines );
+                }
+
+                protected static function build_grouped_chat_confirmation_preview( array $bundles ): string {
+                        $bundles = array_values( array_filter( $bundles, 'is_array' ) );
+                        if ( empty( $bundles ) ) {
+                                return __( 'Ingen forslag ble klargjort.', 'lpr-backorder-allocator' );
+                        }
+                        if ( 1 === count( $bundles ) ) {
+                                return self::build_chat_confirmation_preview( $bundles[0] );
+                        }
+
+                        $parts = array( __( 'Jeg har klargjort følgende grupperte forslag:', 'lpr-backorder-allocator' ) );
+                        foreach ( $bundles as $bundle ) {
+                                $parts[] = '';
+                                $parts[] = self::build_chat_confirmation_preview( $bundle );
+                        }
+                        return implode( "\n", $parts );
+                }
+
+                protected static function build_human_readable_bundle_preview( array $bundle ): string {
+                        return self::build_chat_confirmation_preview( $bundle );
+                }
+
+                protected static function build_human_readable_bundle_result( array $bundle, array $result ): string {
+                        return self::build_apply_result_message( $bundle, $result );
                 }
 
                 protected static function build_apply_result_message( array $bundle, array $result ): string {
@@ -21055,6 +21217,8 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                 $line_result = self::execute_line_eta_update( $line_change );
                                         } elseif ( 'update_delivery_date_draft' === $action_type ) {
                                                 $line_result = self::execute_requested_delivery_update( $identifiers, $line_change );
+                                        } elseif ( 'update_quantity_draft' === $action_type ) {
+                                                $line_result = self::execute_line_quantity_update( $line_change );
                                         } elseif ( 'create_po_draft' === $action_type ) {
                                                 if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_get_or_create_quick_po_for_user' ) ) {
                                                         throw new \RuntimeException( 'PO draft helper is unavailable.' );
@@ -21107,6 +21271,8 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                                 'lines' => $before_lines,
                                                         ),
                                                 );
+                                        } elseif ( 'replace_po_draft_product' === $action_type ) {
+                                                $line_result = self::execute_replace_po_draft_product( $identifiers, $line_change );
                                         } else {
                                                 throw new \RuntimeException( 'Unsupported action type.' );
                                         }
@@ -21795,13 +21961,13 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         }
 
                         $action_type = sanitize_key( (string) ( $payload['action_type'] ?? '' ) );
-                        if ( ! in_array( $action_type, array( 'update_eta_draft', 'update_delivery_date_draft' ), true ) ) {
+                        if ( ! in_array( $action_type, array( 'update_eta_draft', 'update_delivery_date_draft', 'update_quantity_draft', 'replace_po_draft_product', 'create_po_draft' ), true ) ) {
                                 return $parsed;
                         }
 
                         $identifiers = isset( $payload['identifiers'] ) && is_array( $payload['identifiers'] ) ? $payload['identifiers'] : array();
                         $po_hydration_ambiguous = false;
-                        if ( empty( $identifiers['po_id'] ) ) {
+                        if ( empty( $identifiers['po_id'] ) && in_array( $action_type, array( 'update_eta_draft', 'update_delivery_date_draft', 'replace_po_draft_product' ), true ) ) {
                                 $po_resolution = self::resolve_po_for_action_hydration( $latest_message, $user_id );
                                 if ( ! empty( $po_resolution['po_id'] ) ) {
                                         $identifiers['po_id'] = (string) (int) $po_resolution['po_id'];
@@ -21835,7 +22001,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         } else {
                                 $parsed['action_status'] = 'advisory_only';
                                 $prefix = $po_hydration_ambiguous ? __( 'Flere PO-er passer «denne/samme». Oppgi PO-nummer før jeg lager utkastet.', 'lpr-backorder-allocator' ) . ' ' : '';
-                                $parsed['action_notice'] = $prefix . __( 'Structured action was not safely executable and has been marked advisory only.', 'lpr-backorder-allocator' ) . ' ' . implode( ' ', array_map( 'sanitize_text_field', (array) $validation['errors'] ) );
+                                $parsed['action_notice'] = $prefix . __( 'Jeg trenger litt mer presis informasjon før jeg kan lage et trygt utkast.', 'lpr-backorder-allocator' ) . ' ' . implode( ' ', array_map( 'sanitize_text_field', (array) $validation['errors'] ) );
                         }
 
                         return $parsed;
@@ -22009,7 +22175,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 );
                                 self::clear_pending_chat_confirmation( $user_id );
                                 if ( ! empty( $apply['ok'] ) ) {
-                                        $assistant_message = self::build_apply_result_message(
+                                        $assistant_message = self::build_human_readable_bundle_result(
                                                 isset( $apply['bundle'] ) && is_array( $apply['bundle'] ) ? $apply['bundle'] : array(),
                                                 isset( $apply['result'] ) && is_array( $apply['result'] ) ? $apply['result'] : array()
                                         );
@@ -22165,7 +22331,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 $queued_bundle = self::enqueue_draft_bundle( $user_id, $assistant_turn['action_payload'], $source_type, is_array( $reconciliation_summary ) ? $reconciliation_summary : array() );
                                 $digest_payload = wp_json_encode( array( $queued_bundle['id'], $queued_bundle['action_type'], $queued_bundle['before_after'] ) );
                                 $confirm_digest = hash( 'sha256', (string) $digest_payload );
-                                $preview        = self::build_chat_confirmation_preview( $queued_bundle );
+                                $preview        = self::build_human_readable_bundle_preview( $queued_bundle );
                                 $identifiers    = isset( $queued_bundle['identifiers'] ) && is_array( $queued_bundle['identifiers'] ) ? $queued_bundle['identifiers'] : array();
                                 self::remember_pending_chat_confirmation(
                                         $user_id,
@@ -22781,9 +22947,6 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                                                         <?php endif; ?>
                                                                                 </div>
                                                                                 <div class="lpr-ai-message-body" style="white-space:pre-wrap;"><?php echo esc_html( $message['message'] ); ?></div>
-                                                                                <?php if ( 'assistant' === $message['role'] && 'advisory_only' === ( $message['action_status'] ?? 'none' ) ) : ?>
-                                                                                        <p class="description" style="margin:8px 0 0; color:#8a2424;"><strong><?php echo esc_html__( 'Structured action could not be safely parsed; advisory only.', 'lpr-backorder-allocator' ); ?></strong></p>
-                                                                                <?php endif; ?>
                                                                                 <?php if ( 'assistant' === $message['role'] && ! empty( $message['action_notice'] ) ) : ?>
                                                                                         <p class="description" style="margin:4px 0 0; color:#8a2424;"><?php echo esc_html( $message['action_notice'] ); ?></p>
                                                                                 <?php endif; ?>
@@ -22953,15 +23116,6 @@ function renderApplySummary(result) {
 
                                                 wrapper.appendChild(head);
                                                 wrapper.appendChild(body);
-
-                                                if (turn.role === 'assistant' && turn.action_status === 'advisory_only') {
-                                                        var advisory = document.createElement('p');
-                                                        advisory.className = 'description';
-                                                        advisory.style.margin = '8px 0 0';
-                                                        advisory.style.color = '#8a2424';
-                                                        advisory.innerHTML = '<strong><?php echo esc_js( __( 'Structured action could not be safely parsed; advisory only.', 'lpr-backorder-allocator' ) ); ?></strong>';
-                                                        wrapper.appendChild(advisory);
-                                                }
 
                                                 if (turn.role === 'assistant' && turn.action_notice) {
                                                         var advisoryReason = document.createElement('p');
