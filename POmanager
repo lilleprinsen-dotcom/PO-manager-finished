@@ -23518,10 +23518,24 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         continue;
                                 }
                                 if ( 'update_delivery_date_draft' === $action_type ) {
-                                        $line_changes[ $idx ]['delivery_date'] = self::normalize_target_date_string( (string) ( $line_change['delivery_date'] ?? '' ), $latest_message );
+                                        $normalized_delivery_date              = self::normalize_target_date_string( (string) ( $line_change['delivery_date'] ?? '' ), $latest_message );
+                                        $line_changes[ $idx ]['delivery_date'] = $normalized_delivery_date;
+                                        if ( lpr_allocator_is_valid_iso_date( $normalized_delivery_date ) ) {
+                                                $today = function_exists( 'wp_date' ) ? wp_date( 'Y-m-d' ) : gmdate( 'Y-m-d' );
+                                                if ( $normalized_delivery_date < $today ) {
+                                                        $line_changes[ $idx ]['allow_historical'] = true;
+                                                }
+                                        }
                                 }
                                 if ( 'update_eta_draft' === $action_type ) {
-                                        $line_changes[ $idx ]['eta_date'] = self::normalize_target_date_string( (string) ( $line_change['eta_date'] ?? '' ), $latest_message );
+                                        $normalized_eta              = self::normalize_target_date_string( (string) ( $line_change['eta_date'] ?? '' ), $latest_message );
+                                        $line_changes[ $idx ]['eta_date'] = $normalized_eta;
+                                        if ( lpr_allocator_is_valid_iso_date( $normalized_eta ) ) {
+                                                $today = function_exists( 'wp_date' ) ? wp_date( 'Y-m-d' ) : gmdate( 'Y-m-d' );
+                                                if ( $normalized_eta < $today ) {
+                                                        $line_changes[ $idx ]['allow_historical'] = true;
+                                                }
+                                        }
                                 }
                         }
 
