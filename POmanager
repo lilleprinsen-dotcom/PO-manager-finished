@@ -250,12 +250,124 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_build_ai_chat_payload' )
 
 if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_generate_ai_assistant_reply' ) ) {
         /**
+         * Extract lightweight formatting intent heuristics from the latest user message.
+         *
+         * @param string $message Latest user message.
+         * @return array<string,mixed>
+         */
+        function lpr_allocator_extract_formatting_intent( string $message ): array {
+                $raw  = trim( $message );
+                $text = function_exists( 'mb_strtolower' ) ? mb_strtolower( $raw ) : strtolower( $raw );
+
+                $line_template = '';
+                if ( preg_match( '/(?:exact line format|return in this format|format)\s*:\s*(.+)$/mi', $raw, $match ) ) {
+                        $line_template = trim( (string) $match[1] );
+                }
+
+                $group_by = '';
+                if ( preg_match( '/\bgroup(?:ed)?\s+by\s+(sku|po|product)\b/ui', $text, $group_match ) ) {
+                        $group_by = sanitize_key( (string) $group_match[1] );
+                }
+
+                $line_prefix = '';
+                if ( preg_match( '/(?:line prefix|prefix)\s*[:=]\s*([^\n\r]+)/ui', $raw, $prefix_match ) ) {
+                        $line_prefix = trim( (string) $prefix_match[1] );
+                } elseif ( false !== strpos( $text, 'po:' ) ) {
+                        $line_prefix = 'PO:';
+                }
+
+                $intent = array(
+                        'line_template'             => $line_template,
+                        'group_by'                  => $group_by,
+                        'line_prefix'               => $line_prefix,
+                        'plain_text'                => false !== strpos( $text, 'plain text' ),
+                        'no_table'                  => false !== strpos( $text, 'not a table' ) || false !== strpos( $text, 'no table' ),
+                        'no_bullets'                => false !== strpos( $text, 'do not use bullet' ) || false !== strpos( $text, 'no bullet' ),
+                        'one_po_per_line'           => (bool) preg_match( '/\beach\s+po\s+on\s+a\s+new\s+line\b/ui', $text ),
+                        'avoid_repeat_product_name' => (bool) preg_match( '/\b(do not repeat|without repeating)\s+product name\b/ui', $text ),
+                        'preserve_input_order'      => false !== strpos( $text, 'keep the original sku order' ) || false !== strpos( $text, 'preserve input order' ),
+                        'include_empty_items'       => false !== strpos( $text, 'include skus with no results' ) || false !== strpos( $text, 'include no-result' ),
+                        'dedupe_identifiers'        => false === strpos( $text, 'keep duplicates' ) && false === strpos( $text, 'include duplicates' ),
+                );
+
+                return $intent;
+        }
+
+        /**
+         * Determine whether a formatting contract was requested.
+         */
+        function lpr_allocator_has_formatting_contract( array $intent ): bool {
+                foreach ( $intent as $value ) {
+                        if ( is_bool( $value ) && $value ) {
+                                return true;
+                        }
+                        if ( is_string( $value ) && '' !== trim( $value ) ) {
+                                return true;
+                        }
+                }
+                return false;
+        }
+
+        /**
+         * Validate that informational output roughly follows requested format.
+         *
+         * @return array{valid:bool,reasons:array<int,string>}
+         */
+        function lpr_allocator_validate_informational_format( string $text, array $intent ): array {
+                $reasons = array();
+                $lines   = preg_split( '/\R/u', trim( $text ) );
+                $lines   = is_array( $lines ) ? array_values( array_filter( array_map( 'trim', $lines ), static function ( $line ) {
+                        return '' !== $line;
+                } ) ) : array();
+
+                if ( ! empty( $intent['no_bullets'] ) ) {
+                        foreach ( $lines as $line ) {
+                                if ( preg_match( '/^[-*•]\s+/u', $line ) ) {
+                                        $reasons[] = 'Bullets were used despite no-bullets request.';
+                                        break;
+                                }
+                        }
+                }
+
+                if ( 'sku' === ( $intent['group_by'] ?? '' ) && ! empty( $lines ) ) {
+                        $has_sku_headers = false;
+                        foreach ( $lines as $line ) {
+                                if ( preg_match( '/\bSKU\b/ui', $line ) ) {
+                                        $has_sku_headers = true;
+                                        break;
+                                }
+                        }
+                        if ( ! $has_sku_headers ) {
+                                $reasons[] = 'Expected grouped SKU headers were not detected.';
+                        }
+                }
+
+                if ( ! empty( $intent['line_prefix'] ) ) {
+                        $prefix   = trim( (string) $intent['line_prefix'] );
+                        $matched  = 0;
+                        foreach ( $lines as $line ) {
+                                if ( 0 === stripos( $line, $prefix ) ) {
+                                        ++$matched;
+                                }
+                        }
+                        if ( $matched <= 0 ) {
+                                $reasons[] = 'Requested line prefix was not used.';
+                        }
+                }
+
+                return array(
+                        'valid'   => empty( $reasons ),
+                        'reasons' => $reasons,
+                );
+        }
+
+        /**
          * Build the AI assistant system instruction.
          *
          * @return string
          */
         function lpr_allocator_ai_assistant_system_instruction(): string {
-                return 'You are an internal assistant for PO allocator admins. Always follow a strict two-step workflow for any change proposal: (1) prepare a draft proposal bundle and human-readable confirmation preview; (2) only after explicit user confirmation may the controller execute it. Never claim a live change is applied before confirmation. For informational inventory/open-PO questions, answer only from provided plugin context and never invent PO numbers, ETA dates, quantities, suppliers, or availability. If product or PO matching is ambiguous, ask a clarifying question. For actionable requests, produce machine-usable action payloads internally and keep conversational_text simple and human-readable. Never output diagnostic/advisory JSON blobs in normal user-facing text. Use one of these action types when applicable: create_po_draft, update_eta_draft, update_delivery_date_draft, update_quantity_draft, replace_po_draft_product. Include identifiers.po_id whenever a concrete existing PO is known for update/replace actions. For create_po_draft do not request PO number, because the PO does not exist yet; ask for missing supplier, products, quantities, and optional ETA/delivery notes before proposing a draft. JSON shape: {"conversational_text":"string","action":{"schema_version":"1.0","action_type":"...","target_entity":"string","identifiers":{"key":"value"},"line_changes":[{"line_identifier":"string","quantity":1,"eta_date":"YYYY-MM-DD","delivery_date":"YYYY-MM-DD","new_product_id":123,"notes":"string"}],"confidence":0.0,"notes":"string"}}. For informational/non-actionable requests, return {"conversational_text":"string","action":null}.';
+                return 'You are an internal assistant for PO allocator admins. Always follow a strict two-step workflow for any change proposal: (1) prepare a draft proposal bundle and human-readable confirmation preview; (2) only after explicit user confirmation may the controller execute it. Never claim a live change is applied before confirmation. For informational inventory/open-PO questions, answer only from provided plugin context and never invent PO numbers, ETA dates, quantities, suppliers, or availability. If product or PO matching is ambiguous, ask a clarifying question. For actionable requests, produce machine-usable action payloads internally and keep conversational_text simple and human-readable. Never output diagnostic/advisory JSON blobs in normal user-facing text. Use one of these action types when applicable: create_po_draft, update_eta_draft, update_delivery_date_draft, update_quantity_draft, replace_po_draft_product. Include identifiers.po_id whenever a concrete existing PO is known for update/replace actions. For create_po_draft do not request PO number, because the PO does not exist yet; ask for missing supplier, products, quantities, and optional ETA/delivery notes before proposing a draft. For informational/non-actionable requests, treat the latest user formatting instructions as a strict rendering contract when feasible: preserve requested grouping/order/line templates/separators/plain-text preferences, avoid bullets when forbidden, avoid repeated fields when forbidden, and avoid intro/outro text unless asked. If exact formatting is impossible due to missing data, stay as close as possible and briefly state the limitation. JSON shape: {"conversational_text":"string","action":{"schema_version":"1.0","action_type":"...","target_entity":"string","identifiers":{"key":"value"},"line_changes":[{"line_identifier":"string","quantity":1,"eta_date":"YYYY-MM-DD","delivery_date":"YYYY-MM-DD","new_product_id":123,"notes":"string"}],"confidence":0.0,"notes":"string"}}. For informational/non-actionable requests, return {"conversational_text":"string","action":null}.';
         }
 
         /**
@@ -270,6 +382,7 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_generate_ai_assistant_re
                 $system_instruction = lpr_allocator_ai_assistant_system_instruction();
                 $model              = lpr_allocator_resolve_ai_model( isset( $settings['ai_model'] ) ? sanitize_text_field( (string) $settings['ai_model'] ) : 'gpt-4o-mini' );
                 $max_output_tokens  = isset( $settings['ai_max_output_tokens'] ) ? max( 64, (int) $settings['ai_max_output_tokens'] ) : 800;
+                $format_intent      = lpr_allocator_extract_formatting_intent( $latest_user_message );
 
                 $messages = array(
                         array(
@@ -293,6 +406,13 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_generate_ai_assistant_re
                         );
                 }
 
+                if ( lpr_allocator_has_formatting_contract( $format_intent ) ) {
+                        $messages[] = array(
+                                'role'    => 'system',
+                                'content' => 'Informational formatting contract (apply only when action=null): ' . wp_json_encode( $format_intent ),
+                        );
+                }
+
                 $messages[] = array(
                         'role'    => 'user',
                         'content' => trim( $latest_user_message ),
@@ -305,8 +425,43 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_generate_ai_assistant_re
                 );
 
                 $result = lpr_allocator_openai_chat_request( $payload, $settings );
+                $parsed = lpr_allocator_parse_openai_chat_response( $result['response'], (float) ( $result['latency_ms'] ?? 0.0 ) );
 
-                return lpr_allocator_parse_openai_chat_response( $result['response'], (float) ( $result['latency_ms'] ?? 0.0 ) );
+                if ( empty( $parsed['error_code'] ) && 'none' === (string) ( $parsed['action_status'] ?? 'none' ) && lpr_allocator_has_formatting_contract( $format_intent ) ) {
+                        $format_validation = lpr_allocator_validate_informational_format( (string) ( $parsed['assistant_text'] ?? '' ), $format_intent );
+                        if ( empty( $format_validation['valid'] ) ) {
+                                $messages_retry   = $messages;
+                                $messages_retry[] = array(
+                                        'role'    => 'assistant',
+                                        'content' => (string) ( $parsed['assistant_text'] ?? '' ),
+                                );
+                                $messages_retry[] = array(
+                                        'role'    => 'user',
+                                        'content' => 'Reformat the previous informational answer to match the formatting contract exactly. Keep all data values unchanged. Do not add or remove factual values.',
+                                );
+                                $retry_payload = array(
+                                        'model'      => $model,
+                                        'messages'   => $messages_retry,
+                                        'max_tokens' => $max_output_tokens,
+                                );
+                                $retry_result = lpr_allocator_openai_chat_request( $retry_payload, $settings );
+                                $retry_parsed = lpr_allocator_parse_openai_chat_response( $retry_result['response'], (float) ( $retry_result['latency_ms'] ?? 0.0 ) + (float) ( $parsed['latency_ms'] ?? 0.0 ) );
+                                if ( empty( $retry_parsed['error_code'] ) && 'none' === (string) ( $retry_parsed['action_status'] ?? 'none' ) ) {
+                                        $parsed = $retry_parsed;
+                                }
+                                if ( function_exists( __NAMESPACE__ . '\lpr_allocator_log_event' ) ) {
+                                        lpr_allocator_log_event(
+                                                'assistant_format_retry',
+                                                array(
+                                                        'retry_triggered' => 1,
+                                                        'reasons'         => implode( ' | ', (array) ( $format_validation['reasons'] ?? array() ) ),
+                                                )
+                                        );
+                                }
+                        }
+                }
+
+                return $parsed;
         }
 }
 
@@ -19664,10 +19819,28 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                  */
                 protected static function build_inventory_information_reply( string $message ): array {
                         $explicit_skus = self::detect_explicit_skus_from_message( $message );
+                        $format_spec   = self::extract_information_format_spec( $message );
                         if ( count( $explicit_skus ) >= 2 ) {
-                                return self::format_information_response( self::build_multi_sku_inventory_information_reply( $explicit_skus ) );
+                                return self::format_information_response( self::build_multi_sku_inventory_information_reply( $explicit_skus, $format_spec ) );
                         }
                         return self::build_allocator_information_reply( $message, self::inventory_query_intent( $message ) );
+                }
+
+                protected static function extract_information_format_spec( string $message ): array {
+                        $text = function_exists( 'mb_strtolower' ) ? mb_strtolower( trim( $message ) ) : strtolower( trim( $message ) );
+                        $line_template = '';
+                        if ( preg_match( '/(?:exact line format|return in this format|format)\s*:\s*(.+)$/mi', $message, $match ) ) {
+                                $line_template = trim( (string) $match[1] );
+                        }
+                        return array(
+                                'group_by_sku'              => (bool) preg_match( '/\bgroup(?:ed)?\s+by\s+sku\b/ui', $text ),
+                                'no_bullets'                => false !== strpos( $text, 'do not use bullet' ) || false !== strpos( $text, 'no bullet' ),
+                                'avoid_repeat_product_name' => (bool) preg_match( '/\b(do not repeat|without repeating)\s+product name\b/ui', $text ),
+                                'preserve_input_order'      => false !== strpos( $text, 'keep the original sku order' ) || false !== strpos( $text, 'preserve input order' ),
+                                'include_no_results'        => false !== strpos( $text, 'include skus with no results' ) || false !== strpos( $text, 'include no-result' ),
+                                'dedupe_skus'               => false === strpos( $text, 'keep duplicates' ) && false === strpos( $text, 'include duplicates' ),
+                                'line_template'             => $line_template,
+                        );
                 }
 
                 protected static function find_product_ids_by_exact_sku( string $sku ): array {
@@ -19688,37 +19861,52 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         return array_values( array_unique( array_map( 'intval', (array) $ids ) ) );
                 }
 
-                protected static function build_multi_sku_inventory_information_reply( array $skus ): string {
-                        $unique_skus = array();
+                protected static function build_multi_sku_inventory_information_reply( array $skus, array $format_spec = array() ): string {
+                        $dedupe_skus  = ! array_key_exists( 'dedupe_skus', $format_spec ) || ! empty( $format_spec['dedupe_skus'] );
+                        $ordered_skus = array();
                         foreach ( $skus as $sku ) {
                                 $sku = trim( (string) $sku );
                                 if ( '' === $sku ) {
                                         continue;
                                 }
-                                $key = function_exists( 'mb_strtolower' ) ? mb_strtolower( $sku ) : strtolower( $sku );
-                                if ( isset( $unique_skus[ $key ] ) ) {
-                                        continue;
+                                if ( $dedupe_skus ) {
+                                        $key = function_exists( 'mb_strtolower' ) ? mb_strtolower( $sku ) : strtolower( $sku );
+                                        if ( isset( $ordered_skus[ $key ] ) ) {
+                                                continue;
+                                        }
+                                        $ordered_skus[ $key ] = $sku;
+                                } else {
+                                        $ordered_skus[] = $sku;
                                 }
-                                $unique_skus[ $key ] = $sku;
                         }
 
-                        if ( empty( $unique_skus ) ) {
+                        if ( empty( $ordered_skus ) ) {
                                 return __( 'Jeg fant ingen gyldige SKU-er i meldingen. Oppgi SKU-ene du vil sjekke.', 'lpr-backorder-allocator' );
                         }
 
-                        $lines = array(
-                                __( 'Oversikt over åpne innkjøpslinjer for oppgitte SKU-er (kun systemdata):', 'lpr-backorder-allocator' ),
-                        );
+                        $no_bullets                = ! empty( $format_spec['no_bullets'] );
+                        $group_by_sku              = ! empty( $format_spec['group_by_sku'] );
+                        $include_no_results        = ! empty( $format_spec['include_no_results'] );
+                        $avoid_repeat_product_name = ! empty( $format_spec['avoid_repeat_product_name'] );
+                        $line_template             = trim( (string) ( $format_spec['line_template'] ?? '' ) );
+                        $prefix                    = $no_bullets ? '' : '- ';
+                        $lines                     = array();
+                        if ( '' === $line_template ) {
+                                $lines[] = __( 'Oversikt over åpne innkjøpslinjer for oppgitte SKU-er (kun systemdata):', 'lpr-backorder-allocator' );
+                        }
 
-                        foreach ( array_values( $unique_skus ) as $sku ) {
+                        foreach ( array_values( $ordered_skus ) as $sku ) {
                                 $product_ids = self::find_product_ids_by_exact_sku( $sku );
                                 if ( empty( $product_ids ) ) {
-                                        $lines[] = sprintf( '- SKU %1$s: Ingen produkt med eksakt SKU funnet.', $sku );
+                                        if ( $include_no_results || '' === $line_template ) {
+                                                $lines[] = sprintf( '%1$sSKU %2$s: Ingen produkt med eksakt SKU funnet.', $prefix, $sku );
+                                        }
                                         continue;
                                 }
 
                                 $sku_had_rows   = false;
                                 $sku_had_context = false;
+                                $sku_header_added = false;
                                 foreach ( $product_ids as $target_id ) {
                                         $resolved = self::resolve_product_from_target_id( (int) $target_id );
                                         if ( 'resolved' !== ( $resolved['status'] ?? '' ) ) {
@@ -19735,30 +19923,55 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         $product_name = sanitize_text_field( (string) ( $ctx['product_name'] ?? '' ) );
                                         $details = array_values( (array) ( $ctx['open_po_details'] ?? array() ) );
                                         if ( empty( $details ) ) {
-                                                $lines[] = sprintf( '- SKU %1$s (%2$s): Ingen åpne innkjøpslinjer.', $sku, '' !== $product_name ? $product_name : '#' . (int) $target_id );
+                                                if ( $include_no_results || '' === $line_template ) {
+                                                        $lines[] = sprintf( '%1$sSKU %2$s (%3$s): Ingen åpne innkjøpslinjer.', $prefix, $sku, '' !== $product_name ? $product_name : '#' . (int) $target_id );
+                                                }
                                                 continue;
                                         }
 
                                         $sku_had_rows = true;
+                                        if ( $group_by_sku && ! $sku_header_added ) {
+                                                $lines[] = sprintf( 'SKU %s', $sku );
+                                                $sku_header_added = true;
+                                        }
                                         foreach ( $details as $row ) {
                                                 $po_number = sanitize_text_field( (string) ( $row['po_number'] ?? '' ) );
                                                 $po_id     = max( 0, (int) ( $row['po_id'] ?? 0 ) );
                                                 $po_label  = '' !== $po_number ? $po_number : ( $po_id > 0 ? (string) $po_id : __( 'ukjent', 'lpr-backorder-allocator' ) );
                                                 $line_eta  = lpr_allocator_sanitize_ymd( (string) ( $row['eta'] ?? '' ) );
                                                 $qty       = max( 0, (int) ( $row['qty_ordered'] ?? 0 ) );
-                                                $lines[]   = sprintf(
-                                                        '- SKU %1$s | Produkt: %2$s | PO %3$s | Antall: %4$d | Linje-ETA: %5$s',
-                                                        $sku,
-                                                        '' !== $product_name ? $product_name : '#' . (int) $target_id,
-                                                        $po_label,
-                                                        $qty,
-                                                        '' !== $line_eta ? $line_eta : __( 'mangler', 'lpr-backorder-allocator' )
-                                                );
+                                                if ( '' !== $line_template ) {
+                                                        $rendered = strtr(
+                                                                $line_template,
+                                                                array(
+                                                                        '[PO number]'   => $po_label,
+                                                                        '[amount]'      => (string) $qty,
+                                                                        '[line ETA]'    => '' !== $line_eta ? $line_eta : __( 'mangler', 'lpr-backorder-allocator' ),
+                                                                        '[SKU]'         => $sku,
+                                                                        '[Product name]'=> '' !== $product_name ? $product_name : '#' . (int) $target_id,
+                                                                )
+                                                        );
+                                                        $lines[] = $rendered;
+                                                } else {
+                                                        $product_part = $avoid_repeat_product_name ? '' : sprintf( ' | Produkt: %s', '' !== $product_name ? $product_name : '#' . (int) $target_id );
+                                                        $line_prefix  = $group_by_sku ? '  ' : $prefix;
+                                                        $lines[]      = sprintf(
+                                                                '%1$sSKU %2$s%3$s | PO %4$s | Antall: %5$d | Linje-ETA: %6$s',
+                                                                $line_prefix,
+                                                                $sku,
+                                                                $product_part,
+                                                                $po_label,
+                                                                $qty,
+                                                                '' !== $line_eta ? $line_eta : __( 'mangler', 'lpr-backorder-allocator' )
+                                                        );
+                                                }
                                         }
                                 }
 
                                 if ( ! $sku_had_rows && ! $sku_had_context ) {
-                                        $lines[] = sprintf( '- SKU %1$s: Ingen åpne innkjøpslinjer med incoming antall.', $sku );
+                                        if ( $include_no_results || '' === $line_template ) {
+                                                $lines[] = sprintf( '%1$sSKU %2$s: Ingen åpne innkjøpslinjer med incoming antall.', $prefix, $sku );
+                                        }
                                 }
                         }
 
@@ -23387,6 +23600,30 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         );
                         $invalid_po_validation = lpr_allocator_validate_ai_action_payload( $invalid_po_payload );
                         $results['followup_po_id_numeric_integrity'] = ! empty( $invalid_po_validation['is_valid'] ) ? false : in_array( 'identifiers.po_id must be a numeric internal PO post ID.', (array) ( $invalid_po_validation['errors'] ?? array() ), true );
+
+                        $format_intent = function_exists( __NAMESPACE__ . '\lpr_allocator_extract_formatting_intent' )
+                                ? lpr_allocator_extract_formatting_intent( 'Group by SKU. Do not use bullet points. Use this exact line format: PO: [PO number] | Quantity: [amount] | ETA: [line ETA]. Include SKUs with no results. Keep the original SKU order. Do not repeat product name.' )
+                                : array();
+                        $results['format_intent_group_by_sku'] = 'sku' === (string) ( $format_intent['group_by'] ?? '' );
+                        $results['format_intent_no_bullets'] = ! empty( $format_intent['no_bullets'] );
+                        $results['format_intent_template_detected'] = false !== strpos( (string) ( $format_intent['line_template'] ?? '' ), 'PO:' );
+                        $results['format_intent_include_no_results'] = ! empty( $format_intent['include_empty_items'] );
+                        $results['format_intent_preserve_order'] = ! empty( $format_intent['preserve_input_order'] );
+                        $results['format_intent_no_repeat_product'] = ! empty( $format_intent['avoid_repeat_product_name'] );
+                        $results['format_intent_dedupe_default'] = ! empty( $format_intent['dedupe_identifiers'] );
+
+                        $format_validation_no_bullets = function_exists( __NAMESPACE__ . '\lpr_allocator_validate_informational_format' )
+                                ? lpr_allocator_validate_informational_format( "- PO: 123\n- PO: 124", array( 'no_bullets' => true ) )
+                                : array( 'valid' => true );
+                        $results['format_validation_detects_bullets'] = empty( $format_validation_no_bullets['valid'] );
+                        $format_validation_prefix = function_exists( __NAMESPACE__ . '\lpr_allocator_validate_informational_format' )
+                                ? lpr_allocator_validate_informational_format( "PO: 123 | Quantity: 2\nPO: 124 | Quantity: 5", array( 'line_prefix' => 'PO:' ) )
+                                : array( 'valid' => false );
+                        $results['format_validation_accepts_prefix'] = ! empty( $format_validation_prefix['valid'] );
+                        $format_validation_grouped = function_exists( __NAMESPACE__ . '\lpr_allocator_validate_informational_format' )
+                                ? lpr_allocator_validate_informational_format( "SKU ABC\nPO: 123\nSKU XYZ\nPO: 456", array( 'group_by' => 'sku' ) )
+                                : array( 'valid' => false );
+                        $results['format_validation_accepts_grouped_sku'] = ! empty( $format_validation_grouped['valid'] );
 
                         $all_passed = ! in_array( false, $results, true );
                         $report_lines = array(
