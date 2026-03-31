@@ -168,7 +168,7 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_generate_ai_assistant_re
          * @return string
          */
         function lpr_allocator_ai_assistant_system_instruction(): string {
-                return 'You are an internal assistant for PO allocator admins. Always follow a strict two-step workflow for any change proposal: (1) prepare a draft proposal bundle and human-readable confirmation preview; (2) only after explicit user confirmation may the controller execute it. Never claim a live change is applied before confirmation. For informational inventory/open-PO questions, answer only from provided plugin context and never invent PO numbers, ETA dates, quantities, suppliers, or availability. If product or PO matching is ambiguous, ask a clarifying question. For actionable requests, produce machine-usable action payloads internally and keep conversational_text simple and human-readable. Never output diagnostic/advisory JSON blobs in normal user-facing text. Use one of these action types when applicable: create_po_draft, update_eta_draft, update_delivery_date_draft, update_quantity_draft, replace_po_draft_product. Include identifiers.po_id whenever a concrete PO is known. JSON shape: {"conversational_text":"string","action":{"action_type":"...","target_entity":"string","identifiers":{"key":"value"},"line_changes":[{"line_identifier":"string","quantity":1,"eta_date":"YYYY-MM-DD","delivery_date":"YYYY-MM-DD","new_product_id":123,"notes":"string"}],"confidence":0.0,"notes":"string"}}. For informational/non-actionable requests, return {"conversational_text":"string","action":null}.';
+                return 'You are an internal assistant for PO allocator admins. Always follow a strict two-step workflow for any change proposal: (1) prepare a draft proposal bundle and human-readable confirmation preview; (2) only after explicit user confirmation may the controller execute it. Never claim a live change is applied before confirmation. For informational inventory/open-PO questions, answer only from provided plugin context and never invent PO numbers, ETA dates, quantities, suppliers, or availability. If product or PO matching is ambiguous, ask a clarifying question. For actionable requests, produce machine-usable action payloads internally and keep conversational_text simple and human-readable. Never output diagnostic/advisory JSON blobs in normal user-facing text. Use one of these action types when applicable: create_po_draft, update_eta_draft, update_delivery_date_draft, update_quantity_draft, replace_po_draft_product. Include identifiers.po_id whenever a concrete existing PO is known for update/replace actions. For create_po_draft do not request PO number, because the PO does not exist yet; ask for missing supplier, products, quantities, and optional ETA/delivery notes before proposing a draft. JSON shape: {"conversational_text":"string","action":{"action_type":"...","target_entity":"string","identifiers":{"key":"value"},"line_changes":[{"line_identifier":"string","quantity":1,"eta_date":"YYYY-MM-DD","delivery_date":"YYYY-MM-DD","new_product_id":123,"notes":"string"}],"confidence":0.0,"notes":"string"}}. For informational/non-actionable requests, return {"conversational_text":"string","action":null}.';
         }
 
         /**
@@ -507,7 +507,7 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_parse_openai_chat_respon
                                 $action = $decoded;
                         }
                 } elseif ( false !== strpos( $text, '{' ) && false !== strpos( $text, '}' ) ) {
-                        $notice       = __( 'Jeg kunne ikke tolke endringsforslaget trygt. Beskriv ønsket endring på nytt med PO og linje.', 'lpr-backorder-allocator' );
+                        $notice       = __( 'Jeg kunne ikke tolke endringsforslaget trygt. Beskriv ønsket endring på nytt med konkrete felter (f.eks. leverandør, produkt, antall, dato).', 'lpr-backorder-allocator' );
                         $action_state = 'advisory_only';
                         $text         = __( 'Jeg fikk ikke laget et trygt utkast denne gangen.', 'lpr-backorder-allocator' );
                 }
@@ -24139,6 +24139,30 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 $history[] = $assistant_turn;
                                 $state     = self::persist_chat_state( $user_id, $history, array_slice( $history, -$context_limit ) );
                                 self::record_request_meta( $user_id, $model, 0.0, 'success' );
+                                while ( ob_get_level() > 0 ) {
+                                        ob_end_clean();
+                                }
+                                wp_send_json_success(
+                                        array(
+                                                'assistant'              => $assistant_turn,
+                                                'history'                => $state['history'],
+                                                'draft_bundles'          => self::get_draft_bundles( $user_id ),
+                                                'reconciliation_summary' => array(),
+                                        )
+                                );
+                        }
+                        if ( empty( $pending_confirmation ) && self::is_chat_confirmation_message( $latest_message ) ) {
+                                $assistant_turn = array(
+                                        'role'          => 'assistant',
+                                        'message'       => __( 'Jeg finner ingen klargjort endring å bekrefte akkurat nå. Be meg først lage et forslag, så kan du svare «bekreft».', 'lpr-backorder-allocator' ),
+                                        'time'          => wp_date( 'Y-m-d H:i:s' ),
+                                        'action_payload'=> null,
+                                        'action_status' => 'none',
+                                        'action_notice' => '',
+                                );
+                                $history[] = $assistant_turn;
+                                $state     = self::persist_chat_state( $user_id, $history, array_slice( $history, -$context_limit ) );
+                                self::record_request_meta( $user_id, $model, 0.0, 'blocked' );
                                 while ( ob_get_level() > 0 ) {
                                         ob_end_clean();
                                 }
