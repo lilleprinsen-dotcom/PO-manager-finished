@@ -213,6 +213,13 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_resolve_ai_model' ) ) {
 
 if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_build_ai_chat_payload' ) ) {
         /**
+         * Resolve the output-token parameter name for the configured model.
+         */
+        function lpr_allocator_ai_max_tokens_field( string $model ): string {
+                return 0 === strpos( $model, 'gpt-5' ) ? 'max_completion_tokens' : 'max_tokens';
+        }
+
+        /**
          * Build a compact OpenAI chat payload from admin/user input plus a short system instruction.
          *
          * @param string $admin_message      Admin-provided user message.
@@ -223,6 +230,7 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_build_ai_chat_payload' )
         function lpr_allocator_build_ai_chat_payload( string $admin_message, string $system_instruction, array $settings = array() ): array {
                 $model             = lpr_allocator_resolve_ai_model( isset( $settings['ai_model'] ) ? sanitize_text_field( (string) $settings['ai_model'] ) : 'gpt-4o-mini' );
                 $max_output_tokens = isset( $settings['ai_max_output_tokens'] ) ? max( 64, (int) $settings['ai_max_output_tokens'] ) : 800;
+                $max_tokens_field  = lpr_allocator_ai_max_tokens_field( $model );
 
                 $system_content = trim( wp_strip_all_tags( $system_instruction ) );
                 $user_content   = trim( (string) $admin_message );
@@ -240,11 +248,13 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_build_ai_chat_payload' )
                         'content' => $user_content,
                 );
 
-                return array(
+                $payload = array(
                         'model'      => $model,
                         'messages'   => $messages,
-                        'max_tokens' => $max_output_tokens,
                 );
+                $payload[ $max_tokens_field ] = $max_output_tokens;
+
+                return $payload;
         }
 }
 
@@ -382,6 +392,7 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_generate_ai_assistant_re
                 $system_instruction = lpr_allocator_ai_assistant_system_instruction();
                 $model              = lpr_allocator_resolve_ai_model( isset( $settings['ai_model'] ) ? sanitize_text_field( (string) $settings['ai_model'] ) : 'gpt-4o-mini' );
                 $max_output_tokens  = isset( $settings['ai_max_output_tokens'] ) ? max( 64, (int) $settings['ai_max_output_tokens'] ) : 800;
+                $max_tokens_field   = lpr_allocator_ai_max_tokens_field( $model );
                 $format_intent      = lpr_allocator_extract_formatting_intent( $latest_user_message );
 
                 $messages = array(
@@ -421,8 +432,8 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_generate_ai_assistant_re
                 $payload = array(
                         'model'      => $model,
                         'messages'   => $messages,
-                        'max_tokens' => $max_output_tokens,
                 );
+                $payload[ $max_tokens_field ] = $max_output_tokens;
 
                 $result = lpr_allocator_openai_chat_request( $payload, $settings );
                 $parsed = lpr_allocator_parse_openai_chat_response( $result['response'], (float) ( $result['latency_ms'] ?? 0.0 ) );
@@ -442,8 +453,8 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_generate_ai_assistant_re
                                 $retry_payload = array(
                                         'model'      => $model,
                                         'messages'   => $messages_retry,
-                                        'max_tokens' => $max_output_tokens,
                                 );
+                                $retry_payload[ $max_tokens_field ] = $max_output_tokens;
                                 $retry_result = lpr_allocator_openai_chat_request( $retry_payload, $settings );
                                 $retry_parsed = lpr_allocator_parse_openai_chat_response( $retry_result['response'], (float) ( $retry_result['latency_ms'] ?? 0.0 ) + (float) ( $parsed['latency_ms'] ?? 0.0 ) );
                                 if ( empty( $retry_parsed['error_code'] ) && 'none' === (string) ( $retry_parsed['action_status'] ?? 'none' ) ) {
