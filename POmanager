@@ -18832,6 +18832,37 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         return array_values( array_unique( $tokens ) );
                 }
 
+                protected static function detect_explicit_skus_from_message( string $message ): array {
+                        $text = trim( $message );
+                        if ( '' === $text ) {
+                                return array();
+                        }
+
+                        preg_match_all( '/\b([a-z0-9._-]{5,})\b/ui', $text, $matches );
+                        $raw_tokens = isset( $matches[1] ) && is_array( $matches[1] ) ? $matches[1] : array();
+                        $skus = array();
+                        foreach ( $raw_tokens as $token ) {
+                                $sku = trim( (string) $token );
+                                if ( '' === $sku ) {
+                                        continue;
+                                }
+                                if ( ! preg_match( '/\d/', $sku ) ) {
+                                        continue;
+                                }
+                                $lower = function_exists( 'mb_strtolower' ) ? mb_strtolower( $sku ) : strtolower( $sku );
+                                if ( isset( $skus[ $lower ] ) ) {
+                                        continue;
+                                }
+                                $skus[ $lower ] = $sku;
+                        }
+
+                        return array_values( $skus );
+                }
+
+                protected static function has_explicit_sku_batch( string $message ): bool {
+                        return count( self::detect_explicit_skus_from_message( $message ) ) >= 2;
+                }
+
                 protected static function detect_explicit_sku_from_message( string $message ): string {
                         $text = trim( $message );
                         if ( preg_match( '/\bsku(?:en)?\s*(?:er|[:#-])?\s*([a-z0-9._-]{2,})\b/i', $text, $m ) ) {
@@ -19515,7 +19546,106 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                  * Deterministic informational reply for incoming/open-PO questions.
                  */
                 protected static function build_inventory_information_reply( string $message ): array {
+                        $explicit_skus = self::detect_explicit_skus_from_message( $message );
+                        if ( count( $explicit_skus ) >= 2 ) {
+                                return self::format_information_response( self::build_multi_sku_inventory_information_reply( $explicit_skus ) );
+                        }
                         return self::build_allocator_information_reply( $message, self::inventory_query_intent( $message ) );
+                }
+
+                protected static function find_product_ids_by_exact_sku( string $sku ): array {
+                        $sku = trim( $sku );
+                        if ( '' === $sku ) {
+                                return array();
+                        }
+                        $ids = get_posts(
+                                array(
+                                        'post_type'      => array( 'product', 'product_variation' ),
+                                        'post_status'    => array( 'publish', 'private', 'draft' ),
+                                        'posts_per_page' => 20,
+                                        'fields'         => 'ids',
+                                        'meta_key'       => '_sku',
+                                        'meta_value'     => $sku,
+                                )
+                        );
+                        return array_values( array_unique( array_map( 'intval', (array) $ids ) ) );
+                }
+
+                protected static function build_multi_sku_inventory_information_reply( array $skus ): string {
+                        $unique_skus = array();
+                        foreach ( $skus as $sku ) {
+                                $sku = trim( (string) $sku );
+                                if ( '' === $sku ) {
+                                        continue;
+                                }
+                                $key = function_exists( 'mb_strtolower' ) ? mb_strtolower( $sku ) : strtolower( $sku );
+                                if ( isset( $unique_skus[ $key ] ) ) {
+                                        continue;
+                                }
+                                $unique_skus[ $key ] = $sku;
+                        }
+
+                        if ( empty( $unique_skus ) ) {
+                                return __( 'Jeg fant ingen gyldige SKU-er i meldingen. Oppgi SKU-ene du vil sjekke.', 'lpr-backorder-allocator' );
+                        }
+
+                        $lines = array(
+                                __( 'Oversikt over åpne innkjøpslinjer for oppgitte SKU-er (kun systemdata):', 'lpr-backorder-allocator' ),
+                        );
+
+                        foreach ( array_values( $unique_skus ) as $sku ) {
+                                $product_ids = self::find_product_ids_by_exact_sku( $sku );
+                                if ( empty( $product_ids ) ) {
+                                        $lines[] = sprintf( '- SKU %1$s: Ingen produkt med eksakt SKU funnet.', $sku );
+                                        continue;
+                                }
+
+                                $sku_had_rows   = false;
+                                $sku_had_context = false;
+                                foreach ( $product_ids as $target_id ) {
+                                        $resolved = self::resolve_product_from_target_id( (int) $target_id );
+                                        if ( 'resolved' !== ( $resolved['status'] ?? '' ) ) {
+                                                continue;
+                                        }
+                                        $ctx = self::build_assistant_inventory_context(
+                                                (int) ( $resolved['product_id'] ?? 0 ),
+                                                (int) ( $resolved['variation_id'] ?? 0 )
+                                        );
+                                        if ( empty( $ctx ) ) {
+                                                continue;
+                                        }
+                                        $sku_had_context = true;
+                                        $product_name = sanitize_text_field( (string) ( $ctx['product_name'] ?? '' ) );
+                                        $details = array_values( (array) ( $ctx['open_po_details'] ?? array() ) );
+                                        if ( empty( $details ) ) {
+                                                $lines[] = sprintf( '- SKU %1$s (%2$s): Ingen åpne innkjøpslinjer.', $sku, '' !== $product_name ? $product_name : '#' . (int) $target_id );
+                                                continue;
+                                        }
+
+                                        $sku_had_rows = true;
+                                        foreach ( $details as $row ) {
+                                                $po_number = sanitize_text_field( (string) ( $row['po_number'] ?? '' ) );
+                                                $po_id     = max( 0, (int) ( $row['po_id'] ?? 0 ) );
+                                                $po_label  = '' !== $po_number ? $po_number : ( $po_id > 0 ? (string) $po_id : __( 'ukjent', 'lpr-backorder-allocator' ) );
+                                                $line_eta  = lpr_allocator_sanitize_ymd( (string) ( $row['eta'] ?? '' ) );
+                                                $qty       = max( 0, (int) ( $row['qty_ordered'] ?? 0 ) );
+                                                $lines[]   = sprintf(
+                                                        '- SKU %1$s | Produkt: %2$s | PO %3$s | Antall: %4$d | Linje-ETA: %5$s',
+                                                        $sku,
+                                                        '' !== $product_name ? $product_name : '#' . (int) $target_id,
+                                                        $po_label,
+                                                        $qty,
+                                                        '' !== $line_eta ? $line_eta : __( 'mangler', 'lpr-backorder-allocator' )
+                                                );
+                                        }
+                                }
+
+                                if ( ! $sku_had_rows && ! $sku_had_context ) {
+                                        $lines[] = sprintf( '- SKU %1$s: Ingen åpne innkjøpslinjer med incoming antall.', $sku );
+                                }
+                        }
+
+                        return implode( "\n", $lines );
                 }
 
                 protected static function build_allocator_information_reply( string $message, array $intent ): array {
@@ -24355,7 +24485,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         $has_actionable_followup_intent = ! empty( $deterministic_followup['actionable_intent'] );
                         if ( ! empty( $deterministic_followup['handled'] ) && isset( $deterministic_followup['parsed'] ) && is_array( $deterministic_followup['parsed'] ) ) {
                                 $parsed = $deterministic_followup['parsed'];
-                        } elseif ( ! $has_actionable_followup_intent && self::is_inventory_information_query( $latest_message ) ) {
+                        } elseif ( ! $has_actionable_followup_intent && ( self::is_inventory_information_query( $latest_message ) || self::has_explicit_sku_batch( $latest_message ) ) ) {
                                 $parsed = self::build_inventory_information_reply( $latest_message );
                                 $parsed['latency_ms']   = 0.0;
                                 $parsed['error_code']   = '';
