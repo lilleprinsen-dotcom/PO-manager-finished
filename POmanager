@@ -124,6 +124,93 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_is_incoming_request' ) )
 }
 
 
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_supported_ai_models' ) ) {
+        /**
+         * Central source of truth for selectable AI models.
+         *
+         * @return array<string,array{label:string,category:string,recommended_use:string}>
+         */
+        function lpr_allocator_supported_ai_models(): array {
+                return array(
+                        'gpt-5.2' => array(
+                                'label'           => 'gpt-5.2',
+                                'category'        => 'GPT-5',
+                                'recommended_use' => __( 'Best overall', 'lpr-backorder-allocator' ),
+                        ),
+                        'gpt-5.2-codex' => array(
+                                'label'           => 'gpt-5.2-codex',
+                                'category'        => 'GPT-5',
+                                'recommended_use' => __( 'Best for coding', 'lpr-backorder-allocator' ),
+                        ),
+                        'gpt-5-mini' => array(
+                                'label'           => 'gpt-5-mini',
+                                'category'        => 'GPT-5',
+                                'recommended_use' => __( 'Fast / lower cost', 'lpr-backorder-allocator' ),
+                        ),
+                        'gpt-4o-mini' => array(
+                                'label'           => 'gpt-4o-mini',
+                                'category'        => 'GPT-4o',
+                                'recommended_use' => __( 'Legacy balanced option', 'lpr-backorder-allocator' ),
+                        ),
+                        'gpt-4o' => array(
+                                'label'           => 'gpt-4o',
+                                'category'        => 'GPT-4o',
+                                'recommended_use' => __( 'Legacy quality option', 'lpr-backorder-allocator' ),
+                        ),
+                        'gpt-4.1-mini' => array(
+                                'label'           => 'gpt-4.1-mini',
+                                'category'        => 'GPT-4.1',
+                                'recommended_use' => __( 'Legacy fast option', 'lpr-backorder-allocator' ),
+                        ),
+                        'gpt-4.1' => array(
+                                'label'           => 'gpt-4.1',
+                                'category'        => 'GPT-4.1',
+                                'recommended_use' => __( 'Legacy reasoning option', 'lpr-backorder-allocator' ),
+                        ),
+                );
+        }
+}
+
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_ai_model_select_options' ) ) {
+        /**
+         * Build select options from the shared supported model map.
+         *
+         * @return array<string,string>
+         */
+        function lpr_allocator_ai_model_select_options(): array {
+                $options = array();
+                foreach ( lpr_allocator_supported_ai_models() as $model_id => $meta ) {
+                        $label = isset( $meta['label'] ) ? (string) $meta['label'] : $model_id;
+                        $recommended_use = isset( $meta['recommended_use'] ) ? trim( (string) $meta['recommended_use'] ) : '';
+                        $options[ $model_id ] = '' !== $recommended_use
+                                ? sprintf( '%s — %s', $label, $recommended_use )
+                                : $label;
+                }
+
+                return $options;
+        }
+}
+
+if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_resolve_ai_model' ) ) {
+        /**
+         * Validate and normalize a selected AI model against the shared model map.
+         */
+        function lpr_allocator_resolve_ai_model( string $candidate_model, string $fallback_model = 'gpt-4o-mini' ): string {
+                $supported_models = lpr_allocator_supported_ai_models();
+                if ( isset( $supported_models[ $candidate_model ] ) ) {
+                        return $candidate_model;
+                }
+
+                if ( isset( $supported_models[ $fallback_model ] ) ) {
+                        return $fallback_model;
+                }
+
+                $model_ids = array_keys( $supported_models );
+                return ! empty( $model_ids ) ? (string) $model_ids[0] : 'gpt-4o-mini';
+        }
+}
+
+
 if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_build_ai_chat_payload' ) ) {
         /**
          * Build a compact OpenAI chat payload from admin/user input plus a short system instruction.
@@ -134,7 +221,7 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_build_ai_chat_payload' )
          * @return array
          */
         function lpr_allocator_build_ai_chat_payload( string $admin_message, string $system_instruction, array $settings = array() ): array {
-                $model             = isset( $settings['ai_model'] ) ? sanitize_text_field( (string) $settings['ai_model'] ) : 'gpt-4o-mini';
+                $model             = lpr_allocator_resolve_ai_model( isset( $settings['ai_model'] ) ? sanitize_text_field( (string) $settings['ai_model'] ) : 'gpt-4o-mini' );
                 $max_output_tokens = isset( $settings['ai_max_output_tokens'] ) ? max( 64, (int) $settings['ai_max_output_tokens'] ) : 800;
 
                 $system_content = trim( wp_strip_all_tags( $system_instruction ) );
@@ -181,7 +268,7 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_generate_ai_assistant_re
          */
         function lpr_allocator_generate_ai_assistant_reply( string $latest_user_message, array $conversation_context = array(), array $settings = array() ): array {
                 $system_instruction = lpr_allocator_ai_assistant_system_instruction();
-                $model              = isset( $settings['ai_model'] ) ? sanitize_text_field( (string) $settings['ai_model'] ) : 'gpt-4o-mini';
+                $model              = lpr_allocator_resolve_ai_model( isset( $settings['ai_model'] ) ? sanitize_text_field( (string) $settings['ai_model'] ) : 'gpt-4o-mini' );
                 $max_output_tokens  = isset( $settings['ai_max_output_tokens'] ) ? max( 64, (int) $settings['ai_max_output_tokens'] ) : 800;
 
                 $messages = array(
@@ -567,6 +654,20 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_parse_openai_chat_respon
                                 $normalized['error_message'] = sanitize_text_field( (string) $decoded['error']['message'] );
                         } else {
                                 $normalized['error_message'] = sprintf( 'OpenAI request failed with status %d.', $status_code );
+                        }
+
+                        $error_type = is_array( $decoded ) && isset( $decoded['error']['type'] )
+                                ? strtolower( sanitize_key( (string) $decoded['error']['type'] ) )
+                                : '';
+                        $error_message_lc = strtolower( $normalized['error_message'] );
+                        if (
+                                false !== strpos( $error_type, 'model' )
+                                || (
+                                        false !== strpos( $error_message_lc, 'model' )
+                                        && ( false !== strpos( $error_message_lc, 'not found' ) || false !== strpos( $error_message_lc, 'does not exist' ) || false !== strpos( $error_message_lc, 'unsupported' ) )
+                                )
+                        ) {
+                                $normalized['error_code'] = 'unsupported_model';
                         }
 
                         return $normalized;
@@ -985,16 +1086,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                         $ai_enabled = isset( $raw['ai_enabled'] ) ? (bool) $raw['ai_enabled'] : (bool) $defaults['ai_enabled'];
                         $ai_api_key = isset( $raw['ai_api_key'] ) ? sanitize_text_field( (string) $raw['ai_api_key'] ) : (string) $defaults['ai_api_key'];
 
-                        $allowed_ai_models = array(
-                                'gpt-4.1-mini',
-                                'gpt-4.1',
-                                'gpt-4o-mini',
-                                'gpt-4o',
+                        $ai_model = lpr_allocator_resolve_ai_model(
+                                isset( $raw['ai_model'] ) ? sanitize_text_field( (string) $raw['ai_model'] ) : (string) $defaults['ai_model'],
+                                (string) $defaults['ai_model']
                         );
-                        $ai_model = isset( $raw['ai_model'] ) ? sanitize_text_field( (string) $raw['ai_model'] ) : (string) $defaults['ai_model'];
-                        if ( ! in_array( $ai_model, $allowed_ai_models, true ) ) {
-                                $ai_model = (string) $defaults['ai_model'];
-                        }
 
                         $ai_timeout = isset( $raw['ai_timeout'] ) ? (int) $raw['ai_timeout'] : (int) $defaults['ai_timeout'];
                         if ( $ai_timeout < 5 || $ai_timeout > 120 ) {
@@ -1288,12 +1383,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                         'title'       => __( 'Model', 'lpr-backorder-allocator' ),
                                         'id'          => 'lpr_allocator_ai_model',
                                         'type'        => 'select',
-                                        'options'     => array(
-                                                'gpt-4o-mini'  => 'gpt-4o-mini',
-                                                'gpt-4o'       => 'gpt-4o',
-                                                'gpt-4.1-mini' => 'gpt-4.1-mini',
-                                                'gpt-4.1'      => 'gpt-4.1',
-                                        ),
+                                        'options'     => lpr_allocator_ai_model_select_options(),
                                         'default'     => $defaults['ai_model'],
                                 ),
 
@@ -1782,12 +1872,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                         'title'   => __( 'AI model', 'lpr-backorder-allocator' ),
                                         'id'      => 'lpr_allocator_ai_model',
                                         'type'    => 'select',
-                                        'options' => array(
-                                                'gpt-4o-mini'  => 'gpt-4o-mini',
-                                                'gpt-4o'       => 'gpt-4o',
-                                                'gpt-4.1-mini' => 'gpt-4.1-mini',
-                                                'gpt-4.1'      => 'gpt-4.1',
-                                        ),
+                                        'options' => lpr_allocator_ai_model_select_options(),
                                         'default' => $defaults['ai_model'],
                                 ),
 
@@ -23571,6 +23656,8 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 $code = 'http_503';
                         } elseif ( false !== strpos( $error_code_lc, 'http_401' ) || false !== strpos( $error_code_lc, 'invalid_api_key' ) ) {
                                 $code = 'invalid_key';
+                        } elseif ( false !== strpos( $error_code_lc, 'unsupported_model' ) || false !== strpos( $error_message_lc, 'model' ) && ( false !== strpos( $error_message_lc, 'not found' ) || false !== strpos( $error_message_lc, 'does not exist' ) || false !== strpos( $error_message_lc, 'unsupported' ) ) ) {
+                                $code = 'unsupported_model';
                         } elseif ( false !== strpos( $error_code_lc, 'http_429' ) || false !== strpos( $error_code_lc, 'rate_limit' ) ) {
                                 $code = 'rate_limit';
                         } elseif ( false !== strpos( $error_code_lc, 'timeout' ) || false !== strpos( $error_code_lc, 'timed_out' ) || false !== strpos( $error_message_lc, 'timed out' ) ) {
@@ -23581,6 +23668,8 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         if ( '' === $message ) {
                                 if ( 'invalid_key' === $code ) {
                                         $message = __( 'Invalid API key. Please verify AI assistant credentials in settings.', 'lpr-backorder-allocator' );
+                                } elseif ( 'unsupported_model' === $code ) {
+                                        $message = __( 'Selected AI model is unavailable for this API key or endpoint. Choose another model in settings and retry.', 'lpr-backorder-allocator' );
                                 } elseif ( 'rate_limit' === $code ) {
                                         $message = __( 'Rate limit reached. Please wait and try again.', 'lpr-backorder-allocator' );
                                 } elseif ( 'timeout' === $code ) {
@@ -24421,7 +24510,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         }
 
                         $settings = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array();
-                        $model    = isset( $settings['ai_model'] ) ? sanitize_text_field( (string) $settings['ai_model'] ) : $model;
+                        $model    = lpr_allocator_resolve_ai_model( isset( $settings['ai_model'] ) ? sanitize_text_field( (string) $settings['ai_model'] ) : $model, $model );
                         $has_upload = ! empty( $_FILES['assistant_file'] ) && is_array( $_FILES['assistant_file'] );
                         if ( $has_upload && ! self::can_upload_assistant_file() ) {
                                 while ( ob_get_level() > 0 ) {
@@ -25040,14 +25129,14 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                                 $history = $state['history'];
                                                 self::record_request_meta(
                                                         $user_id,
-                                                        (string) ( $settings['ai_model'] ?? 'gpt-4o-mini' ),
+                                                        lpr_allocator_resolve_ai_model( (string) ( $settings['ai_model'] ?? 'gpt-4o-mini' ) ),
                                                         (float) ( $parsed['latency_ms'] ?? 0.0 ),
                                                         empty( $parsed['error_code'] ) ? 'success' : 'error'
                                                 );
                                         } else {
                                                 self::record_request_meta(
                                                         $user_id,
-                                                        (string) ( $settings['ai_model'] ?? 'gpt-4o-mini' ),
+                                                        lpr_allocator_resolve_ai_model( (string) ( $settings['ai_model'] ?? 'gpt-4o-mini' ) ),
                                                         0.0,
                                                         'blocked'
                                                 );
