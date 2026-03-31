@@ -255,7 +255,7 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_generate_ai_assistant_re
          * @return string
          */
         function lpr_allocator_ai_assistant_system_instruction(): string {
-                return 'You are an internal assistant for PO allocator admins. Always follow a strict two-step workflow for any change proposal: (1) prepare a draft proposal bundle and human-readable confirmation preview; (2) only after explicit user confirmation may the controller execute it. Never claim a live change is applied before confirmation. For informational inventory/open-PO questions, answer only from provided plugin context and never invent PO numbers, ETA dates, quantities, suppliers, or availability. If product or PO matching is ambiguous, ask a clarifying question. For actionable requests, produce machine-usable action payloads internally and keep conversational_text simple and human-readable. Never output diagnostic/advisory JSON blobs in normal user-facing text. Use one of these action types when applicable: create_po_draft, update_eta_draft, update_delivery_date_draft, update_quantity_draft, replace_po_draft_product. Include identifiers.po_id whenever a concrete existing PO is known for update/replace actions. For create_po_draft do not request PO number, because the PO does not exist yet; ask for missing supplier, products, quantities, and optional ETA/delivery notes before proposing a draft. JSON shape: {"conversational_text":"string","action":{"action_type":"...","target_entity":"string","identifiers":{"key":"value"},"line_changes":[{"line_identifier":"string","quantity":1,"eta_date":"YYYY-MM-DD","delivery_date":"YYYY-MM-DD","new_product_id":123,"notes":"string"}],"confidence":0.0,"notes":"string"}}. For informational/non-actionable requests, return {"conversational_text":"string","action":null}.';
+                return 'You are an internal assistant for PO allocator admins. Always follow a strict two-step workflow for any change proposal: (1) prepare a draft proposal bundle and human-readable confirmation preview; (2) only after explicit user confirmation may the controller execute it. Never claim a live change is applied before confirmation. For informational inventory/open-PO questions, answer only from provided plugin context and never invent PO numbers, ETA dates, quantities, suppliers, or availability. If product or PO matching is ambiguous, ask a clarifying question. For actionable requests, produce machine-usable action payloads internally and keep conversational_text simple and human-readable. Never output diagnostic/advisory JSON blobs in normal user-facing text. Use one of these action types when applicable: create_po_draft, update_eta_draft, update_delivery_date_draft, update_quantity_draft, replace_po_draft_product. Include identifiers.po_id whenever a concrete existing PO is known for update/replace actions. For create_po_draft do not request PO number, because the PO does not exist yet; ask for missing supplier, products, quantities, and optional ETA/delivery notes before proposing a draft. JSON shape: {"conversational_text":"string","action":{"schema_version":"1.0","action_type":"...","target_entity":"string","identifiers":{"key":"value"},"line_changes":[{"line_identifier":"string","quantity":1,"eta_date":"YYYY-MM-DD","delivery_date":"YYYY-MM-DD","new_product_id":123,"notes":"string"}],"confidence":0.0,"notes":"string"}}. For informational/non-actionable requests, return {"conversational_text":"string","action":null}.';
         }
 
         /**
@@ -462,6 +462,15 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_parse_openai_chat_respon
                         );
                 }
 
+                $schema_version = isset( $payload['schema_version'] ) ? sanitize_text_field( (string) $payload['schema_version'] ) : '';
+                if ( '' === $schema_version ) {
+                        $schema_version = '1.0';
+                }
+                if ( ! preg_match( '/^\d+\.\d+$/', $schema_version ) ) {
+                        $errors[] = 'schema_version must be a dotted numeric string (e.g. 1.0).';
+                }
+                $payload['schema_version'] = $schema_version;
+
                 $action_type = isset( $payload['action_type'] ) ? sanitize_key( (string) $payload['action_type'] ) : '';
                 if ( ! in_array( $action_type, lpr_allocator_supported_ai_action_types(), true ) ) {
                         $errors[] = 'Unsupported action type.';
@@ -577,6 +586,12 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_parse_openai_chat_respon
 
                 if ( ! is_array( $decoded ) && preg_match( '/```json\s*(\{.*\})\s*```/is', $text, $matches ) ) {
                         $decoded = json_decode( (string) $matches[1], true );
+                }
+                if ( ! is_array( $decoded ) && preg_match( '/\{.*\}/s', $text, $json_match ) ) {
+                        $candidate = trim( (string) $json_match[0] );
+                        $candidate = preg_replace( '/,\s*([}\]])/', '$1', $candidate );
+                        $candidate = str_replace( array( '“', '”', '’' ), array( '"', '"', "'" ), (string) $candidate );
+                        $decoded = json_decode( (string) $candidate, true );
                 }
 
                 if ( is_array( $decoded ) ) {
@@ -18680,6 +18695,14 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         return 20;
                 }
 
+                protected static function remembered_context_ttl_seconds(): int {
+                        return 6 * HOUR_IN_SECONDS;
+                }
+
+                protected static function pending_confirmation_ttl_seconds(): int {
+                        return 30 * MINUTE_IN_SECONDS;
+                }
+
                 protected static function normalize_pending_chat_confirmation( $raw ): array {
                         if ( ! is_array( $raw ) ) {
                                 return array();
@@ -18737,7 +18760,16 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                 }
 
                 protected static function get_pending_chat_confirmation( int $user_id ): array {
-                        return self::normalize_pending_chat_confirmation( get_user_meta( $user_id, self::pending_chat_confirmation_meta_key(), true ) );
+                        $normalized = self::normalize_pending_chat_confirmation( get_user_meta( $user_id, self::pending_chat_confirmation_meta_key(), true ) );
+                        if ( empty( $normalized ) ) {
+                                return array();
+                        }
+                        $created_at = isset( $normalized['created_at'] ) ? strtotime( (string) $normalized['created_at'] ) : 0;
+                        if ( $created_at > 0 && ( time() - $created_at ) > self::pending_confirmation_ttl_seconds() ) {
+                                self::clear_pending_chat_confirmation( $user_id );
+                                return array();
+                        }
+                        return $normalized;
                 }
 
                 protected static function clear_pending_chat_confirmation( int $user_id ): void {
@@ -20492,7 +20524,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         if ( ! is_array( $raw ) ) {
                                 return array();
                         }
-                        return array(
+                        $normalized = array(
                                 'product_id'   => max( 0, (int) ( $raw['product_id'] ?? 0 ) ),
                                 'variation_id' => max( 0, (int) ( $raw['variation_id'] ?? 0 ) ),
                                 'target_id'    => max( 0, (int) ( $raw['target_id'] ?? 0 ) ),
@@ -20500,6 +20532,12 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 'sku'          => sanitize_text_field( (string) ( $raw['sku'] ?? '' ) ),
                                 'remembered_at'=> sanitize_text_field( (string) ( $raw['remembered_at'] ?? '' ) ),
                         );
+                        $remembered_at = strtotime( (string) ( $normalized['remembered_at'] ?? '' ) );
+                        if ( $remembered_at > 0 && ( time() - $remembered_at ) > self::remembered_context_ttl_seconds() ) {
+                                delete_user_meta( $user_id, self::product_context_meta_key() );
+                                return array();
+                        }
+                        return $normalized;
                 }
 
                 protected static function get_remembered_po_context( int $user_id ): array {
@@ -20507,7 +20545,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         if ( ! is_array( $raw ) ) {
                                 return array();
                         }
-                        return array(
+                        $normalized = array(
                                 'po_id'       => max( 0, (int) ( $raw['po_id'] ?? 0 ) ),
                                 'po_number'   => sanitize_text_field( (string) ( $raw['po_number'] ?? '' ) ),
                                 'line_identifier' => sanitize_text_field( (string) ( $raw['line_identifier'] ?? '' ) ),
@@ -20517,6 +20555,12 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 'sku'         => sanitize_text_field( (string) ( $raw['sku'] ?? '' ) ),
                                 'remembered_at'=> sanitize_text_field( (string) ( $raw['remembered_at'] ?? '' ) ),
                         );
+                        $remembered_at = strtotime( (string) ( $normalized['remembered_at'] ?? '' ) );
+                        if ( $remembered_at > 0 && ( time() - $remembered_at ) > self::remembered_context_ttl_seconds() ) {
+                                delete_user_meta( $user_id, self::po_context_meta_key() );
+                                return array();
+                        }
+                        return $normalized;
                 }
 
                 protected static function get_remembered_order_context( int $user_id ): array {
@@ -20524,11 +20568,17 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         if ( ! is_array( $raw ) ) {
                                 return array();
                         }
-                        return array(
+                        $normalized = array(
                                 'order_id'    => max( 0, (int) ( $raw['order_id'] ?? 0 ) ),
                                 'order_no'    => sanitize_text_field( (string) ( $raw['order_no'] ?? '' ) ),
                                 'remembered_at'=> sanitize_text_field( (string) ( $raw['remembered_at'] ?? '' ) ),
                         );
+                        $remembered_at = strtotime( (string) ( $normalized['remembered_at'] ?? '' ) );
+                        if ( $remembered_at > 0 && ( time() - $remembered_at ) > self::remembered_context_ttl_seconds() ) {
+                                delete_user_meta( $user_id, self::order_context_meta_key() );
+                                return array();
+                        }
+                        return $normalized;
                 }
 
                 protected static function remember_product_context( int $user_id, array $resolved_product ): void {
@@ -20671,6 +20721,11 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 $model     = isset( $entry['model'] ) ? sanitize_text_field( (string) $entry['model'] ) : '';
                                 $duration  = isset( $entry['duration'] ) ? round( (float) $entry['duration'], 2 ) : 0.0;
                                 $status    = isset( $entry['status'] ) ? sanitize_key( (string) $entry['status'] ) : '';
+                                $route_path = isset( $entry['route_path'] ) ? sanitize_key( (string) $entry['route_path'] ) : '';
+                                $intent_type = isset( $entry['intent_type'] ) ? sanitize_key( (string) $entry['intent_type'] ) : '';
+                                $intent_confidence = isset( $entry['intent_confidence'] ) ? max( 0.0, min( 1.0, (float) $entry['intent_confidence'] ) ) : 0.0;
+                                $parse_status = isset( $entry['parse_status'] ) ? sanitize_key( (string) $entry['parse_status'] ) : '';
+                                $validation_failures = isset( $entry['validation_failures'] ) ? max( 0, (int) $entry['validation_failures'] ) : 0;
 
                                 if ( '' === $timestamp || '' === $status ) {
                                         continue;
@@ -20682,6 +20737,11 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         'model'     => $model,
                                         'duration'  => $duration,
                                         'status'    => $status,
+                                        'route_path'=> $route_path,
+                                        'intent_type' => $intent_type,
+                                        'intent_confidence' => $intent_confidence,
+                                        'parse_status' => $parse_status,
+                                        'validation_failures' => $validation_failures,
                                 );
                         }
 
@@ -20721,7 +20781,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         );
                 }
 
-                protected static function record_request_meta( int $user_id, string $model, float $duration, string $status ): array {
+                protected static function record_request_meta( int $user_id, string $model, float $duration, string $status, array $meta = array() ): array {
                         $request_log = self::normalize_request_meta( get_user_meta( $user_id, self::request_meta_key(), true ) );
                         $request_log[] = array(
                                 'timestamp' => wp_date( 'c' ),
@@ -20729,6 +20789,11 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                 'model'     => sanitize_text_field( $model ),
                                 'duration'  => round( max( 0.0, $duration ), 2 ),
                                 'status'    => sanitize_key( $status ),
+                                'route_path'=> sanitize_key( (string) ( $meta['route_path'] ?? '' ) ),
+                                'intent_type' => sanitize_key( (string) ( $meta['intent_type'] ?? '' ) ),
+                                'intent_confidence' => round( max( 0.0, min( 1.0, (float) ( $meta['intent_confidence'] ?? 0.0 ) ) ), 3 ),
+                                'parse_status' => sanitize_key( (string) ( $meta['parse_status'] ?? '' ) ),
+                                'validation_failures' => max( 0, (int) ( $meta['validation_failures'] ?? 0 ) ),
                         );
                         $request_log = array_slice( $request_log, -self::request_meta_limit() );
                         $request_log = self::trim_by_size( $request_log, self::request_meta_size_limit_bytes() );
@@ -23835,6 +23900,47 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         );
                 }
 
+                protected static function classify_assistant_intent( string $message ): array {
+                        $text = function_exists( 'mb_strtolower' ) ? mb_strtolower( trim( $message ) ) : strtolower( trim( $message ) );
+                        if ( '' === $text ) {
+                                return array(
+                                        'intent'                 => 'none',
+                                        'confidence'             => 0.0,
+                                        'deterministic_eligible' => false,
+                                        'routing_path'           => 'none',
+                                );
+                        }
+
+                        if ( self::is_chat_confirmation_message( $text ) ) {
+                                return array( 'intent' => 'confirm_pending_draft', 'confidence' => 0.99, 'deterministic_eligible' => true, 'routing_path' => 'deterministic_confirm' );
+                        }
+                        if ( self::is_chat_cancellation_message( $text ) ) {
+                                return array( 'intent' => 'cancel_pending_draft', 'confidence' => 0.99, 'deterministic_eligible' => true, 'routing_path' => 'deterministic_cancel' );
+                        }
+                        if ( self::is_internal_validation_message( $text ) ) {
+                                return array( 'intent' => 'internal_validation', 'confidence' => 1.0, 'deterministic_eligible' => true, 'routing_path' => 'internal_validation' );
+                        }
+                        if ( self::is_inventory_information_query( $text ) || self::has_explicit_sku_batch( $text ) ) {
+                                return array( 'intent' => 'inventory_information', 'confidence' => 0.95, 'deterministic_eligible' => true, 'routing_path' => 'deterministic_information' );
+                        }
+
+                        $followup_intent = self::detect_followup_po_edit_intent( $text );
+                        if ( ! empty( $followup_intent['is_actionable_edit'] ) ) {
+                                return array(
+                                        'intent'                 => 'followup_po_edit_' . sanitize_key( (string) ( $followup_intent['intent'] ?? 'unknown' ) ),
+                                        'confidence'             => 0.92,
+                                        'deterministic_eligible' => in_array( (string) ( $followup_intent['intent'] ?? '' ), array( 'eta', 'delivery_date', 'generic_date' ), true ),
+                                        'routing_path'           => in_array( (string) ( $followup_intent['intent'] ?? '' ), array( 'eta', 'delivery_date', 'generic_date' ), true ) ? 'deterministic_followup' : 'model',
+                                );
+                        }
+
+                        if ( (bool) preg_match( '/\b(opprett|lag|create)\b/ui', $text ) && false !== strpos( $text, 'draft' ) ) {
+                                return array( 'intent' => 'create_po_draft_request', 'confidence' => 0.8, 'deterministic_eligible' => false, 'routing_path' => 'model' );
+                        }
+
+                        return array( 'intent' => 'ambiguous_or_conversational', 'confidence' => 0.45, 'deterministic_eligible' => false, 'routing_path' => 'model' );
+                }
+
                 protected static function detect_followup_po_edit_scope( string $message, array $hints = array() ): string {
                         $text = function_exists( 'mb_strtolower' ) ? mb_strtolower( trim( $message ) ) : strtolower( trim( $message ) );
                         if ( '' !== $text && preg_match( '/\b(hele\s*po(?:-?en)?|hele\s*innkj[øo]pet|alle\s*linjer|all\s*lines\s*on\s*this\s*po|update\s*the\s*whole\s*po|whole\s*po)\b/ui', $text ) ) {
@@ -24314,6 +24420,8 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         $model          = 'gpt-4o-mini';
                         $latest_message = isset( $_POST['message'] ) ? sanitize_textarea_field( wp_unslash( $_POST['message'] ) ) : '';
                         $latest_message = trim( $latest_message );
+                        $intent_meta    = self::classify_assistant_intent( $latest_message );
+                        $route_path     = sanitize_key( (string) ( $intent_meta['routing_path'] ?? '' ) );
 
                         if ( '' === $latest_message ) {
                                 while ( ob_get_level() > 0 ) {
@@ -24554,7 +24662,12 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         }
                         $guard    = lpr_allocator_validate_ai_guardrails( $latest_message, $settings );
                         if ( empty( $guard['ok'] ) ) {
-                                self::record_request_meta( $user_id, $model, 0.0, 'blocked' );
+                                self::record_request_meta( $user_id, $model, 0.0, 'blocked', array(
+                                        'route_path'        => $route_path,
+                                        'intent_type'       => (string) ( $intent_meta['intent'] ?? '' ),
+                                        'intent_confidence' => (float) ( $intent_meta['confidence'] ?? 0.0 ),
+                                        'parse_status'      => 'guardrail_blocked',
+                                ) );
                                 $ui_error = self::normalize_ui_error( 'unknown', (string) ( $guard['error_message'] ?? '' ) );
                                 while ( ob_get_level() > 0 ) {
                                         ob_end_clean();
@@ -24573,8 +24686,10 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         $deterministic_followup = self::maybe_build_po_edit_bundle_from_context( $latest_message, $user_id );
                         $has_actionable_followup_intent = ! empty( $deterministic_followup['actionable_intent'] );
                         if ( ! empty( $deterministic_followup['handled'] ) && isset( $deterministic_followup['parsed'] ) && is_array( $deterministic_followup['parsed'] ) ) {
+                                $route_path = 'deterministic_followup';
                                 $parsed = $deterministic_followup['parsed'];
                         } elseif ( ! $has_actionable_followup_intent && ( self::is_inventory_information_query( $latest_message ) || self::has_explicit_sku_batch( $latest_message ) ) ) {
+                                $route_path = 'deterministic_information';
                                 $parsed = self::build_inventory_information_reply( $latest_message );
                                 $parsed['latency_ms']   = 0.0;
                                 $parsed['error_code']   = '';
@@ -24589,6 +24704,7 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                                         self::remember_focus_context( $user_id, (string) $parsed['last_focus_type'] );
                                 }
                         } else {
+                                $route_path = 'model';
                                 $parsed = lpr_allocator_generate_ai_assistant_reply( $latest_message, $context, $settings );
                                 $parsed = self::normalize_ai_action_payload( $parsed, $latest_message, $user_id );
                                 if ( is_array( $parsed['action_payload'] ?? null ) ) {
@@ -24607,7 +24723,13 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         if ( ! empty( $parsed['error_code'] ) ) {
                                 $ui_error = self::normalize_ui_error( (string) $parsed['error_code'], (string) $parsed['error_message'] );
                                 self::persist_chat_state( $user_id, $history, array_slice( $history, -$context_limit ) );
-                                self::record_request_meta( $user_id, $model, (float) ( $parsed['latency_ms'] ?? 0.0 ), 'error' );
+                                self::record_request_meta( $user_id, $model, (float) ( $parsed['latency_ms'] ?? 0.0 ), 'error', array(
+                                        'route_path'          => $route_path,
+                                        'intent_type'         => (string) ( $intent_meta['intent'] ?? '' ),
+                                        'intent_confidence'   => (float) ( $intent_meta['confidence'] ?? 0.0 ),
+                                        'parse_status'        => 'error',
+                                        'validation_failures' => 0,
+                                ) );
                                 $error_payload = array( 'error' => $ui_error );
                                 if ( current_user_can( 'manage_woocommerce' ) ) {
                                         $diag_bits = array(
@@ -24705,7 +24827,14 @@ if ( ! class_exists( __NAMESPACE__ . '\AI_Assistant_Page' ) ) {
                         $history[] = $assistant_turn;
                         $state     = self::persist_chat_state( $user_id, $history, array_slice( $history, -$context_limit ) );
                         $history   = $state['history'];
-                        self::record_request_meta( $user_id, $model, (float) ( $parsed['latency_ms'] ?? 0.0 ), 'success' );
+                        $validation_failures = ( 'advisory_only' === (string) ( $assistant_turn['action_status'] ?? 'none' ) && ! empty( $assistant_turn['action_notice'] ) ) ? 1 : 0;
+                        self::record_request_meta( $user_id, $model, (float) ( $parsed['latency_ms'] ?? 0.0 ), 'success', array(
+                                'route_path'          => $route_path,
+                                'intent_type'         => (string) ( $intent_meta['intent'] ?? '' ),
+                                'intent_confidence'   => (float) ( $intent_meta['confidence'] ?? 0.0 ),
+                                'parse_status'        => is_array( $parsed['action_payload'] ?? null ) ? 'parsed' : 'none',
+                                'validation_failures' => $validation_failures,
+                        ) );
 
                                 while ( ob_get_level() > 0 ) {
                                         ob_end_clean();
