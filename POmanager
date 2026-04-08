@@ -6597,9 +6597,9 @@ if ( ! class_exists( __NAMESPACE__ . '\Supplier_PO_CPT' ) ) {
 							<td><input type="number" min="0" step="1" name="lpr_po_lines[<?php echo esc_attr( $idx ); ?>][product_id]" value="<?php echo esc_attr( $product_id ); ?>" /></td>
 							<td><input type="number" min="0" step="1" name="lpr_po_lines[<?php echo esc_attr( $idx ); ?>][variation_id]" value="<?php echo esc_attr( $variation_id ); ?>" /></td>
 							<td><input type="number" min="0" step="1" name="lpr_po_lines[<?php echo esc_attr( $idx ); ?>][qty_ordered]" value="<?php echo esc_attr( $qty_ordered ); ?>" /></td>
-							<td><input type="number" min="0" step="1" name="lpr_po_lines[<?php echo esc_attr( $idx ); ?>][qty_allocated]" value="<?php echo esc_attr( $qty_alloc ); ?>" /></td>
+							<td><input type="number" min="0" step="1" name="lpr_po_lines[<?php echo esc_attr( $idx ); ?>][qty_allocated]" value="<?php echo esc_attr( $qty_alloc ); ?>" readonly="readonly" /></td>
                                                         <td><input type="text" class="short" name="lpr_po_lines[<?php echo esc_attr( $idx ); ?>][eta_override]" value="<?php echo esc_attr( $eta_override ); ?>" placeholder="DD-MM-YYYY" pattern="\d{2}-\d{2}-\d{4}" /></td>
-							<td><input type="number" min="0" step="1" name="lpr_po_lines[<?php echo esc_attr( $idx ); ?>][qty_received]" value="<?php echo esc_attr( $qty_recv ); ?>" /></td>
+							<td><input type="number" min="0" step="1" name="lpr_po_lines[<?php echo esc_attr( $idx ); ?>][qty_received]" value="<?php echo esc_attr( $qty_recv ); ?>" readonly="readonly" /></td>
 							<td><button type="button" class="button link-delete lpr-remove-line"><?php echo esc_html__( 'Remove', 'lpr-backorder-allocator' ); ?></button></td>
 						</tr>
 						<?php
@@ -6638,9 +6638,9 @@ tr.innerHTML =
 '<td><input type="number" min="0" step="1" name="lpr_po_lines['+i+'][product_id]" value="" /></td>'+
 '<td><input type="number" min="0" step="1" name="lpr_po_lines['+i+'][variation_id]" value="" /></td>'+
 '<td><input type="number" min="0" step="1" name="lpr_po_lines['+i+'][qty_ordered]" value="0" /></td>'+
-'<td><input type="number" min="0" step="1" name="lpr_po_lines['+i+'][qty_allocated]" value="0" /></td>'+
+'<td><input type="number" min="0" step="1" name="lpr_po_lines['+i+'][qty_allocated]" value="0" readonly="readonly" /></td>'+
 '<td><input type="text" class="short" name="lpr_po_lines['+i+'][eta_override]" value="" placeholder="DD-MM-YYYY" pattern="\\d{2}-\\d{2}-\\d{4}" /></td>'+
-'<td><input type="number" min="0" step="1" name="lpr_po_lines['+i+'][qty_received]" value="0" /></td>'+
+'<td><input type="number" min="0" step="1" name="lpr_po_lines['+i+'][qty_received]" value="0" readonly="readonly" /></td>'+
 '<td><button type="button" class="button link-delete lpr-remove-line"><?php echo esc_js( __( 'Remove', 'lpr-backorder-allocator' ) ); ?></button></td>';
 table.appendChild(tr);
                                         });
@@ -10580,9 +10580,9 @@ if ( ! class_exists( __NAMESPACE__ . '\Supplier_PO_Live_Product_UI' ) ) {
 									'<input type="hidden" class="lpr-variation-id" name="lpr_po_lines['+i+'][variation_id]" value="" />' +
 								'</td>' +
 								'<td><input type="number" min="0" step="1" name="lpr_po_lines['+i+'][qty_ordered]" value="0" /></td>' +
-								'<td><input type="number" min="0" step="1" name="lpr_po_lines['+i+'][qty_allocated]" value="0" /></td>' +
+								'<td><input type="number" min="0" step="1" name="lpr_po_lines['+i+'][qty_allocated]" value="0" readonly="readonly" /></td>' +
 '<td><input type="text" class="short" name="lpr_po_lines['+i+'][eta_override]" value="" placeholder="DD-MM-YYYY" pattern="\\d{2}-\\d{2}-\\d{4}" /></td>' +
-								'<td><input type="number" min="0" step="1" name="lpr_po_lines['+i+'][qty_received]" value="0" /></td>' +
+								'<td><input type="number" min="0" step="1" name="lpr_po_lines['+i+'][qty_received]" value="0" readonly="readonly" /></td>' +
 								'<td><button type="button" class="button link-delete lpr-remove-line"><?php echo esc_js( __( 'Remove', 'lpr-backorder-allocator' ) ); ?></button></td>' +
                                                         '</tr>';
                                                 const $row = $(rowHtml).appendTo($tbody);
