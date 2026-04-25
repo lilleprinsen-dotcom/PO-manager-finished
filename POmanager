@@ -16205,6 +16205,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Order_Indexer' ) ) {
                                                         'order_date_ts'             => $order_ts,
                                                         'order_date'                => $order_date ? $order_date->date_i18n( 'd-m-Y' ) : '',
                                                         'status'                    => (string) $status_h,
+                                                        'status_key'                => sanitize_key( preg_replace( '/^wc-/', '', (string) $status ) ),
                                                         'customer'                  => $customer,
                                                         'customer_email'            => (string) $order->get_billing_email(),
                                                         'currency'                  => (string) $order->get_currency(),
@@ -16355,6 +16356,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Orders_Page' ) ) {
                                                         'order_date'             => isset( $row['order_date'] ) ? (string) $row['order_date'] : '',
                                                         'order_date_ts'          => isset( $row['order_date_ts'] ) ? (int) $row['order_date_ts'] : 0,
                                                         'status'                 => isset( $row['status'] ) ? (string) $row['status'] : '',
+                                                        'status_key'             => isset( $row['status_key'] ) ? sanitize_key( (string) $row['status_key'] ) : '',
                                                         'customer'               => isset( $row['customer'] ) ? (string) $row['customer'] : '',
                                                         'currency'               => isset( $row['currency'] ) ? (string) $row['currency'] : '',
                                                         'customer_email'         => isset( $row['customer_email'] ) ? sanitize_email( (string) $row['customer_email'] ) : '',
@@ -16398,9 +16400,21 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Orders_Page' ) ) {
                         return array_values( $orders );
                 }
 
-                protected static function filter_orders( array $orders, string $view, string $eta_filter ): array {
+                protected static function filter_orders( array $orders, string $view, string $eta_filter, array $selected_statuses = array() ): array {
                         $out = array();
                         $today_ymd = function_exists( 'wp_date' ) ? wp_date( 'Y-m-d' ) : gmdate( 'Y-m-d' );
+                        $selected_statuses = array_values(
+                                array_unique(
+                                        array_filter(
+                                                array_map(
+                                                        static function ( $status ): string {
+                                                                return sanitize_key( (string) $status );
+                                                        },
+                                                        $selected_statuses
+                                                )
+                                        )
+                                )
+                        );
 
                         foreach ( $orders as $order ) {
                                 $outstanding = isset( $order['outstanding_backorder'] ) ? (int) $order['outstanding_backorder'] : 0;
@@ -16408,6 +16422,11 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Orders_Page' ) ) {
                                 $eta_passed  = '' !== $latest_eta && lpr_allocator_compare_dates( $latest_eta, $today_ymd ) < 0;
 
                                 if ( empty( $order['has_backorder_line'] ) ) {
+                                        continue;
+                                }
+
+                                $order_status_key = isset( $order['status_key'] ) ? sanitize_key( (string) $order['status_key'] ) : '';
+                                if ( ! empty( $selected_statuses ) && ( '' === $order_status_key || ! in_array( $order_status_key, $selected_statuses, true ) ) ) {
                                         continue;
                                 }
 
@@ -16508,12 +16527,50 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Orders_Page' ) ) {
                         if ( ! in_array( $eta_filter, array( 'all', 'eta_passed' ), true ) ) {
                                 $eta_filter = 'all';
                         }
+                        $selected_statuses = isset( $_GET['order_statuses'] ) ? (array) wp_unslash( $_GET['order_statuses'] ) : array(); // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        $selected_statuses = array_values(
+                                array_unique(
+                                        array_filter(
+                                                array_map(
+                                                        static function ( $status ): string {
+                                                                return sanitize_key( preg_replace( '/^wc-/', '', (string) $status ) );
+                                                        },
+                                                        $selected_statuses
+                                                )
+                                        )
+                                )
+                        );
 
                         $idx         = class_exists( __NAMESPACE__ . '\Backorder_Order_Indexer' ) ? Backorder_Order_Indexer::get_index( false ) : array( 'built_at' => 0, 'rows' => array() );
                         $built_ts    = isset( $idx['built_at'] ) ? (int) $idx['built_at'] : 0;
                         $rows_all    = isset( $idx['rows'] ) && is_array( $idx['rows'] ) ? $idx['rows'] : array();
                         $orders_all  = self::group_orders( $rows_all );
-                        $orders_view = self::filter_orders( $orders_all, $view, $eta_filter );
+                        $status_options = array();
+                        foreach ( $orders_all as $order ) {
+                                $status_key = isset( $order['status_key'] ) ? sanitize_key( (string) $order['status_key'] ) : '';
+                                if ( '' === $status_key || isset( $status_options[ $status_key ] ) ) {
+                                        continue;
+                                }
+                                $status_options[ $status_key ] = isset( $order['status'] ) ? (string) $order['status'] : $status_key;
+                        }
+                        if ( empty( $status_options ) && function_exists( 'wc_get_order_statuses' ) ) {
+                                foreach ( (array) wc_get_order_statuses() as $raw_key => $label ) {
+                                        $status_key = sanitize_key( preg_replace( '/^wc-/', '', (string) $raw_key ) );
+                                        if ( '' !== $status_key ) {
+                                                $status_options[ $status_key ] = (string) $label;
+                                        }
+                                }
+                        }
+
+                        $selected_statuses = array_values(
+                                array_filter(
+                                        $selected_statuses,
+                                        static function ( string $status_key ) use ( $status_options ): bool {
+                                                return isset( $status_options[ $status_key ] );
+                                        }
+                                )
+                        );
+                        $orders_view = self::filter_orders( $orders_all, $view, $eta_filter, $selected_statuses );
 
                         $page     = isset( $_GET['paged'] ) ? max( 1, (int) $_GET['paged'] ) : 1; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
                         $per_page = 25;
@@ -16522,11 +16579,21 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Orders_Page' ) ) {
                         $offset   = ( $page - 1 ) * $per_page;
                         $subset   = array_slice( $orders_view, $offset, $per_page );
 
+                        $redirect_args = array(
+                                'page'       => 'lpr-backorder-orders',
+                                'view'       => $view,
+                                'eta_filter' => $eta_filter,
+                                'paged'      => $page,
+                        );
+                        if ( ! empty( $selected_statuses ) ) {
+                                $redirect_args['order_statuses'] = $selected_statuses;
+                        }
+
                         $rebuild_url = wp_nonce_url(
                                 add_query_arg(
                                         array(
                                                 'action'   => 'lpr_build_order_backorder_index',
-                                                'redirect' => rawurlencode( admin_url( 'admin.php?page=lpr-backorder-orders&view=' . $view . '&eta_filter=' . $eta_filter . '&paged=' . $page ) ),
+                                                'redirect' => rawurlencode( add_query_arg( $redirect_args, admin_url( 'admin.php' ) ) ),
                                         ),
                                         admin_url( 'admin-post.php' )
                                 ),
@@ -16557,7 +16624,14 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Orders_Page' ) ) {
                                                 <option value="all" <?php selected( $eta_filter, 'all' ); ?>><?php echo esc_html__( 'All ETAs', 'lpr-backorder-allocator' ); ?></option>
                                                 <option value="eta_passed" <?php selected( $eta_filter, 'eta_passed' ); ?>><?php echo esc_html__( 'Latest ETA passed', 'lpr-backorder-allocator' ); ?></option>
                                         </select>
+                                        <label for="lpr-order-statuses" style="margin-left:12px; vertical-align:top;"><strong><?php echo esc_html__( 'Order statuses', 'lpr-backorder-allocator' ); ?>:</strong></label>
+                                        <select name="order_statuses[]" id="lpr-order-statuses" multiple="multiple" size="4" style="min-width:180px; vertical-align:middle;">
+                                                <?php foreach ( $status_options as $status_key => $status_label ) : ?>
+                                                        <option value="<?php echo esc_attr( $status_key ); ?>" <?php selected( in_array( $status_key, $selected_statuses, true ) ); ?>><?php echo esc_html( $status_label ); ?></option>
+                                                <?php endforeach; ?>
+                                        </select>
                                         <button class="button" style="margin-left:8px;"><?php esc_html_e( 'Apply', 'lpr-backorder-allocator' ); ?></button>
+                                        <span class="description" style="margin-left:8px;"><?php echo esc_html__( 'Leave empty to show all statuses.', 'lpr-backorder-allocator' ); ?></span>
                                 </form>
 
                                 <style>
@@ -16769,7 +16843,16 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Orders_Page' ) ) {
                                                 <span class="displaying-num"><?php echo esc_html( sprintf( _n( '%s order', '%s orders', $total, 'lpr-backorder-allocator' ), number_format_i18n( $total ) ) ); ?></span>
                                                 <span class="pagination-links">
                                                         <?php
-                                                        $base_url = admin_url( 'admin.php?page=lpr-backorder-orders&view=' . $view . '&eta_filter=' . $eta_filter . '&paged=%#%' );
+                                                        $pagination_args = array(
+                                                                'page'       => 'lpr-backorder-orders',
+                                                                'view'       => $view,
+                                                                'eta_filter' => $eta_filter,
+                                                                'paged'      => '%#%',
+                                                        );
+                                                        if ( ! empty( $selected_statuses ) ) {
+                                                                $pagination_args['order_statuses'] = $selected_statuses;
+                                                        }
+                                                        $base_url = add_query_arg( $pagination_args, admin_url( 'admin.php' ) );
                                                         echo wp_kses_post(
                                                                 paginate_links(
                                                                         array(
