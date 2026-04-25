@@ -16398,11 +16398,14 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Orders_Page' ) ) {
                         return array_values( $orders );
                 }
 
-                protected static function filter_orders( array $orders, string $view ): array {
+                protected static function filter_orders( array $orders, string $view, string $eta_filter ): array {
                         $out = array();
+                        $today_ymd = function_exists( 'wp_date' ) ? wp_date( 'Y-m-d' ) : gmdate( 'Y-m-d' );
 
                         foreach ( $orders as $order ) {
                                 $outstanding = isset( $order['outstanding_backorder'] ) ? (int) $order['outstanding_backorder'] : 0;
+                                $latest_eta  = isset( $order['latest_eta'] ) ? lpr_allocator_sanitize_ymd( (string) $order['latest_eta'] ) : '';
+                                $eta_passed  = '' !== $latest_eta && lpr_allocator_compare_dates( $latest_eta, $today_ymd ) < 0;
 
                                 if ( empty( $order['has_backorder_line'] ) ) {
                                         continue;
@@ -16413,6 +16416,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Orders_Page' ) ) {
                                 }
 
                                 if ( 'allocated' === $view && $outstanding > 0 ) {
+                                        continue;
+                                }
+
+                                if ( 'eta_passed' === $eta_filter && ! $eta_passed ) {
                                         continue;
                                 }
 
@@ -16497,12 +16504,16 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Orders_Page' ) ) {
                         if ( ! in_array( $view, array( 'unallocated', 'all', 'allocated' ), true ) ) {
                                 $view = 'all';
                         }
+                        $eta_filter = isset( $_GET['eta_filter'] ) ? sanitize_key( wp_unslash( $_GET['eta_filter'] ) ) : 'all'; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
+                        if ( ! in_array( $eta_filter, array( 'all', 'eta_passed' ), true ) ) {
+                                $eta_filter = 'all';
+                        }
 
                         $idx         = class_exists( __NAMESPACE__ . '\Backorder_Order_Indexer' ) ? Backorder_Order_Indexer::get_index( false ) : array( 'built_at' => 0, 'rows' => array() );
                         $built_ts    = isset( $idx['built_at'] ) ? (int) $idx['built_at'] : 0;
                         $rows_all    = isset( $idx['rows'] ) && is_array( $idx['rows'] ) ? $idx['rows'] : array();
                         $orders_all  = self::group_orders( $rows_all );
-                        $orders_view = self::filter_orders( $orders_all, $view );
+                        $orders_view = self::filter_orders( $orders_all, $view, $eta_filter );
 
                         $page     = isset( $_GET['paged'] ) ? max( 1, (int) $_GET['paged'] ) : 1; // phpcs:ignore WordPress.Security.NonceVerification.Recommended
                         $per_page = 25;
@@ -16515,7 +16526,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Orders_Page' ) ) {
                                 add_query_arg(
                                         array(
                                                 'action'   => 'lpr_build_order_backorder_index',
-                                                'redirect' => rawurlencode( admin_url( 'admin.php?page=lpr-backorder-orders&view=' . $view . '&paged=' . $page ) ),
+                                                'redirect' => rawurlencode( admin_url( 'admin.php?page=lpr-backorder-orders&view=' . $view . '&eta_filter=' . $eta_filter . '&paged=' . $page ) ),
                                         ),
                                         admin_url( 'admin-post.php' )
                                 ),
@@ -16541,7 +16552,12 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Orders_Page' ) ) {
                                                 <option value="unallocated" <?php selected( $view, 'unallocated' ); ?>><?php echo esc_html__( 'Not fully allocated', 'lpr-backorder-allocator' ); ?></option>
                                                 <option value="allocated" <?php selected( $view, 'allocated' ); ?>><?php echo esc_html__( 'Fully allocated', 'lpr-backorder-allocator' ); ?></option>
                                         </select>
-                                        <noscript><button class="button"><?php esc_html_e( 'Apply', 'lpr-backorder-allocator' ); ?></button></noscript>
+                                        <label for="lpr-order-eta-filter" style="margin-left:12px;"><strong><?php echo esc_html__( 'ETA', 'lpr-backorder-allocator' ); ?>:</strong></label>
+                                        <select name="eta_filter" id="lpr-order-eta-filter">
+                                                <option value="all" <?php selected( $eta_filter, 'all' ); ?>><?php echo esc_html__( 'All ETAs', 'lpr-backorder-allocator' ); ?></option>
+                                                <option value="eta_passed" <?php selected( $eta_filter, 'eta_passed' ); ?>><?php echo esc_html__( 'Latest ETA passed', 'lpr-backorder-allocator' ); ?></option>
+                                        </select>
+                                        <button class="button" style="margin-left:8px;"><?php esc_html_e( 'Apply', 'lpr-backorder-allocator' ); ?></button>
                                 </form>
 
                                 <style>
@@ -16753,7 +16769,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Backorder_Orders_Page' ) ) {
                                                 <span class="displaying-num"><?php echo esc_html( sprintf( _n( '%s order', '%s orders', $total, 'lpr-backorder-allocator' ), number_format_i18n( $total ) ) ); ?></span>
                                                 <span class="pagination-links">
                                                         <?php
-                                                        $base_url = admin_url( 'admin.php?page=lpr-backorder-orders&view=' . $view . '&paged=%#%' );
+                                                        $base_url = admin_url( 'admin.php?page=lpr-backorder-orders&view=' . $view . '&eta_filter=' . $eta_filter . '&paged=%#%' );
                                                         echo wp_kses_post(
                                                                 paginate_links(
                                                                         array(
