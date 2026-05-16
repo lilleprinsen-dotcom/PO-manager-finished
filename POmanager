@@ -13343,7 +13343,9 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                 if ( 'completed' === $status ) {
                                         if ( ! empty( $verification ) ) {
                                                 $corrections = (int) ( $verification['corrections'] ?? 0 );
-                                                if ( $corrections > 0 ) {
+                                                if ( 'warning' === (string) ( $verification['status'] ?? '' ) ) {
+                                                        $verification_label = __( 'Completed with warnings.', 'lpr-backorder-allocator' );
+                                                } elseif ( $corrections > 0 ) {
                                                         /* translators: %d: number of corrections applied */
                                                         $verification_label = sprintf( __( 'Verified with %d correction(s).', 'lpr-backorder-allocator' ), $corrections );
                                                 } else {
@@ -13770,33 +13772,48 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                                 return;
                         }
 
-                        $applied = array();
-                        foreach ( $targets as $target => $data ) {
-                                try {
-                                        $after_raw = function_exists( 'wc_update_product_stock' ) ? wc_update_product_stock( $data['product'], $data['qty_total'], 'increase' ) : null;
-                                        $after     = function_exists( 'wc_stock_amount' ) ? wc_stock_amount( $after_raw ) : (int) $after_raw;
-                                } catch ( \WC_Data_Exception $e ) {
-                                        $errors[] = $e->getMessage();
-                                        break;
-                                }
+                        $applied      = array();
+                        $batch_size   = 25;
+                        $target_batch = array_chunk( $targets, $batch_size, true );
 
-                                $applied[ $target ] = array(
-                                        'before' => $data['before'],
-                                        'after'  => $after,
-                                        'qty'    => $data['qty_total'],
-                                );
-
+                        foreach ( $target_batch as $batch_index => $batch_targets ) {
                                 lpr_allocator_log_event(
-                                        'receipt_stock_applied',
+                                        'receipt_stock_batch_start',
                                         array(
-                                                'po_id'      => $po_id,
-                                                'receipt_id' => $receipt_id,
-                                                'product_id' => $target,
-                                                'qty'        => $data['qty_total'],
-                                                'before'     => $data['before'],
-                                                'after'      => $after,
+                                                'po_id'       => $po_id,
+                                                'receipt_id'  => $receipt_id,
+                                                'batch_index' => (int) $batch_index + 1,
+                                                'batch_size'  => count( $batch_targets ),
                                         )
                                 );
+
+                                foreach ( $batch_targets as $target => $data ) {
+                                        try {
+                                                $after_raw = function_exists( 'wc_update_product_stock' ) ? wc_update_product_stock( $data['product'], $data['qty_total'], 'increase' ) : null;
+                                                $after     = function_exists( 'wc_stock_amount' ) ? wc_stock_amount( $after_raw ) : (int) $after_raw;
+                                        } catch ( \WC_Data_Exception $e ) {
+                                                $errors[] = $e->getMessage();
+                                                break 2;
+                                        }
+
+                                        $applied[ $target ] = array(
+                                                'before' => $data['before'],
+                                                'after'  => $after,
+                                                'qty'    => $data['qty_total'],
+                                        );
+
+                                        lpr_allocator_log_event(
+                                                'receipt_stock_applied',
+                                                array(
+                                                        'po_id'      => $po_id,
+                                                        'receipt_id' => $receipt_id,
+                                                        'product_id' => $target,
+                                                        'qty'        => $data['qty_total'],
+                                                        'before'     => $data['before'],
+                                                        'after'      => $after,
+                                                )
+                                        );
+                                }
                         }
 
                         if ( ! empty( $errors ) ) {
@@ -13906,16 +13923,19 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Receive_Stock_UI' ) ) {
                         }
 
                         if ( ! empty( $errors ) ) {
+                                $verification['status'] = 'warning';
                                 lpr_allocator_log_event(
-                                        'receipt_verification_failed',
+                                        'receipt_verification_warning',
                                         array(
                                                 'po_id'      => $po_id,
                                                 'receipt_id' => $receipt_id,
                                                 'errors'     => $errors,
                                         )
                                 );
-                                self::mark_receipt_failed( $po_id, $receipts, $receipt_index, $errors, $revert_lines, $po_lines );
-                                return;
+                                $warning_message = implode( ' ', array_unique( array_map( 'wp_strip_all_tags', $errors ) ) );
+                                $existing_message = isset( $receipts[ $receipt_index ]['message'] ) ? (string) $receipts[ $receipt_index ]['message'] : '';
+                                $receipts[ $receipt_index ]['message'] = trim( $existing_message . ' ' . $warning_message );
+                                $errors = array();
                         }
 
                         $running = array();
