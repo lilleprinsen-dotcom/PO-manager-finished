@@ -17003,6 +17003,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Purchase_Orders_Page' ) ) {
                         $entries      = array();
                         $live_status  = lpr_allocator_live_po_statuses();
                         $po_post_type = defined( __NAMESPACE__ . '\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po';
+                        $settings     = class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ? Admin_Settings_Tab::get() : array();
+                        $default_delivery_location = isset( $settings['default_delivery_location'] ) ? sanitize_text_field( (string) $settings['default_delivery_location'] ) : '';
 
                         $page  = 1;
                         $limit = 100;
@@ -17035,6 +17037,9 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Purchase_Orders_Page' ) ) {
                                 $status_obj = $status ? get_post_status_object( $status ) : null;
                                 $status_label = $status_obj && isset( $status_obj->label ) ? (string) $status_obj->label : (string) $status;
                                 $po_link = get_edit_post_link( $po_id, 'url' );
+                                $delivery_location = sanitize_text_field( (string) get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_DELIVERY_LOCATION' ) ? PO_META_DELIVERY_LOCATION : '_lpr_delivery_location', true ) );
+                                $delivery_location = trim( $delivery_location );
+                                $show_delivery_location = '' !== $delivery_location && ( '' === $default_delivery_location || 0 !== strcasecmp( $delivery_location, $default_delivery_location ) );
 
                                 if ( ! is_array( $lines ) || empty( $lines ) ) {
                                         continue;
@@ -17069,6 +17074,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Purchase_Orders_Page' ) ) {
                                                         'eta'          => $eta,
                                                         'status'       => $status_label,
                                                         'status_slug'  => $status,
+                                                        'delivery_location' => $show_delivery_location ? $delivery_location : '',
                                                         'lines'        => array(),
                                                         'totals'       => array(
                                                                 'ordered'   => 0,
@@ -17214,6 +17220,9 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Purchase_Orders_Page' ) ) {
                                                                                         <?php endif; ?>
                                                                                         <?php if ( ! empty( $row['status'] ) ) : ?>
                                                                                                 <span><?php echo esc_html( sprintf( __( 'Status: %s', 'lpr-backorder-allocator' ), (string) $row['status'] ) ); ?></span>
+                                                                                        <?php endif; ?>
+                                                                                        <?php if ( ! empty( $row['delivery_location'] ) ) : ?>
+                                                                                                <span><?php echo esc_html( sprintf( __( 'Delivery: %s', 'lpr-backorder-allocator' ), (string) $row['delivery_location'] ) ); ?></span>
                                                                                         <?php endif; ?>
                                                                                         <span><?php echo esc_html( sprintf( _n( '%s line', '%s lines', $line_total, 'lpr-backorder-allocator' ), number_format_i18n( $line_total ) ) ); ?></span>
                                                                                 </p>
@@ -27364,6 +27373,9 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Mobile_Inbox' ) ) {
                                                                                 <?php endif; ?>
                                                                                 <?php if ( ! empty( $row['status'] ) ) : ?>
                                                                                         <span><?php echo esc_html( sprintf( __( 'Status: %s', 'lpr-backorder-allocator' ), (string) $row['status'] ) ); ?></span>
+                                                                                <?php endif; ?>
+                                                                                <?php if ( ! empty( $row['delivery_location'] ) ) : ?>
+                                                                                        <span><?php echo esc_html( sprintf( __( 'Delivery: %s', 'lpr-backorder-allocator' ), (string) $row['delivery_location'] ) ); ?></span>
                                                                                 <?php endif; ?>
                                                                         </div>
                                                                 </div>
