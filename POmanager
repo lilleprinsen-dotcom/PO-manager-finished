@@ -17003,7 +17003,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Purchase_Orders_Page' ) ) {
                         $entries      = array();
                         $live_status  = lpr_allocator_live_po_statuses();
                         $po_post_type = defined( __NAMESPACE__ . '\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po';
-                        $settings     = class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ? Admin_Settings_Tab::get() : array();
+                        $settings     = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array();
                         $default_delivery_location = isset( $settings['default_delivery_location'] ) ? sanitize_text_field( (string) $settings['default_delivery_location'] ) : '';
 
                         $page  = 1;
