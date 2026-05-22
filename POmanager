@@ -1010,6 +1010,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                                 'auto_allocation_interval'      => 0,
                                 'requested_delivery_lead_days'  => 14,
                                 'requested_delivery_window_priority_days' => 21,
+                                'default_delivery_location' => '',
+                                'additional_delivery_locations' => array(),
                                 'brand_logo_url'        => '',
                                 'brand_primary_color'   => '#1a1a1a',
                                 'brand_support_email'   => '',
@@ -1060,6 +1062,35 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                         $settings = array_replace( self::defaults(), $stored );
 
                         return $settings;
+                }
+
+                /**
+                 * Delivery locations from settings (default first, then additional).
+                 */
+                public static function get_delivery_locations( array $settings = array() ): array {
+                        if ( empty( $settings ) ) {
+                                $settings = self::get();
+                        }
+                        $locations = array();
+                        $default   = isset( $settings['default_delivery_location'] ) ? sanitize_text_field( (string) $settings['default_delivery_location'] ) : '';
+                        if ( '' !== trim( $default ) ) {
+                                $locations[] = $default;
+                        }
+                        $extra = $settings['additional_delivery_locations'] ?? array();
+                        if ( is_string( $extra ) ) {
+                                $extra = preg_split( '/\r?\n/', $extra ) ?: array();
+                        }
+                        if ( is_array( $extra ) ) {
+                                foreach ( $extra as $entry ) {
+                                        $entry = sanitize_text_field( (string) $entry );
+                                        if ( '' === trim( $entry ) ) {
+                                                continue;
+                                        }
+                                        $locations[] = $entry;
+                                }
+                        }
+
+                        return array_values( array_unique( $locations ) );
                 }
 
 		/**
@@ -1264,6 +1295,23 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                                 $requested_priority_days = (int) $defaults['requested_delivery_window_priority_days'];
                         }
 
+                        $default_delivery_location = isset( $raw['default_delivery_location'] ) ? sanitize_text_field( (string) $raw['default_delivery_location'] ) : '';
+                        $additional_locations      = array();
+                        $raw_additional_locations  = $raw['additional_delivery_locations'] ?? array();
+                        if ( is_string( $raw_additional_locations ) ) {
+                                $raw_additional_locations = preg_split( '/\r?\n/', $raw_additional_locations ) ?: array();
+                        }
+                        if ( is_array( $raw_additional_locations ) ) {
+                                foreach ( $raw_additional_locations as $entry ) {
+                                        $entry = sanitize_text_field( (string) $entry );
+                                        if ( '' === trim( $entry ) ) {
+                                                continue;
+                                        }
+                                        $additional_locations[] = $entry;
+                                }
+                        }
+                        $additional_locations = array_values( array_unique( $additional_locations ) );
+
                         $ai_enabled = isset( $raw['ai_enabled'] ) ? (bool) $raw['ai_enabled'] : (bool) $defaults['ai_enabled'];
                         $ai_api_key = isset( $raw['ai_api_key'] ) ? sanitize_text_field( (string) $raw['ai_api_key'] ) : (string) $defaults['ai_api_key'];
 
@@ -1300,6 +1348,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                                 'auto_allocation_interval' => (int) $alloc_interval,
                                 'requested_delivery_lead_days' => (int) $requested_lead_days,
                                 'requested_delivery_window_priority_days' => (int) $requested_priority_days,
+                                'default_delivery_location'     => $default_delivery_location,
+                                'additional_delivery_locations' => $additional_locations,
                                 'brand_logo_url'        => $logo,
                                 'brand_primary_color'   => $color,
                                 'brand_support_email'   => $email,
@@ -1466,6 +1516,21 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                                 'max'  => '365',
                                                 'step' => '1',
                                         ),
+                                ),
+                                array(
+                                        'title'       => __( 'Default delivery location', 'lpr-backorder-allocator' ),
+                                        'desc'        => __( 'Primary delivery location for supplier purchase orders.', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_default_delivery_location',
+                                        'type'        => 'text',
+                                        'default'     => '',
+                                ),
+                                array(
+                                        'title'       => __( 'Additional delivery locations', 'lpr-backorder-allocator' ),
+                                        'desc'        => __( 'Optional extra locations (one per line) available in Supplier PO delivery location dropdown.', 'lpr-backorder-allocator' ),
+                                        'id'          => 'lpr_allocator_additional_delivery_locations',
+                                        'type'        => 'textarea',
+                                        'css'         => 'min-width: 420px; min-height: 120px;',
+                                        'default'     => '',
                                 ),
 
 				array(
@@ -2112,6 +2177,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                 'lpr_allocator_auto_allocation_interval'   => (int) $settings['auto_allocation_interval'],
                                 'lpr_allocator_requested_delivery_lead_days' => (int) $settings['requested_delivery_lead_days'],
                                 'lpr_allocator_requested_delivery_window_priority_days' => (int) $settings['requested_delivery_window_priority_days'],
+                                'lpr_allocator_default_delivery_location' => (string) $settings['default_delivery_location'],
+                                'lpr_allocator_additional_delivery_locations' => implode( "\n", (array) ( $settings['additional_delivery_locations'] ?? array() ) ),
                                 'lpr_allocator_incoming_mobile_users'      => self::format_mobile_users_field( (array) ( $settings['incoming_mobile_users'] ?? array() ) ),
                                 'lpr_allocator_brand_logo_url'             => (string) $settings['brand_logo_url'],
                                 'lpr_allocator_brand_primary_color'        => (string) $settings['brand_primary_color'],
@@ -2571,6 +2638,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                         $raw['auto_allocation_interval']    = isset( $_POST['lpr_allocator_auto_allocation_interval'] ) ? (int) $_POST['lpr_allocator_auto_allocation_interval'] : $settings['auto_allocation_interval'];
                         $raw['requested_delivery_lead_days'] = isset( $_POST['lpr_allocator_requested_delivery_lead_days'] ) ? (int) $_POST['lpr_allocator_requested_delivery_lead_days'] : $settings['requested_delivery_lead_days'];
                         $raw['requested_delivery_window_priority_days'] = isset( $_POST['lpr_allocator_requested_delivery_window_priority_days'] ) ? (int) $_POST['lpr_allocator_requested_delivery_window_priority_days'] : $settings['requested_delivery_window_priority_days'];
+                        $raw['default_delivery_location'] = isset( $_POST['lpr_allocator_default_delivery_location'] ) ? (string) wp_unslash( $_POST['lpr_allocator_default_delivery_location'] ) : $settings['default_delivery_location'];
+                        $raw['additional_delivery_locations'] = isset( $_POST['lpr_allocator_additional_delivery_locations'] ) ? (string) wp_unslash( $_POST['lpr_allocator_additional_delivery_locations'] ) : $settings['additional_delivery_locations'];
                         $raw['incoming_mobile_users']       = isset( $_POST['lpr_allocator_incoming_mobile_users'] ) ? (string) wp_unslash( $_POST['lpr_allocator_incoming_mobile_users'] ) : $settings['incoming_mobile_users'];
                         $raw['ai_enabled']                  = ! empty( $_POST['lpr_allocator_ai_enabled'] );
                         $raw['ai_model']                    = isset( $_POST['lpr_allocator_ai_model'] ) ? (string) wp_unslash( $_POST['lpr_allocator_ai_model'] ) : $settings['ai_model'];
@@ -5099,6 +5168,9 @@ if ( ! defined( __NAMESPACE__ . '\PO_META_ETA_DATE' ) ) {
 if ( ! defined( __NAMESPACE__ . '\PO_META_NOTE' ) ) {
         define( __NAMESPACE__ . '\PO_META_NOTE', '_lpr_po_note' );
 }
+if ( ! defined( __NAMESPACE__ . '\PO_META_DELIVERY_LOCATION' ) ) {
+        define( __NAMESPACE__ . '\PO_META_DELIVERY_LOCATION', '_lpr_delivery_location' );
+}
 if ( ! defined( __NAMESPACE__ . '\PO_META_LINES' ) ) {
         define( __NAMESPACE__ . '\PO_META_LINES', '_lpr_po_lines' );
 }
@@ -6477,7 +6549,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Supplier_PO_CPT' ) ) {
                         $po_number        = get_post_meta( $post->ID, PO_META_PO_NUMBER, true );
                         $eta       = lpr_allocator_sanitize_ymd( (string) get_post_meta( $post->ID, PO_META_ETA_DATE, true ) );
                         $note      = (string) get_post_meta( $post->ID, PO_META_NOTE, true );
+                        $delivery_location = (string) get_post_meta( $post->ID, PO_META_DELIVERY_LOCATION, true );
                         $status    = in_array( $post->post_status, array( PO_STATUS_OPEN, PO_STATUS_PARTIAL, PO_STATUS_CLOSED ), true ) ? $post->post_status : PO_STATUS_OPEN;
+                        $settings  = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get() : array();
+                        $locations = class_exists( __NAMESPACE__ . '\Settings' ) ? Settings::get_delivery_locations( $settings ) : array();
 
                         ?>
                         <style>
@@ -6501,6 +6576,15 @@ if ( ! class_exists( __NAMESPACE__ . '\Supplier_PO_CPT' ) ) {
 					<label for="lpr_po_number"><strong><?php echo esc_html__( 'PO Number', 'lpr-backorder-allocator' ); ?></strong></label>
 					<input type="text" id="lpr_po_number" name="lpr_po_number" value="<?php echo esc_attr( (string) $po_number ); ?>" />
 				</div>
+                                <div class="field">
+                                        <label for="lpr_delivery_location"><strong><?php echo esc_html__( 'Delivery Location', 'lpr-backorder-allocator' ); ?></strong></label>
+                                        <select id="lpr_delivery_location" name="lpr_delivery_location">
+                                                <option value=""><?php echo esc_html__( 'Select delivery location', 'lpr-backorder-allocator' ); ?></option>
+                                                <?php foreach ( $locations as $location_option ) : ?>
+                                                        <option value="<?php echo esc_attr( $location_option ); ?>" <?php selected( $delivery_location, $location_option ); ?>><?php echo esc_html( $location_option ); ?></option>
+                                                <?php endforeach; ?>
+                                        </select>
+                                </div>
                                 <div class="field">
                                         <?php
                                         woocommerce_wp_text_input(
@@ -6679,6 +6763,7 @@ table.appendChild(tr);
                                 $po_number        = isset( $_POST['lpr_po_number'] ) ? sanitize_text_field( wp_unslash( $_POST['lpr_po_number'] ) ) : '';
                                 $eta       = isset( $_POST['lpr_eta_date'] ) ? lpr_allocator_sanitize_ymd( wp_unslash( $_POST['lpr_eta_date'] ) ) : '';
                                 $note      = isset( $_POST['lpr_po_note'] ) ? sanitize_textarea_field( wp_unslash( $_POST['lpr_po_note'] ) ) : '';
+                                $delivery_location = isset( $_POST['lpr_delivery_location'] ) ? sanitize_text_field( wp_unslash( $_POST['lpr_delivery_location'] ) ) : '';
                                 $status    = isset( $_POST['lpr_po_status'] ) ? sanitize_key( wp_unslash( $_POST['lpr_po_status'] ) ) : PO_STATUS_OPEN;
 
                                 update_post_meta( $post_id, PO_META_SUPPLIER_NAME, $supplier );
@@ -6686,6 +6771,7 @@ table.appendChild(tr);
                                 update_post_meta( $post_id, PO_META_PO_NUMBER, $po_number );
                                 update_post_meta( $post_id, PO_META_ETA_DATE, $eta );
                                 update_post_meta( $post_id, PO_META_NOTE, $note );
+                                update_post_meta( $post_id, PO_META_DELIVERY_LOCATION, $delivery_location );
                                 $eta_changed = $eta !== $prev_eta;
 
 				$allowed_status = array( PO_STATUS_OPEN, PO_STATUS_PARTIAL, PO_STATUS_CLOSED );
