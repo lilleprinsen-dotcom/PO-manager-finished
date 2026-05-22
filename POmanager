@@ -10480,7 +10480,15 @@ if ( ! class_exists( __NAMESPACE__ . '\Supplier_PO_Live_Product_UI' ) ) {
 				#lpr_po_lines .actions { text-align: right; margin-top: 8px; }
 				#lpr_po_lines input[type="number"] { width: 110px; }
 				#lpr_po_lines input[type="text"] { width: 170px; }
-				#lpr_po_lines .lpr-product-cell .select2-container { min-width: 320px; }
+				#lpr_po_lines { overflow-x: auto; }
+				#lpr_po_lines .inside { overflow-x: auto; }
+				#lpr_po_lines table { table-layout: fixed; min-width: 100%; }
+				#lpr_po_lines .lpr-product-cell { width: 36%; min-width: 260px; }
+				#lpr_po_lines .lpr-product-input-wrap { display:flex; align-items:center; gap:6px; max-width:100%; }
+				#lpr_po_lines .lpr-product-cell .select2-container { width: 100% !important; min-width: 0; }
+				#lpr_po_lines .lpr-product-edit-link { display:inline-flex; align-items:center; justify-content:center; width:22px; height:22px; color:#2271b1; text-decoration:none; border:1px solid #c3c4c7; border-radius:4px; background:#fff; }
+				#lpr_po_lines .lpr-product-edit-link:hover { background:#f0f6fc; color:#135e96; }
+				#lpr_po_lines .lpr-product-edit-link[aria-disabled="true"] { opacity:.45; pointer-events:none; }
 			</style>
 			<table class="widefat striped" id="lpr-po-lines-table">
 				<thead>
@@ -10506,24 +10514,34 @@ if ( ! class_exists( __NAMESPACE__ . '\Supplier_PO_Live_Product_UI' ) ) {
 						$qty_recv     = isset( $line['qty_received'] ) ? max( 0, (int) $line['qty_received'] ) : 0;
 
 						$label = $chosen_id ? lpr_allocator_product_option_label( $chosen_id ) : '';
+						$edit_target_id = 0;
+						if ( $chosen_id > 0 && function_exists( 'wc_get_product' ) ) {
+							$chosen_product = wc_get_product( $chosen_id );
+							if ( $chosen_product instanceof \WC_Product ) {
+								$edit_target_id = $chosen_product->is_type( 'variation' ) ? (int) $chosen_product->get_parent_id() : $chosen_id;
+							}
+						}
+						$edit_product_url = $edit_target_id > 0 ? get_edit_post_link( $edit_target_id, 'url' ) : '';
 						?>
 						<tr>
 							<td class="lpr-product-cell">
-								<select
-									class="wc-product-search lpr-product-select"
-									name="lpr_po_lines[<?php echo esc_attr( $idx ); ?>][select_ui]"
-									data-placeholder="<?php echo esc_attr__( 'Search for a product…', 'lpr-backorder-allocator' ); ?>"
-									data-action="woocommerce_json_search_products_and_variations"
-									data-minimum_input_length="1"
-									data-allow_clear="true"
-									style="min-width: 320px;"
-								>
-									<?php if ( $chosen_id ) : ?>
-										<option value="<?php echo esc_attr( (string) $chosen_id ); ?>" selected="selected">
-											<?php echo esc_html( $label ); ?>
-										</option>
-									<?php endif; ?>
-								</select>
+								<div class="lpr-product-input-wrap">
+									<select
+										class="wc-product-search lpr-product-select"
+										name="lpr_po_lines[<?php echo esc_attr( $idx ); ?>][select_ui]"
+										data-placeholder="<?php echo esc_attr__( 'Search for a product…', 'lpr-backorder-allocator' ); ?>"
+										data-action="woocommerce_json_search_products_and_variations"
+										data-minimum_input_length="1"
+										data-allow_clear="true"
+									>
+										<?php if ( $chosen_id ) : ?>
+											<option value="<?php echo esc_attr( (string) $chosen_id ); ?>" selected="selected">
+												<?php echo esc_html( $label ); ?>
+											</option>
+										<?php endif; ?>
+									</select>
+									<a class="lpr-product-edit-link" href="<?php echo esc_url( $edit_product_url ?: '#' ); ?>" target="_blank" rel="noopener noreferrer" title="<?php echo esc_attr__( 'Edit product in admin', 'lpr-backorder-allocator' ); ?>" aria-label="<?php echo esc_attr__( 'Edit product in admin', 'lpr-backorder-allocator' ); ?>" <?php echo $edit_product_url ? '' : 'aria-disabled="true"'; ?>>↗</a>
+								</div>
 								<input type="hidden" class="lpr-select-id" name="lpr_po_lines[<?php echo esc_attr( $idx ); ?>][select_id]" value="<?php echo esc_attr( (string) $chosen_id ); ?>" />
 								<input type="hidden" class="lpr-product-id" name="lpr_po_lines[<?php echo esc_attr( $idx ); ?>][product_id]" value="<?php echo esc_attr( (string) $product_id ); ?>" />
 								<input type="hidden" class="lpr-variation-id" name="lpr_po_lines[<?php echo esc_attr( $idx ); ?>][variation_id]" value="<?php echo esc_attr( (string) $variation_id ); ?>" />
@@ -10556,7 +10574,18 @@ if ( ! class_exists( __NAMESPACE__ . '\Supplier_PO_Live_Product_UI' ) ) {
 							// Optimistic client-side guess: set product_id to selected id; server will correct to variation_id if needed.
 							$row.find('input.lpr-product-id').val(val);
 							$row.find('input.lpr-variation-id').val('');
+							updateProductEditLink($row, val);
 						});
+					}
+					function updateProductEditLink($row, selectedId){
+						const id = parseInt(selectedId || 0, 10);
+						const $link = $row.find('.lpr-product-edit-link');
+						if(!id || !$link.length){
+							$link.attr('href', '#').attr('aria-disabled', 'true');
+							return;
+						}
+						const base = '<?php echo esc_js( admin_url( 'post.php' ) ); ?>';
+						$link.attr('href', base + '?post=' + id + '&action=edit').removeAttr('aria-disabled');
 					}
 					function nextIndex($tbody){
 						let max = -1;
@@ -10573,8 +10602,9 @@ if ( ! class_exists( __NAMESPACE__ . '\Supplier_PO_Live_Product_UI' ) ) {
 						const i = nextIndex($tbody);
                                                 const rowHtml =
                                                         '<tr>' +
-                                                                '<td class="lpr-product-cell">' +
-                                                                        '<select class="wc-product-search lpr-product-select" name="lpr_po_lines['+i+'][select_ui]" data-placeholder="<?php echo esc_js( __( 'Search for a product…', 'lpr-backorder-allocator' ) ); ?>" data-action="woocommerce_json_search_products_and_variations" data-minimum_input_length="1" data-allow_clear="true" style="min-width:320px;"></select>' +
+                                                                '<td class="lpr-product-cell"><div class="lpr-product-input-wrap">' +
+                                                                        '<select class="wc-product-search lpr-product-select" name="lpr_po_lines['+i+'][select_ui]" data-placeholder="<?php echo esc_js( __( 'Search for a product…', 'lpr-backorder-allocator' ) ); ?>" data-action="woocommerce_json_search_products_and_variations" data-minimum_input_length="1" data-allow_clear="true"></select>' +
+									'<a class="lpr-product-edit-link" href="#" target="_blank" rel="noopener noreferrer" title="<?php echo esc_js( __( 'Edit product in admin', 'lpr-backorder-allocator' ) ); ?>" aria-label="<?php echo esc_js( __( 'Edit product in admin', 'lpr-backorder-allocator' ) ); ?>" aria-disabled="true">↗</a></div>' +
 									'<input type="hidden" class="lpr-select-id" name="lpr_po_lines['+i+'][select_id]" value="" />' +
 									'<input type="hidden" class="lpr-product-id" name="lpr_po_lines['+i+'][product_id]" value="" />' +
 									'<input type="hidden" class="lpr-variation-id" name="lpr_po_lines['+i+'][variation_id]" value="" />' +
