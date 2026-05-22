@@ -4324,14 +4324,11 @@ if ( ! class_exists( __NAMESPACE__ . '\\Supplier_PO_Print_PDF' ) ) {
                                                         const qtyAllocated = parseQty($row.find('input[name*="[qty_allocated]"]').val());
                                                         const qtyReceived = parseQty($row.find('input[name*="[qty_received]"]').val());
                                                         const etaOverride = ($row.find('input[name*="[eta_override]"]').val() || '').trim();
-                                                        const qtyStock = Math.max(0, qtyIncoming - qtyAllocated);
-
                                                         if (product || qtyIncoming || qtyAllocated || qtyReceived || etaOverride) {
                                                                 lines.push({
                                                                         product,
                                                                         qtyIncoming,
                                                                         qtyAllocated,
-                                                                        qtyStock,
                                                                         etaOverride,
                                                                         qtyReceived
                                                                 });
@@ -4357,15 +4354,14 @@ if ( ! class_exists( __NAMESPACE__ . '\\Supplier_PO_Print_PDF' ) ) {
                                                         return '<tr>' +
                                                                 '<td class="product">'+ escapeHtml(line.product || '<?php echo esc_js( __( 'Product', 'lpr-backorder-allocator' ) ); ?>') +'</td>' +
                                                                 '<td class="num">'+ line.qtyIncoming +'</td>' +
-                                                                '<td class="num">'+ line.qtyReceived +'</td>' +
                                                                 '<td class="num">'+ line.qtyAllocated +'</td>' +
-                                                                '<td class="num">'+ line.qtyStock +'</td>' +
                                                                 '<td>'+ escapeHtml(line.etaOverride) +'</td>' +
+                                                                '<td class="num">'+ line.qtyReceived +'</td>' +
                                                         '</tr>';
                                                 }).join('');
 
                                                 const noteBlock = data.note ? '<div class="lpr-po-print-note"><strong><?php echo esc_js( __( 'Note', 'lpr-backorder-allocator' ) ); ?>:</strong><p>'+ escapeHtml(data.note) +'</p></div>' : '';
-                                                const linesHtml = lineRows || '<tr><td class="empty" colspan="6"><?php echo esc_js( __( 'No PO lines available.', 'lpr-backorder-allocator' ) ); ?></td></tr>';
+                                                const linesHtml = lineRows || '<tr><td class="empty" colspan="5"><?php echo esc_js( __( 'No PO lines available.', 'lpr-backorder-allocator' ) ); ?></td></tr>';
                                                 const statusText = (data.status || '<?php echo esc_js( __( 'Open', 'lpr-backorder-allocator' ) ); ?>').toUpperCase();
 
                                                 return `<!doctype html>
@@ -4429,10 +4425,9 @@ if ( ! class_exists( __NAMESPACE__ . '\\Supplier_PO_Print_PDF' ) ) {
                                                                                 <tr>
                                                                                         <th><?php echo esc_js( __( 'Product line', 'lpr-backorder-allocator' ) ); ?></th>
                                                                                         <th><?php echo esc_js( __( 'Ordered', 'lpr-backorder-allocator' ) ); ?></th>
-                                                                                        <th><?php echo esc_js( __( 'Received', 'lpr-backorder-allocator' ) ); ?></th>
                                                                                         <th><?php echo esc_js( __( 'Allocated', 'lpr-backorder-allocator' ) ); ?></th>
-                                                                                        <th><?php echo esc_js( __( 'For stock', 'lpr-backorder-allocator' ) ); ?></th>
-                                                                                        <th><?php echo esc_js( __( 'ETA', 'lpr-backorder-allocator' ) ); ?></th>
+                                                                                        <th><?php echo esc_js( __( 'ETA Override', 'lpr-backorder-allocator' ) ); ?></th>
+                                                                                        <th><?php echo esc_js( __( 'Received', 'lpr-backorder-allocator' ) ); ?></th>
                                                                                 </tr>
                                                                         </thead>
                                                                         <tbody>${linesHtml}</tbody>
