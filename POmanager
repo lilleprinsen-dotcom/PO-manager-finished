@@ -4001,6 +4001,31 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                         return false;
                 }
 
+                protected static function sanitize_eta_for_frontend( string $eta ): string {
+                        if ( function_exists( __NAMESPACE__ . '\lpr_allocator_sanitize_ymd' ) ) {
+                                return lpr_allocator_sanitize_ymd( $eta );
+                        }
+
+                        $eta = trim( $eta );
+                        return preg_match( '/^\d{4}-\d{2}-\d{2}$/', $eta ) ? $eta : '';
+                }
+
+                protected static function compare_eta_for_frontend( string $a, string $b ): int {
+                        if ( function_exists( __NAMESPACE__ . '\lpr_allocator_compare_dates' ) ) {
+                                return lpr_allocator_compare_dates( $a, $b );
+                        }
+
+                        return strcmp( $a, $b );
+                }
+
+                protected static function live_statuses_for_frontend(): array {
+                        if ( function_exists( __NAMESPACE__ . '\lpr_allocator_live_po_statuses' ) ) {
+                                return lpr_allocator_live_po_statuses();
+                        }
+
+                        return array( 'open', 'partial' );
+                }
+
                 public static function frontend_snapshot_for_product( \WC_Product $product ): array {
                         if ( 'instock' === $product->get_stock_status() ) {
                                 return array( 'qty' => 0, 'eta' => '', 'details' => array() );
@@ -4016,7 +4041,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                                 return array( 'qty' => 0, 'eta' => '', 'details' => array() );
                         }
 
-                        $live_statuses = lpr_allocator_live_po_statuses();
+                        $live_statuses = self::live_statuses_for_frontend();
                         $valid_details  = array();
 
                         foreach ( $details as $row ) {
@@ -4034,7 +4059,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                                         continue;
                                 }
 
-                                $eta      = lpr_allocator_sanitize_ymd( (string) ( $row['eta'] ?? '' ) );
+                                $eta      = self::sanitize_eta_for_frontend( (string) ( $row['eta'] ?? '' ) );
                                 $qty_free = max( 0, (int) ( $row['qty_free'] ?? 0 ) );
 
                                 if ( '' === $eta || $qty_free <= 0 ) {
@@ -4067,7 +4092,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                                         if ( $ea === $eb ) {
                                                 return ( $a['po_id'] ?? 0 ) <=> ( $b['po_id'] ?? 0 );
                                         }
-                                        return lpr_allocator_compare_dates( $ea, $eb );
+                                        return self::compare_eta_for_frontend( $ea, $eb );
                                 }
                         );
 
