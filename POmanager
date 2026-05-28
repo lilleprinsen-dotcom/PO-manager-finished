@@ -15798,8 +15798,22 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ) {
                                                 if ( $po_id <= 0 ) {
                                                         return false;
                                                 }
+
+                                                $qty_free = isset( $row['qty_free'] ) ? max( 0, (int) $row['qty_free'] ) : 0;
+                                                if ( $qty_free <= 0 ) {
+                                                        return false;
+                                                }
+
                                                 $status = get_post_status( $po_id );
-                                                return (bool) ( $status && in_array( $status, $live_statuses, true ) );
+                                                if ( ! $status || ! in_array( $status, $live_statuses, true ) ) {
+                                                        return false;
+                                                }
+
+                                                if ( function_exists( __NAMESPACE__ . '\lpr_allocator_po_is_fully_received' ) && lpr_allocator_po_is_fully_received( $po_id ) ) {
+                                                        return false;
+                                                }
+
+                                                return true;
                                         }
                                 )
                         );
