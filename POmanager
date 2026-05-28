@@ -3832,9 +3832,11 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                                 return false;
                         }
 
-                        // Incoming stock + ETA should always be visible on product pages when data exists,
-                        // regardless of the optional storefront toggle setting.
-                        return true;
+                        if ( function_exists( __NAMESPACE__ . '\lpr_allocator_frontend_incoming_enabled' ) ) {
+                                return lpr_allocator_frontend_incoming_enabled();
+                        }
+
+                        return false;
                 }
 
                 /**
