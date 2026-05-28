@@ -3975,9 +3975,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                                 return '';
                         }
 
-                        if ( 'instock' === $product->get_stock_status() ) {
-                                return '';
-                        }
+                        // Do not hard-block in-stock products: incoming PO ETAs can still be relevant
+                        // (for example on variable products where parent stock status stays in-stock).
 
                         $product_id = (int) $product->get_id();
                         if ( $product_id <= 0 ) {
