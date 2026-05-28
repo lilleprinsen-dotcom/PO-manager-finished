@@ -4029,6 +4029,16 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                                 if ( $qty > 0 && '' !== $eta ) {
                                         return array( 'qty' => $qty, 'eta' => $eta );
                                 }
+
+                                $details = Incoming_Stock_Indexer::get_product_details( $product_id );
+                                if ( $qty > 0 && ! empty( $details ) ) {
+                                        foreach ( $details as $row ) {
+                                                $row_eta = isset( $row['eta'] ) ? trim( (string) $row['eta'] ) : '';
+                                                if ( '' !== $row_eta ) {
+                                                        return array( 'qty' => $qty, 'eta' => $row_eta );
+                                                }
+                                        }
+                                }
                         }
 
                         return array( 'qty' => 0, 'eta' => '' );
