@@ -3966,6 +3966,120 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                  * @param string      $fallback_tpl_key Defaults key to use when template is empty.
                  * @return string
                  */
+
+                protected static function maybe_line_received_for_product( int $po_id, \WC_Product $product ): bool {
+                        $lines = get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', true );
+                        if ( ! is_array( $lines ) || empty( $lines ) ) {
+                                return false;
+                        }
+
+                        $product_id   = (int) $product->get_id();
+                        $variation_id = $product->is_type( 'variation' ) ? $product_id : 0;
+
+                        foreach ( $lines as $line ) {
+                                if ( ! is_array( $line ) ) {
+                                        continue;
+                                }
+
+                                $line_variation_id = isset( $line['variation_id'] ) ? (int) $line['variation_id'] : 0;
+                                $line_product_id   = isset( $line['product_id'] ) ? (int) $line['product_id'] : 0;
+
+                                $matches = false;
+                                if ( $variation_id > 0 ) {
+                                        $matches = $line_variation_id === $variation_id;
+                                } else {
+                                        $matches = $line_product_id === $product_id;
+                                }
+
+                                if ( ! $matches ) {
+                                        continue;
+                                }
+
+                                return ( isset( $line['qty_received'] ) ? (int) $line['qty_received'] : 0 ) > 0;
+                        }
+
+                        return false;
+                }
+
+                public static function frontend_snapshot_for_product( \WC_Product $product ): array {
+                        if ( 'instock' === $product->get_stock_status() ) {
+                                return array( 'qty' => 0, 'eta' => '', 'details' => array() );
+                        }
+
+                        $product_id = (int) $product->get_id();
+                        if ( $product_id <= 0 ) {
+                                return array( 'qty' => 0, 'eta' => '', 'details' => array() );
+                        }
+
+                        $details = get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_INCOMING_DETAILS' ) ? PRODUCT_META_INCOMING_DETAILS : '_lpr_incoming_po_details', true );
+                        if ( ! is_array( $details ) || empty( $details ) ) {
+                                return array( 'qty' => 0, 'eta' => '', 'details' => array() );
+                        }
+
+                        $live_statuses = lpr_allocator_live_po_statuses();
+                        $valid_details  = array();
+
+                        foreach ( $details as $row ) {
+                                if ( ! is_array( $row ) ) {
+                                        continue;
+                                }
+
+                                $po_id = isset( $row['po_id'] ) ? (int) $row['po_id'] : 0;
+                                if ( $po_id <= 0 ) {
+                                        continue;
+                                }
+
+                                $status = get_post_status( $po_id );
+                                if ( ! $status || ! in_array( $status, $live_statuses, true ) ) {
+                                        continue;
+                                }
+
+                                $eta      = lpr_allocator_sanitize_ymd( (string) ( $row['eta'] ?? '' ) );
+                                $qty_free = max( 0, (int) ( $row['qty_free'] ?? 0 ) );
+
+                                if ( '' === $eta || $qty_free <= 0 ) {
+                                        continue;
+                                }
+
+                                if ( array_key_exists( 'qty_received', $row ) ) {
+                                        if ( (int) $row['qty_received'] > 0 ) {
+                                                continue;
+                                        }
+                                } elseif ( self::maybe_line_received_for_product( $po_id, $product ) ) {
+                                        continue;
+                                }
+
+                                $row['eta']          = $eta;
+                                $row['qty_free']     = $qty_free;
+                                $row['qty_received'] = isset( $row['qty_received'] ) ? max( 0, (int) $row['qty_received'] ) : 0;
+                                $valid_details[]     = $row;
+                        }
+
+                        if ( empty( $valid_details ) ) {
+                                return array( 'qty' => 0, 'eta' => '', 'details' => array() );
+                        }
+
+                        usort(
+                                $valid_details,
+                                static function ( $a, $b ) {
+                                        $ea = $a['eta'] ?? '';
+                                        $eb = $b['eta'] ?? '';
+                                        if ( $ea === $eb ) {
+                                                return ( $a['po_id'] ?? 0 ) <=> ( $b['po_id'] ?? 0 );
+                                        }
+                                        return lpr_allocator_compare_dates( $ea, $eb );
+                                }
+                        );
+
+                        $next = $valid_details[0];
+
+                        return array(
+                                'qty'     => (int) ( $next['qty_free'] ?? 0 ),
+                                'eta'     => (string) ( $next['eta'] ?? '' ),
+                                'details' => $valid_details,
+                        );
+                }
+
                 protected static function notice_for_product( $product, string $template_key, string $emoji_flag_key, string $fallback_tpl_key ): string {
                         if ( ! self::is_enabled() ) {
                                 return '';
@@ -3984,13 +4098,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                                 return '';
                         }
 
-                        $qty = (int) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_QTY' ) ? PRODUCT_META_NEXT_EXTRA_QTY : '_lpr_next_extra_qty', true );
-                        if ( $qty <= 0 ) {
-                                return '';
-                        }
-
-                        $eta = trim( (string) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_ETA' ) ? PRODUCT_META_NEXT_EXTRA_ETA : '_lpr_next_extra_eta', true ) );
-                        if ( '' === $eta ) {
+                        $snapshot = self::frontend_snapshot_for_product( $product );
+                        $qty      = (int) ( $snapshot['qty'] ?? 0 );
+                        $eta      = trim( (string) ( $snapshot['eta'] ?? '' ) );
+                        if ( $qty <= 0 || '' === $eta ) {
                                 return '';
                         }
 
@@ -4092,13 +4203,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Cart' ) ) {
                                 return;
                         }
 
-                        $qty = (int) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_QTY' ) ? PRODUCT_META_NEXT_EXTRA_QTY : '_lpr_next_extra_qty', true );
-                        if ( $qty <= 0 ) {
-                                return;
-                        }
-
-                        $eta = trim( (string) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_ETA' ) ? PRODUCT_META_NEXT_EXTRA_ETA : '_lpr_next_extra_eta', true ) );
-                        if ( '' === $eta ) {
+                        $snapshot = Incoming_Stock_Storefront::frontend_snapshot_for_product( $product );
+                        $qty      = (int) ( $snapshot['qty'] ?? 0 );
+                        $eta      = trim( (string) ( $snapshot['eta'] ?? '' ) );
+                        if ( $qty <= 0 || '' === $eta ) {
                                 return;
                         }
 
@@ -4276,8 +4384,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Cart_Eta_Summary' ) ) {
                                         continue;
                                 }
 
-                                $eta_raw = trim( (string) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_ETA' ) ? PRODUCT_META_NEXT_EXTRA_ETA : '_lpr_next_extra_eta', true ) );
-                                if ( '' === $eta_raw ) {
+                                $snapshot = Incoming_Stock_Storefront::frontend_snapshot_for_product( $product );
+                                $eta_raw  = trim( (string) ( $snapshot['eta'] ?? '' ) );
+                                $qty      = (int) ( $snapshot['qty'] ?? 0 );
+                                if ( $qty <= 0 || '' === $eta_raw ) {
                                         continue;
                                 }
 
@@ -15590,7 +15700,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ) {
                                         $free           = max( 0, $qty_ordered - $qty_allocated - $qty_received );
                                         $incoming_total = max( 0, $qty_ordered - $qty_received );
 
-                                        if ( $qty_ordered <= 0 || $qty_received >= $qty_ordered ) {
+                                        if ( $qty_ordered <= 0 || $qty_received > 0 || $qty_received >= $qty_ordered ) {
                                                 continue;
                                         }
 
@@ -15610,6 +15720,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ) {
                                                 'qty_ordered' => $qty_ordered,
                                                 'po_id'       => (int) $po_id,
                                                 'po_number'   => $po_number,
+                                                'qty_received'=> $qty_received,
                                         );
 
                                         if ( ! isset( $incoming_totals[ $target_id ] ) ) {
@@ -15640,25 +15751,37 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ) {
                                         }
                                 );
 
-                                $next_with_free = $entries[0];
-                                foreach ( $entries as $entry ) {
-                                        if ( ( $entry['qty_free'] ?? 0 ) > 0 ) {
-                                                $next_with_free = $entry;
-                                                break;
-                                        }
-                                }
+                                $valid_entries = array_values(
+                                        array_filter(
+                                                $entries,
+                                                static function ( $entry ) {
+                                                        $eta          = lpr_allocator_sanitize_ymd( (string) ( $entry['eta'] ?? '' ) );
+                                                        $qty_free     = max( 0, (int) ( $entry['qty_free'] ?? 0 ) );
+                                                        $qty_received = max( 0, (int) ( $entry['qty_received'] ?? 0 ) );
+                                                        return '' !== $eta && $qty_free > 0 && $qty_received <= 0;
+                                                }
+                                        )
+                                );
 
-                                update_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_QTY' ) ? PRODUCT_META_NEXT_EXTRA_QTY : '_lpr_next_extra_qty', (int) ( $next_with_free['qty_free'] ?? 0 ) );
-                                update_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_ETA' ) ? PRODUCT_META_NEXT_EXTRA_ETA : '_lpr_next_extra_eta', (string) ( $next_with_free['eta'] ?? '' ) );
-                                update_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_INCOMING_DETAILS' ) ? PRODUCT_META_INCOMING_DETAILS : '_lpr_incoming_po_details', $entries );
-                                update_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_INCOMING_TOTAL' ) ? PRODUCT_META_INCOMING_TOTAL : '_lpr_incoming_po_total', (int) ( $incoming_totals[ $product_id ] ?? 0 ) );
-                                self::update_feed_availability_date( (int) $product_id, $next_with_free );
+                                if ( empty( $valid_entries ) ) {
+                                        delete_post_meta( (int) $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_QTY' ) ? PRODUCT_META_NEXT_EXTRA_QTY : '_lpr_next_extra_qty' );
+                                        delete_post_meta( (int) $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_ETA' ) ? PRODUCT_META_NEXT_EXTRA_ETA : '_lpr_next_extra_eta' );
+                                        delete_post_meta( (int) $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_INCOMING_DETAILS' ) ? PRODUCT_META_INCOMING_DETAILS : '_lpr_incoming_po_details' );
+                                        delete_post_meta( (int) $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_INCOMING_TOTAL' ) ? PRODUCT_META_INCOMING_TOTAL : '_lpr_incoming_po_total' );
+                                        delete_post_meta( (int) $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_FEED_AVAILABILITY_DATE' ) ? PRODUCT_META_FEED_AVAILABILITY_DATE : '_wt_feed_availability_date' );
+                                } else {
+                                        $next_with_free = $valid_entries[0];
+                                        update_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_QTY' ) ? PRODUCT_META_NEXT_EXTRA_QTY : '_lpr_next_extra_qty', (int) ( $next_with_free['qty_free'] ?? 0 ) );
+                                        update_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_ETA' ) ? PRODUCT_META_NEXT_EXTRA_ETA : '_lpr_next_extra_eta', (string) ( $next_with_free['eta'] ?? '' ) );
+                                        update_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_INCOMING_DETAILS' ) ? PRODUCT_META_INCOMING_DETAILS : '_lpr_incoming_po_details', $valid_entries );
+                                        update_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_INCOMING_TOTAL' ) ? PRODUCT_META_INCOMING_TOTAL : '_lpr_incoming_po_total', (int) ( $incoming_totals[ $product_id ] ?? 0 ) );
+                                        self::update_feed_availability_date( (int) $product_id, $next_with_free );
+                                        $new_ids[] = (int) $product_id;
+                                }
 
                                 if ( function_exists( 'wc_delete_product_transients' ) ) {
                                         wc_delete_product_transients( $product_id );
                                 }
-
-                                $new_ids[] = (int) $product_id;
                         }
 
                         $prev_ids = get_option( self::OPTION_LAST_IDS, array() );
