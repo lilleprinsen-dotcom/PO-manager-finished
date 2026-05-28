@@ -3984,13 +3984,12 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                                 return '';
                         }
 
-                        $snapshot = class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ? Incoming_Stock_Indexer::get_product_snapshot( $product_id ) : array();
-                        $qty      = (int) ( $snapshot['qty'] ?? 0 );
+                        $qty = (int) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_QTY' ) ? PRODUCT_META_NEXT_EXTRA_QTY : '_lpr_next_extra_qty', true );
                         if ( $qty <= 0 ) {
                                 return '';
                         }
 
-                        $eta = trim( (string) ( $snapshot['eta'] ?? '' ) );
+                        $eta = trim( (string) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_ETA' ) ? PRODUCT_META_NEXT_EXTRA_ETA : '_lpr_next_extra_eta', true ) );
                         if ( '' === $eta ) {
                                 return '';
                         }
@@ -4093,13 +4092,12 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Cart' ) ) {
                                 return;
                         }
 
-                        $snapshot = class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ? Incoming_Stock_Indexer::get_product_snapshot( $product_id ) : array();
-                        $qty      = (int) ( $snapshot['qty'] ?? 0 );
+                        $qty = (int) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_QTY' ) ? PRODUCT_META_NEXT_EXTRA_QTY : '_lpr_next_extra_qty', true );
                         if ( $qty <= 0 ) {
                                 return;
                         }
 
-                        $eta = trim( (string) ( $snapshot['eta'] ?? '' ) );
+                        $eta = trim( (string) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_ETA' ) ? PRODUCT_META_NEXT_EXTRA_ETA : '_lpr_next_extra_eta', true ) );
                         if ( '' === $eta ) {
                                 return;
                         }
@@ -15744,43 +15742,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ) {
                  * Read-only helpers for UI consumers.
                  */
                 public static function get_product_snapshot( int $product_id ): array {
-                        $qty_meta_key = defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_QTY' ) ? PRODUCT_META_NEXT_EXTRA_QTY : '_lpr_next_extra_qty';
-                        $eta_meta_key = defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_ETA' ) ? PRODUCT_META_NEXT_EXTRA_ETA : '_lpr_next_extra_eta';
-
-                        $details = self::get_product_details( $product_id );
-                        $next    = array(
-                                'qty_free' => 0,
-                                'eta'      => '',
-                        );
-
-                        if ( ! empty( $details ) ) {
-                                $next = $details[0];
-                                foreach ( $details as $entry ) {
-                                        if ( (int) ( $entry['qty_free'] ?? 0 ) > 0 ) {
-                                                $next = $entry;
-                                                break;
-                                        }
-                                }
-                        }
-
-                        $computed_qty = max( 0, (int) ( $next['qty_free'] ?? 0 ) );
-                        $computed_eta = (string) ( $next['eta'] ?? '' );
-                        $stored_qty   = (int) get_post_meta( $product_id, $qty_meta_key, true );
-                        $stored_eta   = (string) get_post_meta( $product_id, $eta_meta_key, true );
-
-                        if ( $stored_qty !== $computed_qty ) {
-                                update_post_meta( $product_id, $qty_meta_key, $computed_qty );
-                        }
-                        if ( $stored_eta !== $computed_eta ) {
-                                update_post_meta( $product_id, $eta_meta_key, $computed_eta );
-                        }
-
-                        self::update_feed_availability_date( $product_id, $next );
-
                         return array(
-                                'qty'      => $computed_qty,
-                                'eta'      => $computed_eta,
-                                'details'  => $details,
+                                'qty'      => (int) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_QTY' ) ? PRODUCT_META_NEXT_EXTRA_QTY : '_lpr_next_extra_qty', true ),
+                                'eta'      => (string) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_ETA' ) ? PRODUCT_META_NEXT_EXTRA_ETA : '_lpr_next_extra_eta', true ),
+                                'details'  => self::get_product_details( $product_id ),
                         );
                 }
 
