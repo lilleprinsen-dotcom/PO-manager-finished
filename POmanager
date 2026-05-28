@@ -331,7 +331,7 @@ if ( ! function_exists( __NAMESPACE__ . '\lpr_allocator_generate_ai_assistant_re
                 } ) ) : array();
 
                 if ( ! empty( $intent['no_bullets'] ) ) {
-                        foreach ( $lines as $line ) {
+                        foreach ( $lines as $line_index => $line ) {
                                 if ( preg_match( '/^[-*•]\s+/u', $line ) ) {
                                         $reasons[] = 'Bullets were used despite no-bullets request.';
                                         break;
@@ -3967,145 +3967,281 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                  * @return string
                  */
 
-                protected static function maybe_line_received_for_product( int $po_id, \WC_Product $product ): bool {
-                        $lines = get_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', true );
-                        if ( ! is_array( $lines ) || empty( $lines ) ) {
-                                return false;
-                        }
-
-                        $product_id   = (int) $product->get_id();
-                        $variation_id = $product->is_type( 'variation' ) ? $product_id : 0;
-
-                        foreach ( $lines as $line ) {
-                                if ( ! is_array( $line ) ) {
-                                        continue;
-                                }
-
-                                $line_variation_id = isset( $line['variation_id'] ) ? (int) $line['variation_id'] : 0;
-                                $line_product_id   = isset( $line['product_id'] ) ? (int) $line['product_id'] : 0;
-
-                                $matches = false;
-                                if ( $variation_id > 0 ) {
-                                        $matches = $line_variation_id === $variation_id;
-                                } else {
-                                        $matches = $line_product_id === $product_id;
-                                }
-
-                                if ( ! $matches ) {
-                                        continue;
-                                }
-
-                                return ( isset( $line['qty_received'] ) ? (int) $line['qty_received'] : 0 ) > 0;
-                        }
-
-                        return false;
-                }
-
-                protected static function sanitize_eta_for_frontend( string $eta ): string {
-                        if ( function_exists( __NAMESPACE__ . '\lpr_allocator_sanitize_ymd' ) ) {
-                                return lpr_allocator_sanitize_ymd( $eta );
-                        }
-
-                        $eta = trim( $eta );
-                        return preg_match( '/^\d{4}-\d{2}-\d{2}$/', $eta ) ? $eta : '';
-                }
-
-                protected static function compare_eta_for_frontend( string $a, string $b ): int {
-                        if ( function_exists( __NAMESPACE__ . '\lpr_allocator_compare_dates' ) ) {
-                                return lpr_allocator_compare_dates( $a, $b );
-                        }
-
-                        return strcmp( $a, $b );
-                }
-
                 protected static function live_statuses_for_frontend(): array {
-                        if ( function_exists( __NAMESPACE__ . '\lpr_allocator_live_po_statuses' ) ) {
-                                return lpr_allocator_live_po_statuses();
-                        }
+        if ( function_exists( __NAMESPACE__ . '\lpr_allocator_live_po_statuses' ) ) {
+                return lpr_allocator_live_po_statuses();
+        }
 
-                        return array( 'open', 'partial' );
+        $statuses = array(
+                defined( __NAMESPACE__ . '\PO_STATUS_OPEN' ) ? PO_STATUS_OPEN : 'open',
+        );
+
+        $statuses[] = defined( __NAMESPACE__ . '\PO_STATUS_PARTIAL' ) ? PO_STATUS_PARTIAL : 'partial';
+
+        return array_values( array_unique( array_filter( $statuses ) ) );
+}
+
+protected static function parse_date_for_frontend( string $value ): ?\DateTimeImmutable {
+        $value = trim( $value );
+        if ( '' === $value ) {
+                return null;
+        }
+
+        if ( function_exists( __NAMESPACE__ . '\lpr_allocator_parse_date' ) ) {
+                $parsed = lpr_allocator_parse_date( $value );
+                if ( $parsed instanceof \DateTimeImmutable ) {
+                        return $parsed;
+                }
+        }
+
+        $tz      = function_exists( 'wp_timezone' ) ? wp_timezone() : new \DateTimeZone( 'UTC' );
+        $formats = array(
+                '!d-m-Y H:i:s',
+                '!d-m-Y H:i',
+                '!d-m-Y',
+                '!d-m-y H:i:s',
+                '!d-m-y H:i',
+                '!d-m-y',
+                '!Y-m-d H:i:s',
+                '!Y-m-d H:i',
+                '!Y-m-d',
+        );
+
+        foreach ( $formats as $format ) {
+                $display = ltrim( $format, '!' );
+                $date    = \DateTimeImmutable::createFromFormat( $format, $value, $tz );
+
+                if ( $date instanceof \DateTimeImmutable && $date->format( $display ) === $value ) {
+                        return $date;
+                }
+        }
+
+        return null;
+}
+
+protected static function sanitize_eta_for_frontend( string $eta ): string {
+        if ( function_exists( __NAMESPACE__ . '\lpr_allocator_sanitize_ymd' ) ) {
+                return lpr_allocator_sanitize_ymd( $eta );
+        }
+
+        $date = self::parse_date_for_frontend( $eta );
+
+        return $date instanceof \DateTimeImmutable ? $date->format( 'd-m-Y' ) : '';
+}
+
+protected static function date_to_timestamp_for_frontend( string $value ): int {
+        if ( function_exists( __NAMESPACE__ . '\lpr_allocator_date_to_timestamp' ) ) {
+                return (int) lpr_allocator_date_to_timestamp( $value );
+        }
+
+        $date = self::parse_date_for_frontend( $value );
+
+        return $date instanceof \DateTimeImmutable ? (int) $date->getTimestamp() : 0;
+}
+
+protected static function compare_eta_for_frontend( string $a, string $b ): int {
+        if ( function_exists( __NAMESPACE__ . '\lpr_allocator_compare_dates' ) ) {
+                return lpr_allocator_compare_dates( $a, $b );
+        }
+
+        $ta = self::date_to_timestamp_for_frontend( $a );
+        $tb = self::date_to_timestamp_for_frontend( $b );
+
+        if ( $ta === $tb ) {
+                return 0;
+        }
+
+        if ( 0 === $ta ) {
+                return 1;
+        }
+
+        if ( 0 === $tb ) {
+                return -1;
+        }
+
+        return $ta <=> $tb;
+}
+
+protected static function po_line_matches_product_for_frontend( array $line, \WC_Product $product ): bool {
+        $product_id   = (int) $product->get_id();
+        $variation_id = $product->is_type( 'variation' ) ? $product_id : 0;
+
+        $line_variation_id = isset( $line['variation_id'] ) ? absint( $line['variation_id'] ) : 0;
+        $line_product_id   = isset( $line['product_id'] ) ? absint( $line['product_id'] ) : 0;
+
+        if ( $variation_id > 0 ) {
+                return $line_variation_id === $variation_id;
+        }
+
+        return $line_variation_id <= 0 && $line_product_id === $product_id;
+}
+
+protected static function live_incoming_line_for_detail_row( int $po_id, array $row, \WC_Product $product ): array {
+        if ( $po_id <= 0 ) {
+                return array();
+        }
+
+        $lines = get_post_meta(
+                $po_id,
+                defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines',
+                true
+        );
+
+        if ( ! is_array( $lines ) || empty( $lines ) ) {
+                return array();
+        }
+
+        $build_result = static function ( array $line, int $line_index ) use ( $po_id, $product ): array {
+                if ( ! Incoming_Stock_Storefront::po_line_matches_product_for_frontend( $line, $product ) ) {
+                        return array();
                 }
 
-                public static function frontend_snapshot_for_product( \WC_Product $product ): array {
-                        if ( 'instock' === $product->get_stock_status() ) {
-                                return array( 'qty' => 0, 'eta' => '', 'details' => array() );
-                        }
+                $qty_ordered   = isset( $line['qty_ordered'] ) ? max( 0, (int) $line['qty_ordered'] ) : 0;
+                $qty_allocated = isset( $line['qty_allocated'] ) ? max( 0, (int) $line['qty_allocated'] ) : 0;
+                $qty_received  = isset( $line['qty_received'] ) ? max( 0, (int) $line['qty_received'] ) : 0;
+                $qty_free      = max( 0, $qty_ordered - $qty_allocated - $qty_received );
 
-                        $product_id = (int) $product->get_id();
-                        if ( $product_id <= 0 ) {
-                                return array( 'qty' => 0, 'eta' => '', 'details' => array() );
-                        }
+                if ( $qty_ordered <= 0 || $qty_received > 0 || $qty_free <= 0 ) {
+                        return array();
+                }
 
-                        $details = get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_INCOMING_DETAILS' ) ? PRODUCT_META_INCOMING_DETAILS : '_lpr_incoming_po_details', true );
-                        if ( ! is_array( $details ) || empty( $details ) ) {
-                                return array( 'qty' => 0, 'eta' => '', 'details' => array() );
-                        }
-
-                        $live_statuses = self::live_statuses_for_frontend();
-                        $valid_details  = array();
-
-                        foreach ( $details as $row ) {
-                                if ( ! is_array( $row ) ) {
-                                        continue;
-                                }
-
-                                $po_id = isset( $row['po_id'] ) ? (int) $row['po_id'] : 0;
-                                if ( $po_id <= 0 ) {
-                                        continue;
-                                }
-
-                                $status = get_post_status( $po_id );
-                                if ( ! $status || ! in_array( $status, $live_statuses, true ) ) {
-                                        continue;
-                                }
-
-                                $eta      = self::sanitize_eta_for_frontend( (string) ( $row['eta'] ?? '' ) );
-                                $qty_free = max( 0, (int) ( $row['qty_free'] ?? 0 ) );
-
-                                if ( '' === $eta || $qty_free <= 0 ) {
-                                        continue;
-                                }
-
-                                if ( array_key_exists( 'qty_received', $row ) ) {
-                                        if ( (int) $row['qty_received'] > 0 ) {
-                                                continue;
-                                        }
-                                } elseif ( self::maybe_line_received_for_product( $po_id, $product ) ) {
-                                        continue;
-                                }
-
-                                $row['eta']          = $eta;
-                                $row['qty_free']     = $qty_free;
-                                $row['qty_received'] = isset( $row['qty_received'] ) ? max( 0, (int) $row['qty_received'] ) : 0;
-                                $valid_details[]     = $row;
-                        }
-
-                        if ( empty( $valid_details ) ) {
-                                return array( 'qty' => 0, 'eta' => '', 'details' => array() );
-                        }
-
-                        usort(
-                                $valid_details,
-                                static function ( $a, $b ) {
-                                        $ea = $a['eta'] ?? '';
-                                        $eb = $b['eta'] ?? '';
-                                        if ( $ea === $eb ) {
-                                                return ( $a['po_id'] ?? 0 ) <=> ( $b['po_id'] ?? 0 );
-                                        }
-                                        return self::compare_eta_for_frontend( $ea, $eb );
-                                }
-                        );
-
-                        $next = $valid_details[0];
-
-                        return array(
-                                'qty'     => (int) ( $next['qty_free'] ?? 0 ),
-                                'eta'     => (string) ( $next['eta'] ?? '' ),
-                                'details' => $valid_details,
+                $eta = Incoming_Stock_Storefront::sanitize_eta_for_frontend( (string) ( $line['eta_override'] ?? '' ) );
+                if ( '' === $eta ) {
+                        $eta = Incoming_Stock_Storefront::sanitize_eta_for_frontend(
+                                (string) get_post_meta(
+                                        $po_id,
+                                        defined( __NAMESPACE__ . '\PO_META_ETA_DATE' ) ? PO_META_ETA_DATE : '_lpr_eta_date',
+                                        true
+                                )
                         );
                 }
 
-                protected static function notice_for_product( $product, string $template_key, string $emoji_flag_key, string $fallback_tpl_key ): string {
+                if ( '' === $eta ) {
+                        return array();
+                }
+
+                return array(
+                        'line_index'    => $line_index,
+                        'qty_ordered'   => $qty_ordered,
+                        'qty_allocated' => $qty_allocated,
+                        'qty_received'  => $qty_received,
+                        'qty_free'      => $qty_free,
+                        'eta'           => $eta,
+                );
+        };
+
+        if ( array_key_exists( 'line_index', $row ) ) {
+                $line_index = (int) $row['line_index'];
+                if ( $line_index < 0 || ! isset( $lines[ $line_index ] ) || ! is_array( $lines[ $line_index ] ) ) {
+                        return array();
+                }
+
+                return $build_result( (array) $lines[ $line_index ], $line_index );
+        }
+
+        foreach ( $lines as $line_index => $line ) {
+                if ( ! is_array( $line ) ) {
+                        continue;
+                }
+
+                $result = $build_result( $line, (int) $line_index );
+                if ( ! empty( $result ) ) {
+                        return $result;
+                }
+        }
+
+        return array();
+}
+
+public static function frontend_snapshot_for_product( \WC_Product $product ): array {
+        if ( 'instock' === $product->get_stock_status() ) {
+                return array( 'qty' => 0, 'eta' => '', 'details' => array() );
+        }
+
+        $product_id = (int) $product->get_id();
+        if ( $product_id <= 0 ) {
+                return array( 'qty' => 0, 'eta' => '', 'details' => array() );
+        }
+
+        $details = get_post_meta(
+                $product_id,
+                defined( __NAMESPACE__ . '\PRODUCT_META_INCOMING_DETAILS' ) ? PRODUCT_META_INCOMING_DETAILS : '_lpr_incoming_po_details',
+                true
+        );
+
+        if ( ! is_array( $details ) || empty( $details ) ) {
+                return array( 'qty' => 0, 'eta' => '', 'details' => array() );
+        }
+
+        $live_statuses = self::live_statuses_for_frontend();
+        $valid_details = array();
+
+        foreach ( $details as $row ) {
+                if ( ! is_array( $row ) ) {
+                        continue;
+                }
+
+                $po_id = isset( $row['po_id'] ) ? (int) $row['po_id'] : 0;
+                if ( $po_id <= 0 ) {
+                        continue;
+                }
+
+                $status = get_post_status( $po_id );
+                if ( ! $status || ! in_array( $status, $live_statuses, true ) ) {
+                        continue;
+                }
+
+                $live_line = self::live_incoming_line_for_detail_row( $po_id, $row, $product );
+                if ( empty( $live_line ) ) {
+                        continue;
+                }
+
+                $eta      = self::sanitize_eta_for_frontend( (string) ( $live_line['eta'] ?? '' ) );
+                $qty_free = max( 0, (int) ( $live_line['qty_free'] ?? 0 ) );
+
+                if ( '' === $eta || $qty_free <= 0 ) {
+                        continue;
+                }
+
+                $row['eta']           = $eta;
+                $row['qty_free']      = $qty_free;
+                $row['qty_ordered']   = max( 0, (int) ( $live_line['qty_ordered'] ?? 0 ) );
+                $row['qty_allocated'] = max( 0, (int) ( $live_line['qty_allocated'] ?? 0 ) );
+                $row['qty_received']  = max( 0, (int) ( $live_line['qty_received'] ?? 0 ) );
+                $row['line_index']    = max( 0, (int) ( $live_line['line_index'] ?? 0 ) );
+
+                $valid_details[] = $row;
+        }
+
+        if ( empty( $valid_details ) ) {
+                return array( 'qty' => 0, 'eta' => '', 'details' => array() );
+        }
+
+        usort(
+                $valid_details,
+                static function ( $a, $b ) {
+                        $ea = (string) ( $a['eta'] ?? '' );
+                        $eb = (string) ( $b['eta'] ?? '' );
+
+                        if ( $ea === $eb ) {
+                                return ( (int) ( $a['po_id'] ?? 0 ) ) <=> ( (int) ( $b['po_id'] ?? 0 ) );
+                        }
+
+                        return Incoming_Stock_Storefront::compare_eta_for_frontend( $ea, $eb );
+                }
+        );
+
+        $next = $valid_details[0];
+
+        return array(
+                'qty'     => (int) ( $next['qty_free'] ?? 0 ),
+                'eta'     => (string) ( $next['eta'] ?? '' ),
+                'details' => $valid_details,
+        );
+}
+
+
+protected static function notice_for_product( $product, string $template_key, string $emoji_flag_key, string $fallback_tpl_key ): string {
                         if ( ! self::is_enabled() ) {
                                 return '';
                         }
@@ -11118,6 +11254,10 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_FIFO_Allocator' ) ) {
                         // Persist updated lines only once.
                         update_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', $lines );
 
+                if ( class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ) {
+                        Incoming_Stock_Indexer::refresh_now();
+                }
+
 			// Recompute ETAs for all affected orders (one pass).
 			if ( ! empty( $affected_orders ) && class_exists( __NAMESPACE__ . '\ETA' ) ) {
 				foreach ( array_keys( $affected_orders ) as $oid ) {
@@ -15718,7 +15858,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ) {
                                         return;
                                 }
 
-                                foreach ( $lines as $line ) {
+                                foreach ( $lines as $line_index => $line ) {
                                         $qty_ordered    = isset( $line['qty_ordered'] ) ? max( 0, (int) $line['qty_ordered'] ) : 0;
                                         $qty_allocated  = isset( $line['qty_allocated'] ) ? max( 0, (int) $line['qty_allocated'] ) : 0;
                                         $qty_received   = isset( $line['qty_received'] ) ? max( 0, (int) $line['qty_received'] ) : 0;
@@ -15740,12 +15880,14 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ) {
                                         }
 
                                         $products[ $target_id ][] = array(
-                                                'eta'         => $eta,
-                                                'qty_free'    => $free,
-                                                'qty_ordered' => $qty_ordered,
-                                                'po_id'       => (int) $po_id,
-                                                'po_number'   => $po_number,
-                                                'qty_received'=> $qty_received,
+                                                'eta'           => $eta,
+                                                'qty_free'      => $free,
+                                                'qty_ordered'   => $qty_ordered,
+                                                'qty_allocated' => $qty_allocated,
+                                                'po_id'         => (int) $po_id,
+                                                'po_number'     => $po_number,
+                                                'line_index'    => (int) $line_index,
+                                                'qty_received'  => $qty_received,
                                         );
 
                                         if ( ! isset( $incoming_totals[ $target_id ] ) ) {
@@ -17734,6 +17876,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
             $po_type = defined( __NAMESPACE__ . '\CPT_SUPPLIER_PO' ) ? CPT_SUPPLIER_PO : 'supplier_po';
             $updated = 0;
             $created = 0;
+            $needs_incoming_refresh = false;
 
             if ( ! empty( $_POST['pos'] ) && is_array( $_POST['pos'] ) ) {
                 foreach ( $_POST['pos'] as $po_id => $payload ) {
@@ -17774,9 +17917,38 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
 
                     $eta_changed  = $header['eta'] !== $prev_eta;
                     $line_changed = lpr_allocator_extract_po_line_eta_overrides( $lines ) !== $prev_line_map;
+
+                    $incoming_changed = true;
+                    if ( is_array( $prev_lines ) ) {
+                        $prev_signature = md5(
+                            (string) wp_json_encode(
+                                array(
+                                    'status' => (string) $post->post_status,
+                                    'eta'    => $prev_eta,
+                                    'lines'  => $prev_lines,
+                                )
+                            )
+                        );
+                        $new_signature = md5(
+                            (string) wp_json_encode(
+                                array(
+                                    'status' => (string) $header['status'],
+                                    'eta'    => (string) $header['eta'],
+                                    'lines'  => $lines,
+                                )
+                            )
+                        );
+                        $incoming_changed = $prev_signature !== $new_signature;
+                    }
+
+                    if ( $incoming_changed ) {
+                        $needs_incoming_refresh = true;
+                    }
+
                     if ( ( $eta_changed || $line_changed ) && function_exists( __NAMESPACE__ . '\lpr_allocator_update_order_line_etas_for_po' ) ) {
                         lpr_allocator_update_order_line_etas_for_po( $po_id );
                     }
+
                     $updated++;
                 }
             }
@@ -17812,6 +17984,7 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
                     update_post_meta( $post_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', $lines );
 
                     $created++;
+                    $needs_incoming_refresh = true;
                 }
             }
 
@@ -17820,6 +17993,10 @@ if ( ! class_exists( __NAMESPACE__ . '\PO_Bulk_Editor_Page' ) ) {
             }
             if ( $created > 0 ) {
                 $messages[] = sprintf( _n( 'Created %d purchase order.', 'Created %d purchase orders.', $created, 'lpr-backorder-allocator' ), $created );
+            }
+
+            if ( $needs_incoming_refresh && class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ) {
+                Incoming_Stock_Indexer::refresh_now();
             }
 
             return array( $messages, $errors );
@@ -27955,9 +28132,13 @@ if ( ! class_exists( __NAMESPACE__ . '\Quick_PO_Add_Handler' ) ) {
 				$lines[] = $new;
 			}
 
-			update_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', $lines );
+				update_post_meta( $po_id, defined( __NAMESPACE__ . '\PO_META_LINES' ) ? PO_META_LINES : '_lpr_po_lines', $lines );
 
-			wp_safe_redirect( add_query_arg( array( 'lpr_added' => '1', 'po_id' => (int) $po_id ), $redirect ) );
+				if ( class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ) {
+				        Incoming_Stock_Indexer::refresh_now();
+				}
+
+				wp_safe_redirect( add_query_arg( array( 'lpr_added' => '1', 'po_id' => (int) $po_id ), $redirect ) );
 			exit;
 		}
 	}
