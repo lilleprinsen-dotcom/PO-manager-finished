@@ -3984,13 +3984,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                                 return '';
                         }
 
-                        $qty = (int) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_QTY' ) ? PRODUCT_META_NEXT_EXTRA_QTY : '_lpr_next_extra_qty', true );
-                        if ( $qty <= 0 ) {
-                                return '';
-                        }
-
-                        $eta = trim( (string) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_ETA' ) ? PRODUCT_META_NEXT_EXTRA_ETA : '_lpr_next_extra_eta', true ) );
-                        if ( '' === $eta ) {
+                        $incoming = self::resolve_live_incoming_snapshot( $product_id );
+                        $qty      = (int) ( $incoming['qty'] ?? 0 );
+                        $eta      = trim( (string) ( $incoming['eta'] ?? '' ) );
+                        if ( $qty <= 0 || '' === $eta ) {
                                 return '';
                         }
 
@@ -4015,6 +4012,50 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Storefront' ) ) {
                         $notice = ( $use_emoji ? '🏭 ' : '' ) . $notice;
 
                         return sprintf( '<span class="lpr-incoming-notice" style="color:%s;">%s</span>', esc_attr( $color ), $notice );
+                }
+
+                /**
+                 * Resolve incoming qty/ETA from live PO rows only.
+                 */
+                public static function resolve_live_incoming_snapshot( int $product_id ): array {
+                        if ( $product_id <= 0 ) {
+                                return array( 'qty' => 0, 'eta' => '' );
+                        }
+
+                        if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Indexer' ) ) {
+                                return array( 'qty' => 0, 'eta' => '' );
+                        }
+
+                        $candidate_ids = array( $product_id );
+                        if ( function_exists( 'wc_get_product' ) ) {
+                                $product = wc_get_product( $product_id );
+                                if ( $product instanceof \WC_Product_Variation ) {
+                                        $parent_id = (int) $product->get_parent_id();
+                                        if ( $parent_id > 0 ) {
+                                                $candidate_ids[] = $parent_id;
+                                        }
+                                }
+                        }
+
+                        foreach ( array_values( array_unique( array_filter( array_map( 'absint', $candidate_ids ) ) ) ) as $candidate_id ) {
+                                $snapshot = Incoming_Stock_Indexer::get_product_snapshot( $candidate_id );
+                                $qty      = isset( $snapshot['qty'] ) ? max( 0, (int) $snapshot['qty'] ) : 0;
+                                $eta      = isset( $snapshot['eta'] ) ? trim( (string) $snapshot['eta'] ) : '';
+                                if ( $qty > 0 && '' !== $eta ) {
+                                        return array( 'qty' => $qty, 'eta' => $eta );
+                                }
+
+                                $details = isset( $snapshot['details'] ) && is_array( $snapshot['details'] ) ? $snapshot['details'] : array();
+                                foreach ( $details as $entry ) {
+                                        $free = isset( $entry['qty_free'] ) ? max( 0, (int) $entry['qty_free'] ) : 0;
+                                        $row_eta = isset( $entry['eta'] ) ? trim( (string) $entry['eta'] ) : '';
+                                        if ( $free > 0 && '' !== $row_eta ) {
+                                                return array( 'qty' => $free, 'eta' => $row_eta );
+                                        }
+                                }
+                        }
+
+                        return array( 'qty' => 0, 'eta' => '' );
                 }
 
         }
@@ -4092,13 +4133,10 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Cart' ) ) {
                                 return;
                         }
 
-                        $qty = (int) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_QTY' ) ? PRODUCT_META_NEXT_EXTRA_QTY : '_lpr_next_extra_qty', true );
-                        if ( $qty <= 0 ) {
-                                return;
-                        }
-
-                        $eta = trim( (string) get_post_meta( $product_id, defined( __NAMESPACE__ . '\PRODUCT_META_NEXT_EXTRA_ETA' ) ? PRODUCT_META_NEXT_EXTRA_ETA : '_lpr_next_extra_eta', true ) );
-                        if ( '' === $eta ) {
+                        $incoming = Incoming_Stock_Storefront::resolve_live_incoming_snapshot( $product_id );
+                        $qty      = (int) ( $incoming['qty'] ?? 0 );
+                        $eta      = trim( (string) ( $incoming['eta'] ?? '' ) );
+                        if ( $qty <= 0 || '' === $eta ) {
                                 return;
                         }
 
