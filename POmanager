@@ -4414,9 +4414,8 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Cart_Eta_Summary' ) ) {
                                 return;
                         }
 
-                        add_action( 'woocommerce_cart_totals_before_order_total', array( __CLASS__, 'render_cart_totals_row' ), 15 );
-
                         if ( self::checkout_summary_enabled() ) {
+                                add_action( 'woocommerce_cart_totals_before_order_total', array( __CLASS__, 'render_cart_totals_row' ), 15 );
                                 add_action( 'woocommerce_review_order_before_order_total', array( __CLASS__, 'render_checkout_totals_row' ), 15 );
                                 add_action( 'woocommerce_before_checkout_form', array( __CLASS__, 'render_checkout_summary' ), 8 );
                         }
