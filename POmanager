@@ -1004,7 +1004,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
                                 'frontend_notice_template'      => __( '%qty% units expected (ETA %eta%)', 'lpr-backorder-allocator' ),
                                 'frontend_notice_color'         => '#2f855a',
                                 'frontend_cart_notice_template' => __( 'Next free stock: %qty% units expected (ETA %eta%)', 'lpr-backorder-allocator' ),
-                                'frontend_checkout_eta_summary' => true,
+                                'frontend_checkout_eta_summary' => false,
                                 'frontend_refresh_interval'     => 900,
                                 'backorder_index_interval'      => 21600,
                                 'auto_allocation_interval'      => 0,
@@ -1752,7 +1752,7 @@ if ( ! class_exists( __NAMESPACE__ . '\Admin_Settings_Tab' ) ) {
                                         'desc'    => __( 'Show the estimated shipment date summary on checkout only.', 'lpr-backorder-allocator' ),
                                         'id'      => 'lpr_allocator_frontend_checkout_eta_summary',
                                         'type'    => 'checkbox',
-                                        'default' => 'yes',
+                                        'default' => 'no',
                                 ),
 
 
@@ -4427,13 +4427,13 @@ if ( ! class_exists( __NAMESPACE__ . '\Incoming_Stock_Cart_Eta_Summary' ) ) {
                  */
                 protected static function checkout_summary_enabled(): bool {
                         if ( ! class_exists( __NAMESPACE__ . '\Settings' ) ) {
-                                return true;
+                                return false;
                         }
 
                         $settings = Settings::get();
 
                         if ( ! isset( $settings['frontend_checkout_eta_summary'] ) ) {
-                                return true;
+                                return false;
                         }
 
                         $setting = $settings['frontend_checkout_eta_summary'];
